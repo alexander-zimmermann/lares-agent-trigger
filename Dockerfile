@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.27
+FROM python:3.14-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# git: the nats-bridge-core dependency is a git tag, not a PyPI release.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir uv
+
+WORKDIR /build
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+
+RUN uv venv /opt/venv \
+ && . /opt/venv/bin/activate \
+ && uv pip install --no-cache '.'
+
+FROM python:3.14-slim
+
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN groupadd --system --gid 1000 app \
+ && useradd --system --uid 1000 --gid app --home /app --shell /usr/sbin/nologin app \
+ && mkdir -p /app /etc/lares-agent-trigger \
+ && chown -R app:app /app /etc/lares-agent-trigger
+
+COPY --from=builder /opt/venv /opt/venv
+
+USER app
+WORKDIR /app
+
+EXPOSE 9090
+
+ENTRYPOINT ["lares-agent-trigger"]
