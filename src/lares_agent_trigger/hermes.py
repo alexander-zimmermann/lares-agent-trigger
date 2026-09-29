@@ -4,11 +4,17 @@ The Runs API takes no toolset list, so what an API run may see is decided in
 the harness configuration (`platform_toolsets.api_server`, the read server
 only) and not here. It takes no skill field either, which is why the use
 case's skill is named in the instructions.
+
+`input` is the user message of the run, so it is a string or a list of
+messages — the gateway reads a string as the message and takes `content` off
+the last entry of a list, and anything else is a 400. The pointer therefore
+travels as compact JSON inside that string.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
@@ -85,7 +91,10 @@ class HermesClient:
         model routes this one request to it; without a pin the gateway's own
         default and its fallback chain decide.
         """
-        body: dict[str, Any] = {"input": run_input, "instructions": instructions}
+        body: dict[str, Any] = {
+            "input": json.dumps(run_input, ensure_ascii=False, separators=(",", ":")),
+            "instructions": instructions,
+        }
         if model is not None:
             body["model"] = model
         response = await self._client.post(
