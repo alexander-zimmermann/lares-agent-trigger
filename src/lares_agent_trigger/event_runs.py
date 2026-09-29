@@ -9,7 +9,6 @@ hands events in.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from .events import EpisodeEvent
 from .hermes import HermesClient, HermesError, instructions_for
@@ -33,7 +32,6 @@ class EventRuns:
             use_case
             for use_case in self.use_cases.values()
             if (trigger := use_case.event_trigger) is not None
-            and trigger.source == "episode"
             and trigger.wants(event.kind, event.severity)
         ]
 
@@ -59,7 +57,7 @@ class EventRuns:
             # before, and one event never starts two runs. A redelivery after
             # the pod died mid-run therefore leaves that row on `running` —
             # resuming or failing it is the retry path of #2108.
-            self.metrics.runs.labels(use_case=use_case.name, status="duplicate").inc()
+            self.metrics.duplicates.labels(use_case=use_case.name).inc()
             return
 
         spent = await self.ledger.runs_today(use_case.name, excluding=run_id)
@@ -79,11 +77,10 @@ class EventRuns:
                 instructions=instructions_for(
                     use_case.skill, use_case.language, budget.tool_calls, budget.minutes
                 ),
+                model=use_case.model,
             )
         except (HermesError, OSError) as exc:
-            # No retry here: one retry and the AgentRunFailed alert are #2108.
-            await self.ledger.finish(run_id, status="failed", error=str(exc))
-            self.metrics.runs.labels(use_case=use_case.name, status="failed").inc()
+            await self._fail(use_case, run_id, exc)
             return
 
         await self.ledger.mark_running(run_id, harness_run_id)
@@ -92,23 +89,29 @@ class EventRuns:
                 harness_run_id, deadline_seconds=budget.minutes * 60
             )
         except (HermesError, OSError) as exc:
-            await self.ledger.finish(run_id, status="failed", error=str(exc))
-            self.metrics.runs.labels(use_case=use_case.name, status="failed").inc()
+            await self._fail(use_case, run_id, exc)
             return
 
-        status: Literal["completed", "failed"] = "completed" if outcome.completed else "failed"
         await self.ledger.finish(
             run_id,
-            status=status,
+            status=outcome.status,
             text=outcome.output,
             error=outcome.error,
             usage=outcome.usage,
         )
-        self.metrics.runs.labels(use_case=use_case.name, status=status).inc()
+        self.metrics.runs.labels(use_case=use_case.name, status=outcome.status).inc()
         if outcome.usage.duration_seconds is not None:
             self.metrics.run_duration.labels(use_case=use_case.name).observe(
                 outcome.usage.duration_seconds
             )
+
+    async def _fail(self, use_case: UseCase, run_id: int, exc: Exception) -> None:
+        """Close the row on a harness that would not answer.
+
+        No retry here: one retry and the AgentRunFailed alert are #2108.
+        """
+        await self.ledger.finish(run_id, status="failed", error=str(exc))
+        self.metrics.runs.labels(use_case=use_case.name, status="failed").inc()
 
 
 def ledger_key(use_case: str, subject_kind: str, subject_key: str) -> str:

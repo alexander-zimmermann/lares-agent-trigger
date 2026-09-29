@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Inline rather than lares' reusable sidecar-python-ci.yaml: that one runs
+# `mypy src` and no format gate, and this repo type-checks its tests and keeps
+# the formatter in CI, as lares-mcp-bridge and lares-diagnostics-engine do.
 jobs:
   test:
     runs-on: ubuntu-latest

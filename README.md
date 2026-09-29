@@ -11,7 +11,7 @@ Besides the chat and the harness's own cron, this is the only thing that starts 
 An LLM run is expensive, slow and easy to start twice. Three decisions have to be made before a model is ever asked, and none of them belongs in a prompt:
 
 - **Is this worth explaining?** The declared filter answers it: an episode that opens at severity 2 or rises is explained, one that ended is not.
-- **Has it been explained already?** The ledger's unique key on (use case, subject, event kind) answers it — the row is written *before* the run is started, so a redelivered message finds the key taken and stops there. One event can never become two runs.
+- **Has it been explained already?** The ledger's unique key on `(use_case, subject_kind, subject_key)` answers it, with the event kind inside the subject key after the colon (`15510:escalated`). The row is written *before* the run is started, so a redelivered message finds the key taken and stops there. One event can never become two runs.
 - **Has the day's budget been spent?** Ten runs a day for `explain-episode`; the eleventh becomes a row with status `capped` and a counter, never a silent drop.
 
 Everything the model may see is decided outside it too. The Runs API takes no toolset list, so an API run sees exactly what `platform_toolsets.api_server` allows — the read-only MCP bridge, never the write path.
@@ -91,6 +91,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `HERMES_URL`                                | `http://hermes.agents.svc.cluster.local:8642`      | The harness's API server.                          |
 | `HERMES_API_KEY_FILE`                       | —                                                  | Its API key.                                       |
 | `HERMES_POLL_SECONDS`                       | `5.0`                                              | How often a running run is asked about.            |
+| `HERMES_REQUEST_TIMEOUT_SECONDS`            | `30.0`                                             | Per-request timeout against the API server.        |
 | `METRICS_PORT`                              | `9090`                                             | `/metrics` and `/healthz`.                         |
 | `LOG_LEVEL` / `LOG_FORMAT`                  | `INFO` / `json`                                    | Logging.                                           |
 | `TRACING_ENDPOINT`                          | —                                                  | OTLP/HTTP collector base URL; unset keeps it off.  |
@@ -102,6 +103,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_events_total`            | `kind`, `outcome`  | Events read, and whether the filter wanted them.             |
 | `agent_trigger_runs_total`              | `use_case`, `status` | Runs started, by terminal status.                          |
 | `agent_trigger_capped_total`            | `use_case`         | Events refused because the day's budget was spent.           |
+| `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |
 | `agent_trigger_run_duration_seconds`    | `use_case`         | Wall-clock time from start to terminal state.                |
 
 `/healthz` is NATS- and ledger-gated. A harness outage is deliberately not part of it: that is a failed run with its own alert, never a restart loop.

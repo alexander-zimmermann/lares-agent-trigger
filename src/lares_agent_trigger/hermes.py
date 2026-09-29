@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -32,17 +32,17 @@ class HermesError(RuntimeError):
 
 @dataclass(frozen=True)
 class RunOutcome:
-    """A finished run: what it produced, or why it did not."""
+    """A finished run: what it produced, or why it did not.
+
+    `status` is already the ledger's own word, so the caller writes it through
+    rather than mapping the harness's vocabulary a second time.
+    """
 
     harness_run_id: str
-    status: str
+    status: Literal["completed", "failed"]
     output: str | None
     error: str | None
     usage: Usage
-
-    @property
-    def completed(self) -> bool:
-        return self.status == "completed"
 
 
 def instructions_for(skill: str, language: str, tool_calls: int, minutes: int) -> str:
@@ -71,16 +71,26 @@ class HermesClient:
         await self._client.aclose()
 
     async def start_run(
-        self, *, idempotency_key: str, run_input: dict[str, Any], instructions: str
+        self,
+        *,
+        idempotency_key: str,
+        run_input: dict[str, Any],
+        instructions: str,
+        model: str | None = None,
     ) -> str:
         """Create a run and return the harness's id for it.
 
         The idempotency key is the ledger key, so a retried POST can never
-        produce a second run behind one ledger row.
+        produce a second run behind one ledger row. A use case that pins a
+        model routes this one request to it; without a pin the gateway's own
+        default and its fallback chain decide.
         """
+        body: dict[str, Any] = {"input": run_input, "instructions": instructions}
+        if model is not None:
+            body["model"] = model
         response = await self._client.post(
             "/v1/runs",
-            json={"input": run_input, "instructions": instructions},
+            json=body,
             headers={"Idempotency-Key": idempotency_key},
         )
         if response.status_code >= 400:

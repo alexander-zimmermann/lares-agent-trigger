@@ -132,6 +132,25 @@ async def test_an_escalation_to_severity_three_is_explained(
     assert row["status"] == "completed"
 
 
+async def test_an_escalation_to_severity_two_is_explained(
+    consumer: Consumer, publish: Publish, rows: Rows, respx_mock: respx.MockRouter
+) -> None:
+    """The episode `escalated: 2` exists for: it opened at 1 and only now rises.
+
+    Its `appeared` was filtered out, and the engine spends the escalation
+    budget on this one rise — at a threshold of 3 it would never be explained.
+    """
+    _fake_hermes(respx_mock)
+    episode_consumer, _ = consumer
+
+    await publish("escalated", 2)
+    assert await episode_consumer.run_once() == 1
+
+    (row,) = rows()
+    assert row["subject_key"] == "15510:escalated"
+    assert row["status"] == "completed"
+
+
 async def test_an_episode_that_ended_never_runs(
     consumer: Consumer, publish: Publish, rows: Rows, respx_mock: respx.MockRouter
 ) -> None:
@@ -159,8 +178,7 @@ async def test_the_same_event_twice_yields_one_row(
     assert len(rows()) == 1
     assert started.call_count == 1
     assert (
-        _value(metrics, "agent_trigger_runs_total", use_case="explain-episode", status="duplicate")
-        == 1.0
+        _value(metrics, "agent_trigger_duplicate_events_total", use_case="explain-episode") == 1.0
     )
 
 

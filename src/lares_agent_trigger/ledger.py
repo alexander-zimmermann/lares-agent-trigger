@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Literal
 
 import psycopg
 from psycopg.rows import DictRow, dict_row
@@ -25,10 +25,6 @@ SubjectKind = Literal["episode", "alert_group", "chat", "none"]
 TriggerKind = Literal["event", "schedule", "message", "manual"]
 
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[DictRow]]
-
-# The first moment of today in the house's own timezone. Postgres does the
-# arithmetic so a pod on UTC and a psql session agree on where a day starts.
-_TODAY = "date_trunc('day', now() AT TIME ZONE %s) AT TIME ZONE %s"
 
 
 @dataclass(frozen=True)
@@ -118,15 +114,17 @@ class Ledger:
         the next one further away. The row just claimed is excluded by id, so
         the count is of runs that came before it.
         """
+        # Postgres does the day arithmetic, so a pod on UTC and a psql session
+        # agree on where the house's day starts.
         async with self._require_pool.connection() as conn:
             rows = await (
                 await conn.execute(
-                    f"""
+                    """
                     SELECT count(*) AS runs FROM agent_runs
                     WHERE use_case = %s
                       AND status <> 'capped'
                       AND id <> %s
-                      AND created_at >= {_TODAY}
+                      AND created_at >= date_trunc('day', now() AT TIME ZONE %s) AT TIME ZONE %s
                     """,
                     (use_case, excluding, self._settings.timezone, self._settings.timezone),
                 )
@@ -135,11 +133,19 @@ class Ledger:
 
     async def mark_capped(self, run_id: int) -> None:
         """Close the row as `capped`: the event is recorded, no run was started."""
-        await self._update(run_id, "status = 'capped', finished_at = now()", ())
+        async with self._require_pool.connection() as conn:
+            await conn.execute(
+                "UPDATE agent_runs SET status = 'capped', finished_at = now() WHERE id = %s",
+                (run_id,),
+            )
 
     async def mark_running(self, run_id: int, harness_run_id: str) -> None:
         """Note that the harness took the run, so a stuck run is identifiable."""
-        await self._update(run_id, "status = 'running', harness_run_id = %s", (harness_run_id,))
+        async with self._require_pool.connection() as conn:
+            await conn.execute(
+                "UPDATE agent_runs SET status = 'running', harness_run_id = %s WHERE id = %s",
+                (harness_run_id, run_id),
+            )
 
     async def finish(
         self,
@@ -165,31 +171,27 @@ class Ledger:
         trace: Jsonb | None = (
             Jsonb({"tool_count": usage.tool_count}) if usage.tool_count is not None else None
         )
-        await self._update(
-            run_id,
-            """
-            status = %s, finished_at = now(), tldr = %s, text = %s, error = %s,
-            model_source = %s, model = %s, tokens_in = %s, tokens_out = %s,
-            cost = %s, duration = %s, tool_trace = %s
-            """,
-            (
-                status,
-                tldr,
-                text,
-                error,
-                usage.model_source,
-                usage.model,
-                usage.tokens_in,
-                usage.tokens_out,
-                usage.cost,
-                duration,
-                trace,
-            ),
-        )
-
-    async def _update(self, run_id: int, assignments: str, params: tuple[Any, ...]) -> None:
         async with self._require_pool.connection() as conn:
             await conn.execute(
-                f"UPDATE agent_runs SET {assignments} WHERE id = %s",
-                (*params, run_id),
+                """
+                UPDATE agent_runs SET
+                    status = %s, finished_at = now(), tldr = %s, text = %s, error = %s,
+                    model_source = %s, model = %s, tokens_in = %s, tokens_out = %s,
+                    cost = %s, duration = %s, tool_trace = %s
+                WHERE id = %s
+                """,
+                (
+                    status,
+                    tldr,
+                    text,
+                    error,
+                    usage.model_source,
+                    usage.model,
+                    usage.tokens_in,
+                    usage.tokens_out,
+                    usage.cost,
+                    duration,
+                    trace,
+                    run_id,
+                ),
             )
