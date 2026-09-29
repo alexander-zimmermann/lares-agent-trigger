@@ -30,9 +30,13 @@ async def _amain() -> int:
     tracing.configure(settings, service_name="lares-agent-trigger")
     logger.info("lares-agent-trigger starting")
 
-    # A file that does not validate stops the pod here: starting runs from a
-    # half-read catalogue is worse than not starting at all.
-    use_cases = load_use_cases(settings.use_cases_file)
+    # A file that does not validate stops the pod here, with the reason in the
+    # log: starting runs from a half-read catalogue is worse than not starting.
+    try:
+        use_cases = load_use_cases(settings.use_cases_file)
+    except ValueError as exc:
+        logger.error("refusing to start: %s", exc)
+        return 1
     for use_case in use_cases.values():
         logger.info(
             "config: use case %s (%s)",

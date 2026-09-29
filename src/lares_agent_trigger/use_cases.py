@@ -15,9 +15,7 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-# The three notification events an episode emits, as the engine publishes them
-# on `episode.<kind>`.
-EventKind = Literal["appeared", "escalated", "ended"]
+from .events import EventKind
 
 # Where a completed run's output is delivered. `stored` is the always-on one:
 # the text in the ledger. The rest arrive with their own tickets.

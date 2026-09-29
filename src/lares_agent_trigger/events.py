@@ -11,11 +11,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, get_args
 
-from .use_cases import EventKind
+# The three notification events an episode emits, as the engine publishes them
+# on `episode.<kind>`.
+EventKind = Literal["appeared", "escalated", "ended"]
 
-_KINDS = ("appeared", "escalated", "ended")
+_KINDS = get_args(EventKind)
 
 
 @dataclass(frozen=True, slots=True)

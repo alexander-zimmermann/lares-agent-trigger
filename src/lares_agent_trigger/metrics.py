@@ -20,14 +20,22 @@ class Metrics:
         self.runs = Counter(
             "agent_trigger_runs_total",
             "Runs the trigger started, by use case and terminal status.",
-            ["use_case", "status"],  # completed | failed | duplicate
+            ["use_case", "status"],  # completed | failed
             registry=self.registry,
         )
-        # Named in the spec's alert set (`AgentTriggerCapped` routes to mail), and
-        # deliberately not a `status` of runs_total: a capped event never became a run.
+        # The two ways a matched event does not become a run get their own
+        # counters rather than a `status` of runs_total, which would count runs
+        # that never started. `agent_trigger_capped_total` is the name the
+        # spec's alert set uses (`AgentTriggerCapped` routes to mail).
         self.capped = Counter(
             "agent_trigger_capped_total",
             "Events refused because the use case had spent its runs for the day.",
+            ["use_case"],
+            registry=self.registry,
+        )
+        self.duplicates = Counter(
+            "agent_trigger_duplicate_events_total",
+            "Events whose subject the ledger already held, by use case.",
             ["use_case"],
             registry=self.registry,
         )
