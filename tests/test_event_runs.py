@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -40,13 +41,31 @@ COMPLETED = {
 }
 
 
+def _start_response(request: httpx.Request) -> httpx.Response:
+    """The gateway's own rule on `input`, so a fake can never be laxer than it is.
+
+    `api_server_runs.py` reads a string as the user message and takes `content`
+    off the last entry of a list; anything else leaves the message empty and is
+    refused. Sending the pointer as a JSON object passed every test here and
+    failed on the first live run, which is why the rule lives in the fake now.
+    """
+    raw = json.loads(request.content)["input"]
+    if isinstance(raw, str):
+        message = raw
+    elif isinstance(raw, list):
+        message = raw[-1].get("content", "")
+    else:
+        message = ""
+    if not message:
+        return httpx.Response(400, json={"error": {"message": "No user message found in input"}})
+    return httpx.Response(200, json={"id": "run_1", "status": "queued"})
+
+
 def _fake_hermes(
     respx_mock: respx.MockRouter, *, states: list[dict[str, Any]] | None = None
 ) -> Any:
     """A harness that accepts a run and reports the given states in turn."""
-    started = respx_mock.post(f"{HERMES_URL}/v1/runs").mock(
-        return_value=httpx.Response(200, json={"id": "run_1", "status": "queued"})
-    )
+    started = respx_mock.post(f"{HERMES_URL}/v1/runs").mock(side_effect=_start_response)
     respx_mock.get(f"{HERMES_URL}/v1/runs/run_1").mock(
         side_effect=[httpx.Response(200, json=state) for state in (states or [COMPLETED])]
     )
@@ -95,9 +114,12 @@ async def test_an_episode_appearing_at_severity_two_is_explained(
     # in the instructions, and the ledger key as the idempotency key.
     request = started.calls.last.request
     assert request.headers["Idempotency-Key"] == "explain-episode/episode/15510:appeared"
-    body = httpx.Response(200, content=request.content).json()
-    assert body["input"]["episode_id"] == 15510
-    assert body["input"]["severity"] == 2
+    body = json.loads(request.content)
+    # The pointer travels as the run's user message, not as a JSON object.
+    assert isinstance(body["input"], str)
+    pointer = json.loads(body["input"])
+    assert pointer["episode_id"] == 15510
+    assert pointer["severity"] == 2
     assert "lares-explain" in body["instructions"]
     assert "German" in body["instructions"]
 
@@ -185,9 +207,7 @@ async def test_the_same_event_twice_yields_one_row(
 async def test_the_eleventh_run_of_a_day_is_a_capped_row(
     consumer: Consumer, publish: Publish, rows: Rows, respx_mock: respx.MockRouter
 ) -> None:
-    respx_mock.post(f"{HERMES_URL}/v1/runs").mock(
-        return_value=httpx.Response(200, json={"id": "run_1", "status": "queued"})
-    )
+    respx_mock.post(f"{HERMES_URL}/v1/runs").mock(side_effect=_start_response)
     respx_mock.get(f"{HERMES_URL}/v1/runs/run_1").mock(
         return_value=httpx.Response(200, json=COMPLETED)
     )
