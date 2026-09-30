@@ -11,12 +11,13 @@ the last entry of a list, and anything else is a 400. The pointer therefore
 travels as compact JSON inside that string.
 
 What a run reports about itself is split across two endpoints, and the split
-is the gateway's, not ours. The run record (`api_server_runs.py`) carries
-`run_id`, `status`, `session_id`, `model`, `output`, `error` and a `usage`
-block of exactly three token counters. Cost and the tool count live on the
-session record (`/api/sessions/{id}`), which the run names by `session_id`.
-Duration is on neither, so the trigger takes it off its own clock — which is
-the number the ledger wants anyway: how long the house waited for an answer.
+is the gateway's, not ours. The run record carries `run_id`, `status`,
+`session_id`, `output`, `error`, a `usage` block of token counters, and
+`runtime` — which is where the model that actually served the run and its
+provider are, the top-level `model` being the gateway's own name. Its
+`created_at` and `updated_at` are unix seconds, and their difference is the
+run's real duration. Cost and the tool count live on the session record
+(`/api/sessions/{id}`), whose payload sits under a `session` key.
 """
 
 from __future__ import annotations
@@ -155,9 +156,11 @@ class HermesClient:
             return usage
         try:
             response = await self._client.get(f"/api/sessions/{session_id}")
-            session = response.json() if response.status_code < 400 else {}
+            payload = response.json() if response.status_code < 400 else {}
         except httpx.HTTPError, ValueError:
             return usage
+        # The payload is wrapped: {"object": "hermes.session", "session": {...}}.
+        session = payload.get("session") if isinstance(payload, dict) else None
         if not isinstance(session, dict):
             return usage
         # `actual_cost_usd` is what the provider billed; `estimated_cost_usd` is
@@ -196,19 +199,28 @@ def _outcome(harness_run_id: str, body: dict[str, Any], status: str, usage: Usag
 
 
 def _usage(body: dict[str, Any], elapsed: float) -> Usage:
-    """What the run record itself reports, plus the duration we timed.
+    """What the run record reports about itself.
 
-    `usage` on a run is exactly three counters (`_USAGE_FIELDS` in the
-    gateway): input, output and total tokens. `provider` is on no endpoint, so
-    `model_source` stays NULL rather than repeating what the configuration
-    says and calling it a measurement.
+    The model and its provider come from `runtime`: the top-level `model` is
+    the gateway's own name (`hermes-agent`) and says nothing about who served
+    the run. Duration is the record's own `updated_at - created_at`; the
+    elapsed time we measured stands in only when the record carries neither,
+    because a run can finish inside the POST and leave our clock at zero.
     """
     usage = body.get("usage") or {}
+    runtime = body.get("runtime") or {}
+    created_at, updated_at = body.get("created_at"), body.get("updated_at")
+    reported = (
+        float(updated_at) - float(created_at)
+        if isinstance(created_at, int | float) and isinstance(updated_at, int | float)
+        else None
+    )
     return Usage(
-        model=_str_or_none(body.get("model")),
+        model_source=_str_or_none(runtime.get("provider")),
+        model=_str_or_none(runtime.get("model")),
         tokens_in=_int_or_none(usage.get("input_tokens")),
         tokens_out=_int_or_none(usage.get("output_tokens")),
-        duration_seconds=elapsed,
+        duration_seconds=reported if reported is not None else elapsed,
     )
 
 
