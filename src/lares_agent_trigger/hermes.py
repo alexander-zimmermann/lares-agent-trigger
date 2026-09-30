@@ -42,7 +42,15 @@ _LANGUAGE_NAMES = {"de": "German", "en": "English"}
 
 
 class HermesError(RuntimeError):
-    """The harness refused a request or never reached a terminal state."""
+    """The harness refused a request or answered with something that is not a run.
+
+    `status_code` is the HTTP status of a refusal, None when the answer came
+    back 2xx but unusable.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -112,7 +120,10 @@ class HermesClient:
             headers={"Idempotency-Key": idempotency_key},
         )
         if response.status_code >= 400:
-            raise HermesError(f"POST /v1/runs returned {response.status_code}: {response.text}")
+            raise HermesError(
+                f"POST /v1/runs returned {response.status_code}: {response.text}",
+                status_code=response.status_code,
+            )
         run_id = response.json().get("run_id")
         if not run_id:
             raise HermesError("POST /v1/runs returned no run_id")
@@ -176,7 +187,8 @@ class HermesClient:
         response = await self._client.get(f"/v1/runs/{harness_run_id}")
         if response.status_code >= 400:
             raise HermesError(
-                f"GET /v1/runs/{harness_run_id} returned {response.status_code}: {response.text}"
+                f"GET /v1/runs/{harness_run_id} returned {response.status_code}: {response.text}",
+                status_code=response.status_code,
             )
         body = response.json()
         if not isinstance(body, dict):

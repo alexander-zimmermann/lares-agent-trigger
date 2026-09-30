@@ -13,6 +13,7 @@ from nats_bridge_core import configure as configure_logging
 from nats_bridge_core import serve as serve_metrics
 from nats_bridge_core import tracing, watchdog_ok
 
+from .alerts import Alertmanager
 from .config import Settings
 from .consumer import EpisodeConsumer
 from .event_runs import EventRuns
@@ -47,7 +48,16 @@ async def _amain() -> int:
     metrics = Metrics()
     ledger = Ledger(settings)
     hermes = HermesClient(settings)
-    consumer = EpisodeConsumer(settings, EventRuns(use_cases, ledger, hermes, metrics), metrics)
+    alertmanager = Alertmanager(settings, metrics)
+    runs = EventRuns(
+        use_cases,
+        ledger,
+        hermes,
+        alertmanager,
+        metrics,
+        retry_delay_seconds=settings.retry_delay_seconds,
+    )
+    consumer = EpisodeConsumer(settings, runs, metrics)
 
     async def is_healthy() -> bool:
         # The harness is deliberately not part of health: a gateway outage is
@@ -76,6 +86,7 @@ async def _amain() -> int:
         logger.info("shutting down")
         await consumer.close()
         await hermes.aclose()
+        await alertmanager.aclose()
         await ledger.close()
         http_server.close()
         with contextlib.suppress(Exception):

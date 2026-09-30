@@ -46,6 +46,13 @@ class Settings(NatsSettings):
     hermes_api_key_file: Path | None = None
     hermes_poll_seconds: float = 5.0
     hermes_request_timeout_seconds: float = 30.0
+    # A transient failure is started once more after this long; a setting so
+    # tests can shorten it.
+    retry_delay_seconds: float = 300.0
+
+    # Where a run that failed for good is reported as AgentRunFailed.
+    alertmanager_url: str = "http://prometheus-alertmanager.prometheus.svc.cluster.local:9093"
+    alertmanager_request_timeout_seconds: float = 10.0
 
     @model_validator(mode="after")
     def _resolve_secret_files(self) -> Settings:

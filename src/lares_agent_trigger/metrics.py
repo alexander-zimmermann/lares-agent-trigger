@@ -19,8 +19,21 @@ class Metrics:
         )
         self.runs = Counter(
             "agent_trigger_runs_total",
-            "Runs the trigger started, by use case and terminal status.",
+            "Runs the trigger started, by use case and the status their row closed with.",
             ["use_case", "status"],  # completed | failed
+            registry=self.registry,
+        )
+        # Every failed attempt, so a retry that went through still shows here.
+        self.failures = Counter(
+            "agent_trigger_failures_total",
+            "Failed run attempts, by use case and failure class.",
+            ["use_case", "class"],
+            registry=self.registry,
+        )
+        self.alerts = Counter(
+            "agent_trigger_alerts_total",
+            "AgentRunFailed posts to Alertmanager, by whether it took them.",
+            ["outcome"],  # sent | failed
             registry=self.registry,
         )
         # The two ways a matched event does not become a run get their own
