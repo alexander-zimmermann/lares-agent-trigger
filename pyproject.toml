@@ -1,6 +1,6 @@
 [project]
 name = "lares-agent-trigger"
-version = "0.1.2"
+version = "0.1.3"
 description = "Turns episode events into Hermes runs and writes every run into the agent ledger"
 readme = "README.md"
 license = "GPL-2.0-or-later"

@@ -29,28 +29,45 @@ EXPLANATION = (
     "Leistung 49 mA über 45 Minuten, Schwelle 30 mA."
 )
 
-# The run record as the gateway writes it: `run_id` (never `id`), the three
-# token counters of `_USAGE_FIELDS`, and no cost, tool count or provider —
-# those are the session's, or nobody's.
+# A run record as the live gateway returned one. `run_id`, never `id`; the
+# top-level `model` is the gateway's own name and `runtime` holds the model
+# that actually served the run; `created_at`/`updated_at` are unix seconds.
 COMPLETED = {
     "object": "hermes.run",
     "run_id": "run_1",
     "status": "completed",
+    "completed": True,
     "session_id": "sess_1",
-    "model": "gpt-6-sol",
+    "model": "hermes-agent",
+    "runtime": {"model": "grok-4.3", "provider": "xai", "route_source": "global"},
     "output": EXPLANATION,
-    "usage": {"input_tokens": 4200, "output_tokens": 310, "total_tokens": 4510},
+    "created_at": 1790714600.671442,
+    "updated_at": 1790714611.808311,
+    "usage": {
+        "input_tokens": 4200,
+        "output_tokens": 310,
+        "total_tokens": 4510,
+        "cache_read_tokens": 4864,
+        "cache_write_tokens": 0,
+    },
 }
 
-# The session record, where the cost and the tool count actually live.
+# The session record, where cost and the tool count live — wrapped, as the
+# gateway wraps it.
 SESSION = {
-    "id": "sess_1",
-    "model": "gpt-6-sol",
-    "tool_call_count": 7,
-    "input_tokens": 4200,
-    "output_tokens": 310,
-    "actual_cost_usd": 0.021,
-    "api_call_count": 9,
+    "object": "hermes.session",
+    "session": {
+        "id": "sess_1",
+        "model": "grok-4.3",
+        "message_count": 4,
+        "tool_call_count": 7,
+        "input_tokens": 4200,
+        "output_tokens": 310,
+        "reasoning_tokens": 641,
+        "estimated_cost_usd": 0.0247,
+        "actual_cost_usd": 0.021,
+        "api_call_count": 2,
+    },
 }
 
 
@@ -112,17 +129,17 @@ async def test_an_episode_appearing_at_severity_two_is_explained(
     assert row["language"] == "de"
     assert row["tldr"] == "Die Waschmaschine hängt seit 14:20 im Spülgang."
     assert row["text"] == EXPLANATION
-    # `provider` is on no endpoint, so model_source stays NULL rather than
-    # repeating the configuration and calling it a measurement.
-    assert row["model_source"] is None
-    assert row["model"] == "gpt-6-sol"
+    # Who actually served the run — never the gateway's own name `hermes-agent`.
+    assert row["model_source"] == "xai"
+    assert row["model"] == "grok-4.3"
     assert row["tokens_in"] == 4200
     assert row["tokens_out"] == 310
     # Cost and the tool count come from the session record the run names.
     assert float(row["cost"]) == pytest.approx(0.021)
     assert row["tool_trace"] == {"tool_count": 7}
-    # Duration is our own clock: the gateway reports none.
-    assert row["duration"].total_seconds() >= 0
+    # The record's own span, not the time we happened to spend polling: a run
+    # that finishes inside the POST would leave that at nearly zero.
+    assert row["duration"].total_seconds() == pytest.approx(11.14, abs=0.01)
     assert row["finished_at"] is not None
 
     assert (
