@@ -93,14 +93,14 @@ The model never delivers. On an API run the harness posts nothing itself; once a
 
 Discord takes 2000 characters a message. A text that fits goes as it is; a longer one goes as the cause and its proof lines (the `-# ` lines the skill writes), then the rest in a second message. A part still too long is cut on a line and ends in `… (run <id>)`: the row holds the whole text.
 
-The mail's subject names what was measured and where — `[Explain] <fault sentence up to its dash> · <channel>` — and its body is the explanation, a footer with model, tokens, cost and duration, and the link to the episode on the dashboard:
+The mail's subject names what was measured and where — `[Explain] <fault sentence up to its dash> · <channel>` — and its body is the explanation with its proof lines as a plain list, a footer with model, tokens, cost (left out when the run cost nothing, as on a subscription) and duration, and the link to the episode on the dashboard:
 
 ```
 Subject: [Explain] Ein Gerät zieht ununterbrochen länger Strom, als seine je Gerät erlaubte Laufzeit zulässt · 2/1/197
 
 Die Waschmaschine hängt seit 14:20 im Spülgang.
 
--# Subject: appliance_runtime auf 2/1/197, seit 25.09. 14:20, Stufe 2
+• Subject: appliance_runtime auf 2/1/197, seit 25.09. 14:20, Stufe 2
 …
 
 --

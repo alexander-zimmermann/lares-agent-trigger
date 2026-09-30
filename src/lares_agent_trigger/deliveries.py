@@ -251,7 +251,8 @@ class MailDelivery:
         link = self._settings.dashboard_episode_url.format(
             episode_id=event.episode_id, fault=event.fault
         )
-        message.set_content(f"{output.text.strip()}\n\n-- \n{_footer(output.usage)}\n{link}\n")
+        body = _as_mail(output.text.strip())
+        message.set_content(f"{body}\n\n-- \n{_footer(output.usage)}\n{link}\n")
         return message
 
     def _send(self, message: EmailMessage) -> None:
@@ -264,6 +265,14 @@ class MailDelivery:
             smtp.send_message(message)
 
 
+def _as_mail(text: str) -> str:
+    """The text with its proof lines as a plain list: `-# ` is Discord's markup."""
+    return "\n".join(
+        f"• {line.removeprefix(_PROOF_PREFIX)}" if line.startswith(_PROOF_PREFIX) else line
+        for line in text.splitlines()
+    )
+
+
 def _footer(usage: Usage) -> str:
     """The run's model and cost: what the explanation carries and only the trigger knows."""
     parts: list[str] = []
@@ -271,7 +280,8 @@ def _footer(usage: Usage) -> str:
         parts.append(f"{usage.model} ({usage.model_source})" if usage.model_source else usage.model)
     if usage.tokens_in is not None and usage.tokens_out is not None:
         parts.append(f"{usage.tokens_in} + {usage.tokens_out} Tokens")
-    if usage.cost is not None:
+    # A run on a subscription costs nothing on its own; a zero would read as free.
+    if usage.cost:
         parts.append(f"{usage.cost:.4f} USD")
     if usage.duration_seconds is not None:
         parts.append(f"{usage.duration_seconds:.0f} s")
