@@ -5,8 +5,9 @@ The consumer itself is a CRD in lares, not created here: the service binds to
 misspelt name is a startup error rather than a silently empty queue.
 
 One message at a time, acknowledged after the row is closed. A run may take
-its whole budget, so the consumer's ackWait must be longer than the longest
-budget declared; the CRD in lares carries that number.
+its whole budget twice, with the retry delay in between, so the consumer's
+ackWait must be longer than two of the longest budget declared plus that
+delay; the CRD in lares carries that number.
 """
 
 from __future__ import annotations

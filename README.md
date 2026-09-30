@@ -73,7 +73,43 @@ episode.ended ────┘             │
                           cost, duration, tool_trace = {"tool_count": n}
 ```
 
-The message is acknowledged once the row is closed, which is why the consumer's `ackWait` has to outlast the longest declared budget.
+The message is acknowledged once the row is closed, which is why the consumer's `ackWait` has to outlast two of the longest declared budgets plus the retry delay.
+
+## When a run fails
+
+Nothing fails silently. A failed run is retried once when the failure fixes itself, and reported when it does not:
+
+| Class                | Retry | What it is                                                              |
+| -------------------- | ----- | ------------------------------------------------------------------------ |
+| `rate_limited`       | yes   | 429, a quota throttle.                                                   |
+| `timeout`            | yes   | The model source or the harness took too long to answer one call.        |
+| `network_error`      | yes   | The harness could not reach the model source.                            |
+| `hermes_unreachable` | yes   | The harness itself did not answer, or answered 5xx.                      |
+| `interrupted`        | yes   | The gateway restarted before the run settled.                            |
+| `credits_exhausted`  | no    | The account is empty; xAI sends it as a 403, so it outranks auth.        |
+| `auth_failed`        | no    | A key or token the source refused.                                       |
+| `budget_exhausted`   | no    | The run spent its tool calls or its minutes.                             |
+| `invalid_config`     | no    | A model, provider or request the gateway does not accept.                |
+| `unknown`            | no    | Nothing above matched; the raw error in the alert says what it was.      |
+| `trigger_restarted`  | no    | A redelivered event found its row still open: this pod died mid-run.     |
+
+The harness reports a failed run as free text, so the class is read off the text by rules that follow the gateway's own cron classifier. The retry starts after `RETRY_DELAY_SECONDS` on the same row, with `attempt = 2` and its own idempotency key — the ledger key with `/2` appended, because the gateway replays the run it holds for a key it has seen, failed or not.
+
+A run still failed after that closes its row with `status = failed`, `attempt` and the raw `error`, and the trigger posts `AgentRunFailed` straight to Alertmanager's `/api/v2/alerts`:
+
+```json
+[{
+  "labels": {"alertname": "AgentRunFailed", "use_case": "explain-episode", "severity": "warning"},
+  "annotations": {
+    "summary": "explain-episode failed on episode 15510:appeared after 2 attempts (rate_limited)",
+    "description": "<the raw error, cut at 1024 characters>"
+  }
+}]
+```
+
+There is no `endsAt`, so Alertmanager resolves it after its resolve timeout. An Alertmanager that does not take the post is logged and counted, never retried into a redelivery loop.
+
+A row that a dead pod left `queued` or `running` is not started again when its event is redelivered — the harness may still be working on it — but closed as `trigger_restarted` and reported the same way.
 
 ## Configuration
 
@@ -92,6 +128,9 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `HERMES_API_KEY_FILE`                       | —                                                  | Its API key.                                       |
 | `HERMES_POLL_SECONDS`                       | `5.0`                                              | How often a running run is asked about.            |
 | `HERMES_REQUEST_TIMEOUT_SECONDS`            | `30.0`                                             | Per-request timeout against the API server.        |
+| `RETRY_DELAY_SECONDS`                       | `300.0`                                            | How long a transient failure waits for its retry.  |
+| `ALERTMANAGER_URL`                          | `http://prometheus-alertmanager.prometheus.svc.cluster.local:9093` | Where `AgentRunFailed` is posted. |
+| `ALERTMANAGER_REQUEST_TIMEOUT_SECONDS`      | `10.0`                                             | Per-request timeout against Alertmanager.          |
 | `METRICS_PORT`                              | `9090`                                             | `/metrics` and `/healthz`.                         |
 | `LOG_LEVEL` / `LOG_FORMAT`                  | `INFO` / `json`                                    | Logging.                                           |
 | `TRACING_ENDPOINT`                          | —                                                  | OTLP/HTTP collector base URL; unset keeps it off.  |
@@ -101,7 +140,9 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | Metric                                  | Labels             | What it counts                                              |
 | --------------------------------------- | ------------------ | ------------------------------------------------------------ |
 | `agent_trigger_events_total`            | `kind`, `outcome`  | Events read, and whether the filter wanted them.             |
-| `agent_trigger_runs_total`              | `use_case`, `status` | Runs started, by terminal status.                          |
+| `agent_trigger_runs_total`              | `use_case`, `status` | Runs started, by the status their row closed with.         |
+| `agent_trigger_failures_total`          | `use_case`, `class`  | Failed attempts, by failure class — a retry that went through still shows here. |
+| `agent_trigger_alerts_total`            | `outcome`          | `AgentRunFailed` posts, `sent` or `failed`.                  |
 | `agent_trigger_capped_total`            | `use_case`         | Events refused because the day's budget was spent.           |
 | `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |
 | `agent_trigger_run_duration_seconds`    | `use_case`         | Wall-clock time from start to terminal state.                |
@@ -110,7 +151,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 ## Tests
 
-One seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer; the ledger rows land in a real TimescaleDB container; only the harness is a fake, over `respx`, because a run is a model call.
+One seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer; the ledger rows land in a real TimescaleDB container; only the harness and Alertmanager are fakes, over `respx` — the harness because a run is a model call, Alertmanager so the alert is asserted as it would arrive. The failure classes have a table test of their own against the gateway's error texts.
 
 ```bash
 uv sync --extra dev

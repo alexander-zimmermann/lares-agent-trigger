@@ -1,8 +1,9 @@
-"""The trigger's one seam: a real NATS stream and a real ledger, a fake harness.
+"""The trigger's one seam: a real NATS stream and a real ledger, fakes over HTTP.
 
 Everything a neighbour would see is real here — the message on JetStream, the
-durable consumer, the rows in Postgres — and only the harness is replaced,
-because a run is a model call. Skipped automatically where Docker is absent.
+durable consumer, the rows in Postgres — and only the two HTTP services are
+replaced (`fakes.py`): the harness, because a run is a model call, and
+Alertmanager, because the alert is asserted as it would arrive there.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
 from testcontainers.postgres import PostgresContainer
 
+from lares_agent_trigger.alerts import Alertmanager
 from lares_agent_trigger.config import Settings
 from lares_agent_trigger.consumer import EpisodeConsumer
 from lares_agent_trigger.event_runs import EventRuns
@@ -36,6 +38,9 @@ TIMESCALEDB_IMAGE = "timescale/timescaledb:latest-pg17"
 NATS_IMAGE = "nats:2.10-alpine"
 
 HERMES_URL = "http://hermes.test:8642"
+ALERTMANAGER_URL = "http://alertmanager.test:9093"
+# Short enough to wait on, long enough to measure between two starts.
+RETRY_DELAY_SECONDS = 0.2
 
 USE_CASES = """
 use_cases:
@@ -151,6 +156,17 @@ def rows(postgres: PostgresContainer) -> Iterator[Callable[[], list[dict[str, An
 
 
 @pytest.fixture
+def execute(postgres: PostgresContainer) -> Iterator[Callable[..., None]]:
+    """Write to the ledger directly, for the state a crashed pod leaves behind."""
+    with psycopg.connect(_dsn(postgres), autocommit=True) as conn:
+
+        def run(statement: str, *params: Any) -> None:
+            conn.execute(statement, params)
+
+        yield run
+
+
+@pytest.fixture
 def settings(postgres: PostgresContainer, nats_url: str, tmp_path: Path) -> Settings:
     use_cases_file = tmp_path / "use-cases.yaml"
     use_cases_file.write_text(USE_CASES, encoding="utf-8")
@@ -167,6 +183,8 @@ def settings(postgres: PostgresContainer, nats_url: str, tmp_path: Path) -> Sett
         hermes_api_key="k" * 32,
         # The poll loop is exercised, not waited on.
         hermes_poll_seconds=0.01,
+        alertmanager_url=ALERTMANAGER_URL,
+        retry_delay_seconds=RETRY_DELAY_SECONDS,
         fetch_timeout_seconds=2.0,
     )
 
@@ -226,7 +244,15 @@ async def consumer(
     ledger = Ledger(settings)
     await ledger.open()
     hermes = HermesClient(settings)
-    runs = EventRuns(load_use_cases(settings.use_cases_file), ledger, hermes, metrics)
+    alertmanager = Alertmanager(settings, metrics)
+    runs = EventRuns(
+        load_use_cases(settings.use_cases_file),
+        ledger,
+        hermes,
+        alertmanager,
+        metrics,
+        retry_delay_seconds=settings.retry_delay_seconds,
+    )
     episode_consumer = EpisodeConsumer(settings, runs, metrics)
     await episode_consumer.connect()
     try:
@@ -234,4 +260,5 @@ async def consumer(
     finally:
         await episode_consumer.close()
         await hermes.aclose()
+        await alertmanager.aclose()
         await ledger.close()

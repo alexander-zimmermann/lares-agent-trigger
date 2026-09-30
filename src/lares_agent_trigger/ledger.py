@@ -40,8 +40,16 @@ class Usage:
     tool_count: int | None = None
 
 
+@dataclass(frozen=True)
+class OpenRow:
+    """A row that holds its subject but was never closed."""
+
+    id: int
+    attempt: int
+
+
 class Ledger:
-    """A pool plus the four statements the event path needs."""
+    """A pool plus the statements the event path needs."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -107,6 +115,27 @@ class Ledger:
             ).fetchall()
         return int(rows[0]["id"]) if rows else None
 
+    async def open_row(
+        self, *, use_case: str, subject_kind: SubjectKind, subject_key: str
+    ) -> OpenRow | None:
+        """The row holding this subject if it is still `queued` or `running`.
+
+        With one reader on the consumer, nothing else is working on it while
+        this is asked: such a row was left by a pod that died mid-run.
+        """
+        async with self._require_pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    """
+                    SELECT id, attempt FROM agent_runs
+                    WHERE use_case = %s AND subject_kind = %s AND subject_key = %s
+                      AND status IN ('queued', 'running')
+                    """,
+                    (use_case, subject_kind, subject_key),
+                )
+            ).fetchall()
+        return OpenRow(id=int(rows[0]["id"]), attempt=int(rows[0]["attempt"])) if rows else None
+
     async def runs_today(self, use_case: str, *, excluding: int) -> int:
         """How many runs this use case has already spent today.
 
@@ -137,6 +166,18 @@ class Ledger:
             await conn.execute(
                 "UPDATE agent_runs SET status = 'capped', finished_at = now() WHERE id = %s",
                 (run_id,),
+            )
+
+    async def mark_retrying(self, run_id: int, *, attempt: int, error: str) -> None:
+        """Put the row back to `queued` for the next attempt, with the error that caused it."""
+        async with self._require_pool.connection() as conn:
+            await conn.execute(
+                """
+                UPDATE agent_runs SET status = 'queued', attempt = %s, error = %s,
+                    harness_run_id = NULL
+                WHERE id = %s
+                """,
+                (attempt, error, run_id),
             )
 
     async def mark_running(self, run_id: int, harness_run_id: str) -> None:
