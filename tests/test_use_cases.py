@@ -43,7 +43,7 @@ use_cases:
       runs_per_day: 1
     language: en
     memory: true
-    model: grok-4.3
+    model: gpt-6-sol
     dormant: "Waits for the GitHub App of #2114."
 
   - name: messenger
@@ -96,7 +96,7 @@ def test_schedule_and_message_triggers_carry_their_own_fields(tmp_path: Path) ->
     propose = loaded["propose-faults"].trigger
     assert isinstance(propose, ScheduleTrigger)
     assert propose.cron == "0 3 * * 0"
-    assert loaded["propose-faults"].model == "grok-4.3"
+    assert loaded["propose-faults"].model == "gpt-6-sol"
     assert loaded["messenger"].trigger.kind == "message"
 
 

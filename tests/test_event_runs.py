@@ -39,7 +39,7 @@ COMPLETED = {
     "completed": True,
     "session_id": "sess_1",
     "model": "hermes-agent",
-    "runtime": {"model": "grok-4.3", "provider": "xai", "route_source": "global"},
+    "runtime": {"model": "gpt-6-sol", "provider": "openai-codex", "route_source": "global"},
     "output": EXPLANATION,
     "created_at": 1790714600.671442,
     "updated_at": 1790714611.808311,
@@ -58,7 +58,7 @@ SESSION = {
     "object": "hermes.session",
     "session": {
         "id": "sess_1",
-        "model": "grok-4.3",
+        "model": "gpt-6-sol",
         "message_count": 4,
         "tool_call_count": 7,
         "input_tokens": 4200,
@@ -130,8 +130,10 @@ async def test_an_episode_appearing_at_severity_two_is_explained(
     assert row["tldr"] == "Die Waschmaschine hängt seit 14:20 im Spülgang."
     assert row["text"] == EXPLANATION
     # Who actually served the run — never the gateway's own name `hermes-agent`.
-    assert row["model_source"] == "xai"
-    assert row["model"] == "grok-4.3"
+    # The values come from the response, never from this package: no model or
+    # provider name appears anywhere in `src/`.
+    assert row["model_source"] == "openai-codex"
+    assert row["model"] == "gpt-6-sol"
     assert row["tokens_in"] == 4200
     assert row["tokens_out"] == 310
     # Cost and the tool count come from the session record the run names.
