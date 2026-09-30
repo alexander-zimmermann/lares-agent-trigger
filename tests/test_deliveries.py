@@ -26,8 +26,16 @@ from lares_agent_trigger.deliveries import build_deliveries
 from lares_agent_trigger.metrics import Metrics
 from lares_agent_trigger.use_cases import load_use_cases
 
-from .conftest import DISCORD_CHANNEL, DISCORD_TOKEN, MAIL_FROM, MAIL_TO, USE_CASES, Relay
-from .fakes import COMPLETED, EXPLANATION, fake_alertmanager, fake_hermes, sample
+from .conftest import (
+    DISCORD_CHANNEL,
+    DISCORD_TOKEN,
+    HERMES_URL,
+    MAIL_FROM,
+    MAIL_TO,
+    USE_CASES,
+    Relay,
+)
+from .fakes import COMPLETED, EXPLANATION, SESSION, fake_alertmanager, fake_hermes, sample
 
 Publish = Callable[..., Awaitable[None]]
 Rows = Callable[[], list[dict[str, Any]]]
@@ -93,7 +101,9 @@ async def test_an_explanation_reaches_the_row_discord_and_mail(
     assert mail["Subject"] == SUBJECT
     assert mail.get_content_type() == "text/plain"
     text = mail.get_content()
-    assert text.startswith(EXPLANATION)
+    # The proof lines read as a list in a mail; `-# ` is Discord's markup.
+    assert text.startswith(EXPLANATION.replace("\n-# ", "\n• "))
+    assert "-# " not in text
     # The run's model and cost, which only the trigger knows, and the dashboard.
     assert "gpt-6-sol (openai-codex) · 4200 + 310 Tokens · 0.0210 USD · 11 s" in text
     assert "https://grafana.test/d/knx-episodes?var-fault=appliance_runtime" in text
@@ -168,6 +178,31 @@ async def test_proof_lines_too_long_for_one_message_point_to_the_run(
     assert messages[0].endswith(f"-# Befund 3: {'x' * 400}\n… (run {row['id']})")
     assert messages[1] == "Offen: nichts."
     assert row["status"] == "completed"
+
+
+async def test_a_run_on_the_subscription_names_no_cost(
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    relay: Relay,
+    respx_mock: respx.MockRouter,
+) -> None:
+    fake_hermes(respx_mock)
+    # The Codex subscription bills nothing per run, and the session says so.
+    flat = {**SESSION["session"], "actual_cost_usd": 0, "estimated_cost_usd": 0}
+    respx_mock.get(f"{HERMES_URL}/api/sessions/sess_1").mock(
+        return_value=httpx.Response(200, json={**SESSION, "session": flat})
+    )
+    episode_consumer, _ = consumer
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    (row,) = rows()
+    assert float(row["cost"]) == 0.0
+    text = _mail(relay).get_content()
+    assert "gpt-6-sol (openai-codex) · 4200 + 310 Tokens · 11 s" in text
+    assert "USD" not in text
 
 
 async def test_a_fault_sentence_without_a_dash_is_the_subject_whole(

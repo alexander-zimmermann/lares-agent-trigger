@@ -58,7 +58,7 @@ COMPLETED = {
 
 # The session record, where cost and the tool count live — wrapped, as the
 # gateway wraps it.
-SESSION = {
+SESSION: dict[str, Any] = {
     "object": "hermes.session",
     "session": {
         "id": "sess_1",
