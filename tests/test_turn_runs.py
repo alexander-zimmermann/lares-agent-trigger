@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 import pytest
 import respx
 
+from lares_agent_trigger import turn_runs
+from lares_agent_trigger.config import Settings
+from lares_agent_trigger.consumer import EpisodeConsumer
 from lares_agent_trigger.metrics import Metrics
 
 from .conftest import HERMES_URL
@@ -16,24 +20,37 @@ from .fakes import (
     ANSWER,
     CHAT_SESSION,
     CHAT_TURN,
+    COMPLETED,
     CRON_SESSION,
     CRON_TASK,
     EXECUTION_ID,
+    EXPLANATION,
     JOB_ID,
+    SESSION,
+    fake_hermes,
     fake_job,
     model_call,
     sample,
     sign,
+    start_response,
     turn_ended,
 )
 
 Rows = Callable[[], list[dict[str, Any]]]
 Receiver = tuple[httpx.AsyncClient, Metrics]
+Consumer = tuple[EpisodeConsumer, Metrics]
+Publish = Callable[..., Awaitable[None]]
 
 HOOK = "/hooks/hermes"
 
 # A cron test that never reaches its Jobs API route is not a failure here.
 pytestmark = pytest.mark.respx(assert_all_called=False)
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """Wait long enough for a hook delivery that is still on its way."""
+    return settings.model_copy(update={"trace_wait_seconds": 1.0})
 
 
 async def _deliver(client: httpx.AsyncClient, *bodies: bytes) -> list[int]:
@@ -49,6 +66,18 @@ def _cron_call(number: int, **fields: Any) -> bytes:
 
 def _cron_end() -> bytes:
     return turn_ended(session_id=CRON_SESSION, platform="cron", task_id=CRON_TASK)
+
+
+# A run the trigger started through the Runs API: its session is the one the
+# fake harness reports for `run_1`.
+def _api_call(number: int, **fields: Any) -> bytes:
+    return model_call(
+        number, session_id="sess_1", platform="api_server", task_id="0f3c9d2e-run", **fields
+    )
+
+
+def _api_end() -> bytes:
+    return turn_ended(session_id="sess_1", platform="api_server", task_id="0f3c9d2e-run")
 
 
 def _hook_events(metrics: Metrics, outcome: str) -> float:
@@ -87,7 +116,20 @@ async def test_a_discord_turn_becomes_a_messenger_row(receiver: Receiver, rows: 
     # What the model read, cache included, and what it wrote, over both calls.
     assert row["tokens_in"] == (40000 + 2000) + (46000 + 2000)
     assert row["tokens_out"] == 300 + 300
-    assert row["tool_trace"] == {"tool_count": 1}
+    # Which tools the turn asked for, call by call, never what they returned.
+    assert row["tool_trace"] == {
+        "tool_count": 1,
+        "calls": [
+            {
+                "call": 1,
+                "tokens_in": 42000,
+                "tokens_out": 300,
+                "seconds": 3.0,
+                "tools": [{"name": "list_episodes", "arguments": '{"state":"open","days":7}'}],
+            },
+            {"call": 2, "tokens_in": 48000, "tokens_out": 300, "seconds": 6.5, "tools": []},
+        ],
+    }
     # From the first call's start to the last call's end.
     assert row["duration"].total_seconds() == pytest.approx(11.0)
     # A flat subscription bills nothing per call; nothing is guessed in its place.
@@ -123,7 +165,8 @@ async def test_each_turn_of_a_conversation_carries_only_its_own_calls(
     assert later["subject_key"] == f"{CHAT_SESSION}:77aa01bc"
     assert later["text"] == "Die Tür ist zu."
     assert later["tokens_in"] == 92000
-    assert later["tool_trace"] == {"tool_count": 0}
+    assert later["tool_trace"]["tool_count"] == 0
+    assert [call["call"] for call in later["tool_trace"]["calls"]] == [1]
 
 
 async def test_a_fallback_shows_as_the_model_that_answered(receiver: Receiver, rows: Rows) -> None:
@@ -246,29 +289,27 @@ async def test_a_body_that_is_neither_hook_is_refused(receiver: Receiver, rows: 
         turn_ended().replace(b'"turn_id"', b'"turn"'),
         turn_ended().replace(b'"platform"', b'"surface"'),
         model_call(1).replace(b'"api_call_count"', b'"calls"'),
+        model_call(1, tool_calls=1).replace(b'"name": "list_episodes"', b'"tool": "x"'),
     )
 
-    assert statuses == [400, 400, 400, 400, 400]
+    assert statuses == [400, 400, 400, 400, 400, 400]
     assert rows() == []
-    assert _hook_events(metrics, "invalid") == 5.0
+    assert _hook_events(metrics, "invalid") == 6.0
 
 
 async def test_a_run_of_the_api_server_is_left_to_the_event_path(
     receiver: Receiver, rows: Rows
 ) -> None:
-    """The trigger started it and already holds its row; a second one would double every run."""
+    """The trigger started it and already holds its row; a second one would double
+    every run. Its calls are kept for that row instead."""
     client, metrics = receiver
 
-    task = "d41d8cd9-8f00-b204-e980-0998ecf8427e"
-    statuses = await _deliver(
-        client,
-        model_call(1, platform="api_server", task_id=task, content=ANSWER),
-        turn_ended(platform="api_server", task_id=task),
-    )
+    statuses = await _deliver(client, _api_call(1, content=ANSWER), _api_end())
 
     assert statuses == [200, 200]
     assert rows() == []
-    assert _hook_events(metrics, "ignored") == 2.0
+    assert _hook_events(metrics, "counted") == 1.0
+    assert _hook_events(metrics, "traced") == 1.0
 
 
 async def test_a_cron_run_of_a_managed_job_is_a_row_of_its_use_case(
@@ -295,7 +336,7 @@ async def test_a_cron_run_of_a_managed_job_is_a_row_of_its_use_case(
     assert row["session_id"] == CRON_SESSION
     assert row["language"] == "en"
     assert row["text"] == "Drei Vorschläge."
-    assert row["tool_trace"] == {"tool_count": 3}
+    assert row["tool_trace"]["tool_count"] == 3
 
 
 @pytest.mark.parametrize(
@@ -345,3 +386,120 @@ async def test_a_job_the_harness_cannot_name_is_answered_for_a_retry(
     assert row["use_case"] == "propose-faults"
     assert row["tokens_in"] == 42000
     assert row["text"] == "Drei Vorschläge."
+
+
+async def test_long_arguments_are_cut_in_the_trace(receiver: Receiver, rows: Rows) -> None:
+    client, _ = receiver
+    names = ",".join(f'"Raum-{i}"' for i in range(200))
+
+    await _deliver(
+        client,
+        model_call(1, tool_calls=1, arguments=f'{{"rooms":[{names}]}}'),
+        model_call(2, content=ANSWER),
+        turn_ended(),
+    )
+
+    (row,) = rows()
+    (tool,) = row["tool_trace"]["calls"][0]["tools"]
+    assert len(tool["arguments"]) == 300
+    assert tool["arguments"].startswith('{"rooms":["Raum-0"')
+
+
+async def test_an_event_run_carries_the_calls_its_api_turn_reported(
+    consumer: Consumer,
+    receiver: Receiver,
+    publish: Publish,
+    rows: Rows,
+    respx_mock: respx.MockRouter,
+) -> None:
+    """The trigger starts the run through the Runs API; the same turn reports its
+    calls through the hook, under the session the run was given."""
+    fake_hermes(respx_mock)
+    episode_consumer, _ = consumer
+    client, metrics = receiver
+    # Seven tools over three calls, as the session record of `run_1` counts them.
+    statuses = await _deliver(
+        client,
+        _api_call(1, tool_calls=4),
+        _api_call(2, tool_calls=3),
+        _api_call(3, content=EXPLANATION),
+        _api_end(),
+    )
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    assert statuses == [200, 200, 200, 200]
+    (row,) = rows()
+    assert row["use_case"] == "explain-episode"
+    assert row["trigger"] == "event"
+    # The count stays the session record's; the calls come from the hook.
+    assert row["tool_trace"]["tool_count"] == 7
+    assert [call["call"] for call in row["tool_trace"]["calls"]] == [1, 2, 3]
+    assert [len(call["tools"]) for call in row["tool_trace"]["calls"]] == [4, 3, 0]
+    assert _hook_events(metrics, "traced") == 1.0
+
+
+async def test_an_event_run_whose_calls_never_came_is_recorded_without_them(
+    consumer: Consumer, publish: Publish, rows: Rows, respx_mock: respx.MockRouter
+) -> None:
+    fake_hermes(respx_mock)
+    episode_consumer, _ = consumer
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    (row,) = rows()
+    assert row["status"] == "completed"
+    assert row["tool_trace"] == {"tool_count": 7}
+
+
+async def test_calls_that_come_in_while_the_run_waits_are_kept(
+    consumer: Consumer,
+    receiver: Receiver,
+    publish: Publish,
+    rows: Rows,
+    respx_mock: respx.MockRouter,
+) -> None:
+    """The Runs API can call the run over before the hook has sent its turn's end:
+    the event path waits for it, and the calls that come in meanwhile count."""
+    episode_consumer, _ = consumer
+    client, _ = receiver
+    late: list[asyncio.Task[list[int]]] = []
+
+    async def deliver_later() -> list[int]:
+        await asyncio.sleep(0.05)
+        return await _deliver(client, _api_call(1, tool_calls=7), _api_call(2), _api_end())
+
+    def completed(request: httpx.Request) -> httpx.Response:
+        late.append(asyncio.create_task(deliver_later()))
+        return httpx.Response(200, json=COMPLETED)
+
+    respx_mock.post(f"{HERMES_URL}/v1/runs").mock(side_effect=start_response)
+    respx_mock.get(f"{HERMES_URL}/v1/runs/run_1").mock(side_effect=completed)
+    respx_mock.get(f"{HERMES_URL}/api/sessions/sess_1").mock(
+        return_value=httpx.Response(200, json=SESSION)
+    )
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    assert await late[0] == [200, 200, 200]
+    (row,) = rows()
+    assert [call["call"] for call in row["tool_trace"]["calls"]] == [1, 2]
+
+
+async def test_calls_of_a_turn_that_never_ended_are_counted_when_dropped(
+    receiver: Receiver, rows: Rows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The harness's own work after an answer reports calls but no turn end; they
+    are spent and in no row, and the counter says so once the tally is given up."""
+    client, metrics = receiver
+    await _deliver(client, model_call(1, turn="0rphan01"), model_call(2, turn="0rphan01"))
+
+    # Every tally is past its hour from here on.
+    monkeypatch.setattr(turn_runs, "_TALLY_LIFETIME_SECONDS", -1.0)
+    await _deliver(client, model_call(1, content=ANSWER), turn_ended())
+
+    assert sample(metrics, "agent_trigger_orphaned_calls_total") == 2.0
+    (row,) = rows()
+    assert row["subject_key"] == f"{CHAT_SESSION}:{CHAT_TURN}"

@@ -54,6 +54,7 @@ async def _amain() -> int:
     ledger = Ledger(settings)
     hermes = HermesClient(settings)
     alertmanager = Alertmanager(settings, metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, metrics)
     runs = EventRuns(
         use_cases,
         ledger,
@@ -62,9 +63,10 @@ async def _amain() -> int:
         deliveries,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
+        traces=turns,
+        trace_wait_seconds=settings.trace_wait_seconds,
     )
     consumer = EpisodeConsumer(settings, runs, metrics)
-    turns = TurnRuns(use_cases, ledger, hermes, metrics)
     receiver = ReceiverServer(create_app(turns, settings.hook_secret, metrics), settings.http_port)
 
     async def is_healthy() -> bool:

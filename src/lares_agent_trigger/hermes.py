@@ -69,6 +69,8 @@ class RunOutcome:
     output: str | None
     error: str | None
     usage: Usage
+    # The session the run was given; its hook deliveries carry the same id.
+    session_id: str | None = None
 
 
 def instructions_for(skill: str, language: str, tool_calls: int, minutes: int) -> str:
@@ -225,12 +227,14 @@ def _outcome(harness_run_id: str, body: dict[str, Any], status: str, usage: Usag
     error = body.get("error")
     if status != "completed" and not error:
         error = f"harness ended the run as {status}"
+    session_id = body.get("session_id")
     return RunOutcome(
         harness_run_id=harness_run_id,
         status="completed" if status == "completed" else "failed",
         output=str(output) if output is not None else None,
         error=str(error) if error is not None else None,
         usage=usage,
+        session_id=str(session_id) if session_id else None,
     )
 
 

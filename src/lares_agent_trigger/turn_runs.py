@@ -9,8 +9,9 @@ call's reply as the answer.
 
 Whose run a turn was is decided at its end. A Discord turn belongs to the chat
 use case; a cron execution to the schedule use case its managed job is named
-after; the rest is left alone, above all the API runs this service started
-itself, which already hold their row.
+after. An API-server turn is a run this service started itself and whose row
+it writes on the event path, so its tally is kept for that path to collect by
+session id (:meth:`TurnRuns.calls_of`). The rest is left alone.
 
 The tallies live in memory. A turn whose calls came in before a restart and
 whose end came after gets its row without them, never with a guess.
@@ -18,6 +19,8 @@ whose end came after gets its row without them, never with a guess.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -25,17 +28,20 @@ from typing import Literal
 
 from .hermes import HermesClient
 from .hooks import ModelCall, TurnEnded
-from .ledger import ClosedStatus, Ledger, SubjectKind, TriggerKind, Usage
+from .ledger import CallTrace, ClosedStatus, Ledger, SubjectKind, TriggerKind, Usage
 from .metrics import Metrics
 from .use_cases import UseCase, chat_use_case, scheduled_use_case
 
 logger = logging.getLogger(__name__)
 
-Outcome = Literal["counted", "recorded", "duplicate", "ignored"]
+Outcome = Literal["counted", "recorded", "traced", "duplicate", "ignored"]
 
-# The surface a person writes on, and the one the harness's cron runs as.
+# The surface a person writes on, the one the harness's cron runs as, and the
+# one this service's own runs come in through.
 _CHAT_PLATFORM = "discord"
 _CRON_PLATFORM = "cron"
+_API_PLATFORM = "api_server"
+_TALLIED_PLATFORMS = (_CHAT_PLATFORM, _CRON_PLATFORM, _API_PLATFORM)
 # A tally nobody closed in this long belongs to a turn whose end was lost.
 _TALLY_LIFETIME_SECONDS = 3600.0
 
@@ -52,6 +58,7 @@ class _Tally:
     started_at: float | None = None
     ended_at: float | None = None
     answer: str | None = None
+    calls: list[CallTrace] = field(default_factory=list)
     numbers: set[int] = field(default_factory=set)
     touched: float = field(default_factory=time.monotonic)
 
@@ -68,6 +75,15 @@ class _Tally:
         if self.ended_at is None or call.ended_at > self.ended_at:
             self.ended_at = call.ended_at
         self.answer = call.content
+        self.calls.append(
+            CallTrace(
+                number=call.number,
+                tokens_in=call.tokens_in,
+                tokens_out=call.tokens_out,
+                seconds=round(call.ended_at - call.started_at, 1),
+                tools=call.tools,
+            )
+        )
 
     def usage(self) -> Usage:
         started, ended = self.started_at, self.ended_at
@@ -78,6 +94,7 @@ class _Tally:
             tokens_out=self.tokens_out,
             duration_seconds=ended - started if started is not None and ended is not None else None,
             tool_count=self.tool_calls,
+            calls=tuple(self.calls),
         )
 
 
@@ -106,6 +123,9 @@ class TurnRuns:
         self._hermes = hermes
         self._metrics = metrics
         self._tallies: dict[str, _Tally] = {}
+        # Ended API-server turns, by session id, until the event path collects them.
+        self._finished: dict[str, _Tally] = {}
+        self._arrivals: dict[str, asyncio.Event] = {}
 
     async def handle(self, hook: ModelCall | TurnEnded) -> Outcome:
         """Add a call to its turn's tally, or write the row of a turn that ended."""
@@ -113,8 +133,22 @@ class TurnRuns:
             return self._count(hook)
         return await self._record(hook)
 
+    async def calls_of(self, session_id: str, *, wait_seconds: float) -> tuple[CallTrace, ...]:
+        """The model calls of the API run held by this session, waiting a moment for its end.
+
+        The run can be over for the Runs API a moment before its turn's end has
+        come through the hook; past the wait the run is recorded without them.
+        """
+        if session_id not in self._finished:
+            arrived = self._arrivals.setdefault(session_id, asyncio.Event())
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(arrived.wait(), wait_seconds)
+            self._arrivals.pop(session_id, None)
+        tally = self._finished.pop(session_id, None)
+        return tuple(tally.calls) if tally is not None else ()
+
     def _count(self, call: ModelCall) -> Outcome:
-        if call.platform not in (_CHAT_PLATFORM, _CRON_PLATFORM):
+        if call.platform not in _TALLIED_PLATFORMS:
             return "ignored"
         self._forget_stale()
         tally = self._tallies.setdefault(call.turn_id, _Tally())
@@ -125,6 +159,8 @@ class TurnRuns:
         return "counted"
 
     async def _record(self, turn: TurnEnded) -> Outcome:
+        if turn.platform == _API_PLATFORM:
+            return self._hand_over(turn)
         owner = await self._owner(turn)
         if owner is None:
             self._tallies.pop(turn.turn_id, None)
@@ -181,10 +217,29 @@ class TurnRuns:
         # Job, then execution: the part before the colon finds every run of the job.
         return _Owner(use_case, "schedule", "none", f"{run.job_id}:{run.execution_id}")
 
+    def _hand_over(self, turn: TurnEnded) -> Outcome:
+        """Keep an ended API-server turn's calls for the event run that started it."""
+        tally = self._tallies.pop(turn.turn_id, None)
+        self._finished[turn.session_id] = tally if tally is not None else _Tally()
+        arrived = self._arrivals.get(turn.session_id)
+        if arrived is not None:
+            arrived.set()
+        return "traced"
+
     def _forget_stale(self) -> None:
+        """Drop what no turn end came for, and say so: those calls are in no row."""
         cutoff = time.monotonic() - _TALLY_LIFETIME_SECONDS
         for turn_id in [key for key, tally in self._tallies.items() if tally.touched < cutoff]:
-            del self._tallies[turn_id]
+            tally = self._tallies.pop(turn_id)
+            logger.info(
+                "turn %s never ended: %d model calls, %s tokens in, in no row",
+                turn_id,
+                len(tally.calls),
+                tally.tokens_in,
+            )
+            self._metrics.orphaned_calls.inc(len(tally.calls))
+        for session_id in [key for key, tally in self._finished.items() if tally.touched < cutoff]:
+            del self._finished[session_id]
 
 
 def _plus(total: int | None, part: int | None) -> int | None:

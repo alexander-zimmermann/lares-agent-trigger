@@ -77,6 +77,9 @@ class Settings(NatsSettings):
     http_port: int = 8080
     hook_secret: str = Field(default="", repr=False)
     hook_secret_file: Path | None = None
+    # How long an event run waits, once over, for its model calls to arrive
+    # through the hook before it is recorded without them.
+    trace_wait_seconds: float = 5.0
 
     @model_validator(mode="after")
     def _resolve_secret_files(self) -> Settings:

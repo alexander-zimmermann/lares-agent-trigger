@@ -15,6 +15,7 @@ import contextlib
 import json
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -341,6 +342,8 @@ def settings(
         hermes_url=HERMES_URL,
         hermes_api_key="k" * 32,
         hook_secret=HOOK_SECRET,
+        # An event run waits this long for its calls; the tests deliver them first.
+        trace_wait_seconds=0.05,
         # The poll loop is exercised, not waited on.
         hermes_poll_seconds=0.01,
         alertmanager_url=ALERTMANAGER_URL,
@@ -410,11 +413,20 @@ def publish(stream: Any) -> Callable[..., Awaitable[None]]:
     return _publish
 
 
+@dataclass(frozen=True)
+class Service:
+    """The service as `main.py` wires it: one ledger, one tally, both paths on it."""
+
+    consumer: EpisodeConsumer
+    client: httpx.AsyncClient
+    metrics: Metrics
+
+
 @pytest_asyncio.fixture
-async def consumer(
+async def service(
     settings: Settings, stream: Any, relay: Relay, discord: Any
-) -> AsyncIterator[tuple[EpisodeConsumer, Metrics]]:
-    """The service as it runs: real ledger, real consumer, the edges faked."""
+) -> AsyncIterator[Service]:
+    """Real ledger, real consumer, the hook receiver in process, the edges faked."""
     metrics = Metrics()
     ledger = Ledger(settings)
     await ledger.open()
@@ -422,6 +434,7 @@ async def consumer(
     alertmanager = Alertmanager(settings, metrics)
     use_cases = load_use_cases(settings.use_cases_file)
     deliveries = build_deliveries(settings, use_cases, metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, metrics)
     runs = EventRuns(
         use_cases,
         ledger,
@@ -430,12 +443,18 @@ async def consumer(
         deliveries,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
+        traces=turns,
+        trace_wait_seconds=settings.trace_wait_seconds,
     )
     episode_consumer = EpisodeConsumer(settings, runs, metrics)
     await episode_consumer.connect()
+    app = create_app(turns, settings.hook_secret, metrics)
+    # In-process: the ASGI app behind a real HTTP client, no port and no server.
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://trigger")
     try:
-        yield episode_consumer, metrics
+        yield Service(episode_consumer, client, metrics)
     finally:
+        await client.aclose()
         await episode_consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()
@@ -443,20 +462,13 @@ async def consumer(
         await ledger.close()
 
 
-@pytest_asyncio.fixture
-async def receiver(settings: Settings) -> AsyncIterator[tuple[httpx.AsyncClient, Metrics]]:
+@pytest.fixture
+def consumer(service: Service) -> tuple[EpisodeConsumer, Metrics]:
+    """The episode path of the service."""
+    return service.consumer, service.metrics
+
+
+@pytest.fixture
+def receiver(service: Service) -> tuple[httpx.AsyncClient, Metrics]:
     """The hook receiver as Hermes reaches it: HTTP in, the real ledger behind it."""
-    metrics = Metrics()
-    ledger = Ledger(settings)
-    await ledger.open()
-    hermes = HermesClient(settings)
-    turns = TurnRuns(load_use_cases(settings.use_cases_file), ledger, hermes, metrics)
-    app = create_app(turns, settings.hook_secret, metrics)
-    # In-process: the ASGI app behind a real HTTP client, no port and no server.
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://trigger")
-    try:
-        yield client, metrics
-    finally:
-        await client.aclose()
-        await hermes.aclose()
-        await ledger.close()
+    return service.client, service.metrics
