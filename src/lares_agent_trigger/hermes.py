@@ -9,13 +9,21 @@ case's skill is named in the instructions.
 messages — the gateway reads a string as the message and takes `content` off
 the last entry of a list, and anything else is a 400. The pointer therefore
 travels as compact JSON inside that string.
+
+What a run reports about itself is split across two endpoints, and the split
+is the gateway's, not ours. The run record (`api_server_runs.py`) carries
+`run_id`, `status`, `session_id`, `model`, `output`, `error` and a `usage`
+block of exactly three token counters. Cost and the tool count live on the
+session record (`/api/sessions/{id}`), which the run names by `session_id`.
+Duration is on neither, so the trigger takes it off its own clock — which is
+the number the ledger wants anyway: how long the house waited for an answer.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -104,20 +112,23 @@ class HermesClient:
         )
         if response.status_code >= 400:
             raise HermesError(f"POST /v1/runs returned {response.status_code}: {response.text}")
-        run_id = response.json().get("id")
+        run_id = response.json().get("run_id")
         if not run_id:
-            raise HermesError("POST /v1/runs returned no run id")
+            raise HermesError("POST /v1/runs returned no run_id")
         return str(run_id)
 
     async def await_run(self, harness_run_id: str, *, deadline_seconds: float) -> RunOutcome:
         """Poll the run until it is terminal, or until its budget of minutes is spent."""
         loop = asyncio.get_running_loop()
-        give_up_at = loop.time() + deadline_seconds
+        started = loop.time()
+        give_up_at = started + deadline_seconds
         while True:
             body = await self._get_run(harness_run_id)
             status = str(body.get("status", ""))
+            elapsed = loop.time() - started
             if status not in _PENDING:
-                return _outcome(harness_run_id, body, status)
+                usage = await self._usage_with_session(body, elapsed)
+                return _outcome(harness_run_id, body, status, usage)
             if loop.time() >= give_up_at:
                 return RunOutcome(
                     harness_run_id=harness_run_id,
@@ -127,9 +138,36 @@ class HermesClient:
                         f"run did not finish within {deadline_seconds / 60:.0f} minutes"
                         f" (last status: {status or 'unknown'})"
                     ),
-                    usage=_usage(body),
+                    usage=_usage(body, elapsed),
                 )
             await asyncio.sleep(self._settings.hermes_poll_seconds)
+
+    async def _usage_with_session(self, body: dict[str, Any], elapsed: float) -> Usage:
+        """Run usage, plus the cost and tool count only the session record holds.
+
+        A session that cannot be read leaves those two fields unset rather than
+        failing the run: the explanation is already written, and a NULL cost is
+        honest where a guessed one would not be.
+        """
+        usage = _usage(body, elapsed)
+        session_id = body.get("session_id")
+        if not session_id:
+            return usage
+        try:
+            response = await self._client.get(f"/api/sessions/{session_id}")
+            session = response.json() if response.status_code < 400 else {}
+        except httpx.HTTPError, ValueError:
+            return usage
+        if not isinstance(session, dict):
+            return usage
+        # `actual_cost_usd` is what the provider billed; `estimated_cost_usd` is
+        # the gateway's own reckoning and stands in until the bill is known.
+        cost = session.get("actual_cost_usd") or session.get("estimated_cost_usd")
+        return replace(
+            usage,
+            cost=Decimal(str(cost)) if cost is not None else None,
+            tool_count=_int_or_none(session.get("tool_call_count")),
+        )
 
     async def _get_run(self, harness_run_id: str) -> dict[str, Any]:
         response = await self._client.get(f"/v1/runs/{harness_run_id}")
@@ -143,7 +181,7 @@ class HermesClient:
         return body
 
 
-def _outcome(harness_run_id: str, body: dict[str, Any], status: str) -> RunOutcome:
+def _outcome(harness_run_id: str, body: dict[str, Any], status: str, usage: Usage) -> RunOutcome:
     output = body.get("output")
     error = body.get("error")
     if status != "completed" and not error:
@@ -153,28 +191,24 @@ def _outcome(harness_run_id: str, body: dict[str, Any], status: str) -> RunOutco
         status="completed" if status == "completed" else "failed",
         output=str(output) if output is not None else None,
         error=str(error) if error is not None else None,
-        usage=_usage(body),
+        usage=usage,
     )
 
 
-def _usage(body: dict[str, Any]) -> Usage:
-    """Read the usage block; every field is optional, and absent means unknown.
+def _usage(body: dict[str, Any], elapsed: float) -> Usage:
+    """What the run record itself reports, plus the duration we timed.
 
-    Verified on the image: `usage` carries input/output/reasoning tokens,
-    api_calls and cost_usd, beside `duration_seconds`, `tool_count` and
-    `model` on the run itself. `provider` is taken when the harness sends it —
-    without it the ledger's `model_source` stays NULL rather than guessing.
+    `usage` on a run is exactly three counters (`_USAGE_FIELDS` in the
+    gateway): input, output and total tokens. `provider` is on no endpoint, so
+    `model_source` stays NULL rather than repeating what the configuration
+    says and calling it a measurement.
     """
     usage = body.get("usage") or {}
-    cost = usage.get("cost_usd")
     return Usage(
-        model_source=_str_or_none(body.get("provider")),
         model=_str_or_none(body.get("model")),
         tokens_in=_int_or_none(usage.get("input_tokens")),
         tokens_out=_int_or_none(usage.get("output_tokens")),
-        cost=Decimal(str(cost)) if cost is not None else None,
-        duration_seconds=_float_or_none(body.get("duration_seconds")),
-        tool_count=_int_or_none(body.get("tool_count")),
+        duration_seconds=elapsed,
     )
 
 
@@ -184,7 +218,3 @@ def _str_or_none(value: Any) -> str | None:
 
 def _int_or_none(value: Any) -> int | None:
     return int(value) if value is not None else None
-
-
-def _float_or_none(value: Any) -> float | None:
-    return float(value) if value is not None else None

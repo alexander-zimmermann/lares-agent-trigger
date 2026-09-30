@@ -29,15 +29,28 @@ EXPLANATION = (
     "Leistung 49 mA über 45 Minuten, Schwelle 30 mA."
 )
 
+# The run record as the gateway writes it: `run_id` (never `id`), the three
+# token counters of `_USAGE_FIELDS`, and no cost, tool count or provider —
+# those are the session's, or nobody's.
 COMPLETED = {
-    "id": "run_1",
+    "object": "hermes.run",
+    "run_id": "run_1",
     "status": "completed",
-    "output": EXPLANATION,
-    "provider": "openai-codex",
+    "session_id": "sess_1",
     "model": "gpt-6-sol",
-    "duration_seconds": 42.0,
-    "tool_count": 7,
-    "usage": {"input_tokens": 4200, "output_tokens": 310, "cost_usd": 0.021},
+    "output": EXPLANATION,
+    "usage": {"input_tokens": 4200, "output_tokens": 310, "total_tokens": 4510},
+}
+
+# The session record, where the cost and the tool count actually live.
+SESSION = {
+    "id": "sess_1",
+    "model": "gpt-6-sol",
+    "tool_call_count": 7,
+    "input_tokens": 4200,
+    "output_tokens": 310,
+    "actual_cost_usd": 0.021,
+    "api_call_count": 9,
 }
 
 
@@ -58,7 +71,7 @@ def _start_response(request: httpx.Request) -> httpx.Response:
         message = ""
     if not message:
         return httpx.Response(400, json={"error": {"message": "No user message found in input"}})
-    return httpx.Response(200, json={"id": "run_1", "status": "queued"})
+    return httpx.Response(200, json={"object": "hermes.run", "run_id": "run_1", "status": "queued"})
 
 
 def _fake_hermes(
@@ -68,6 +81,9 @@ def _fake_hermes(
     started = respx_mock.post(f"{HERMES_URL}/v1/runs").mock(side_effect=_start_response)
     respx_mock.get(f"{HERMES_URL}/v1/runs/run_1").mock(
         side_effect=[httpx.Response(200, json=state) for state in (states or [COMPLETED])]
+    )
+    respx_mock.get(f"{HERMES_URL}/api/sessions/sess_1").mock(
+        return_value=httpx.Response(200, json=SESSION)
     )
     return started
 
@@ -96,13 +112,17 @@ async def test_an_episode_appearing_at_severity_two_is_explained(
     assert row["language"] == "de"
     assert row["tldr"] == "Die Waschmaschine hängt seit 14:20 im Spülgang."
     assert row["text"] == EXPLANATION
-    assert row["model_source"] == "openai-codex"
+    # `provider` is on no endpoint, so model_source stays NULL rather than
+    # repeating the configuration and calling it a measurement.
+    assert row["model_source"] is None
     assert row["model"] == "gpt-6-sol"
     assert row["tokens_in"] == 4200
     assert row["tokens_out"] == 310
+    # Cost and the tool count come from the session record the run names.
     assert float(row["cost"]) == pytest.approx(0.021)
-    assert row["duration"].total_seconds() == pytest.approx(42.0)
     assert row["tool_trace"] == {"tool_count": 7}
+    # Duration is our own clock: the gateway reports none.
+    assert row["duration"].total_seconds() >= 0
     assert row["finished_at"] is not None
 
     assert (
@@ -210,6 +230,9 @@ async def test_the_eleventh_run_of_a_day_is_a_capped_row(
     respx_mock.post(f"{HERMES_URL}/v1/runs").mock(side_effect=_start_response)
     respx_mock.get(f"{HERMES_URL}/v1/runs/run_1").mock(
         return_value=httpx.Response(200, json=COMPLETED)
+    )
+    respx_mock.get(f"{HERMES_URL}/api/sessions/sess_1").mock(
+        return_value=httpx.Response(200, json=SESSION)
     )
     episode_consumer, metrics = consumer
 
