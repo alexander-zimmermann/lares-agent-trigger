@@ -1,4 +1,4 @@
-"""Entry point: load the declaration, open the ledger, bind the consumer, serve health."""
+"""Entry point: load the declaration, build its deliveries, open the ledger, bind the consumer."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from nats_bridge_core import tracing, watchdog_ok
 from .alerts import Alertmanager
 from .config import Settings
 from .consumer import EpisodeConsumer
+from .deliveries import build_deliveries
 from .event_runs import EventRuns
 from .hermes import HermesClient
 from .ledger import Ledger
@@ -31,10 +32,13 @@ async def _amain() -> int:
     tracing.configure(settings, service_name="lares-agent-trigger")
     logger.info("lares-agent-trigger starting")
 
-    # A file that does not validate stops the pod here, with the reason in the
-    # log: starting runs from a half-read catalogue is worse than not starting.
+    metrics = Metrics()
+    # A file that does not validate, or an output nobody could deliver, stops
+    # the pod here with the reason in the log: starting runs from a half-read
+    # catalogue is worse than not starting.
     try:
         use_cases = load_use_cases(settings.use_cases_file)
+        deliveries = build_deliveries(settings, use_cases, metrics)
     except ValueError as exc:
         logger.error("refusing to start: %s", exc)
         return 1
@@ -45,7 +49,6 @@ async def _amain() -> int:
             "enabled" if use_case.is_enabled else f"dormant — {use_case.dormant}",
         )
 
-    metrics = Metrics()
     ledger = Ledger(settings)
     hermes = HermesClient(settings)
     alertmanager = Alertmanager(settings, metrics)
@@ -54,6 +57,7 @@ async def _amain() -> int:
         ledger,
         hermes,
         alertmanager,
+        deliveries,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
     )
@@ -87,6 +91,7 @@ async def _amain() -> int:
         await consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()
+        await deliveries.aclose()
         await ledger.close()
         http_server.close()
         with contextlib.suppress(Exception):

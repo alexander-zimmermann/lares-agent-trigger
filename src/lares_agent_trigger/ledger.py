@@ -9,6 +9,7 @@ already has this one".
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -188,21 +189,14 @@ class Ledger:
                 (harness_run_id, run_id),
             )
 
-    async def finish(
-        self,
-        run_id: int,
-        *,
-        status: Literal["completed", "failed"],
-        text: str | None = None,
-        error: str | None = None,
-        usage: Usage | None = None,
-    ) -> None:
-        """Close the row with what the run produced and what it cost.
+    async def record(self, run_id: int, *, text: str | None, usage: Usage) -> None:
+        """Write what the run produced and what it cost; the row stays open.
 
-        `tldr` is the first line of the text — the sentence an explanation opens
-        with — and the tool trace holds the call count, never a raw result.
+        This is the `stored` output: the text is in the ledger before any other
+        target sees it. `tldr` is the first line of the text — the sentence an
+        explanation opens with — and the tool trace holds the call count, never
+        a raw result.
         """
-        usage = usage or Usage()
         tldr = text.strip().splitlines()[0] if text and text.strip() else None
         duration = (
             timedelta(seconds=usage.duration_seconds)
@@ -216,16 +210,13 @@ class Ledger:
             await conn.execute(
                 """
                 UPDATE agent_runs SET
-                    status = %s, finished_at = now(), tldr = %s, text = %s, error = %s,
-                    model_source = %s, model = %s, tokens_in = %s, tokens_out = %s,
-                    cost = %s, duration = %s, tool_trace = %s
+                    tldr = %s, text = %s, model_source = %s, model = %s, tokens_in = %s,
+                    tokens_out = %s, cost = %s, duration = %s, tool_trace = %s
                 WHERE id = %s
                 """,
                 (
-                    status,
                     tldr,
                     text,
-                    error,
                     usage.model_source,
                     usage.model,
                     usage.tokens_in,
@@ -235,4 +226,29 @@ class Ledger:
                     trace,
                     run_id,
                 ),
+            )
+
+    async def finish(
+        self,
+        run_id: int,
+        *,
+        status: Literal["completed", "failed"],
+        error: str | None = None,
+        output_ref: Sequence[str] = (),
+    ) -> None:
+        """Close the row, with one `output_ref` entry per thing a delivery created.
+
+        A message or a mail has no state to follow, so its `output_state`
+        position is NULL.
+        """
+        refs = list(output_ref)
+        async with self._require_pool.connection() as conn:
+            await conn.execute(
+                """
+                UPDATE agent_runs SET
+                    status = %s, finished_at = now(), error = %s,
+                    output_ref = %s::text[], output_state = %s::text[]
+                WHERE id = %s
+                """,
+                (status, error, refs, [None] * len(refs), run_id),
             )

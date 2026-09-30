@@ -1,15 +1,18 @@
-"""The trigger's one seam: a real NATS stream and a real ledger, fakes over HTTP.
+"""The trigger's one seam: a real NATS stream and a real ledger, fakes at the edge.
 
 Everything a neighbour would see is real here — the message on JetStream, the
-durable consumer, the rows in Postgres — and only the two HTTP services are
-replaced (`fakes.py`): the harness, because a run is a model call, and
-Alertmanager, because the alert is asserted as it would arrive there.
+durable consumer, the rows in Postgres — and only the outside services are
+replaced: the harness, because a run is a model call; Alertmanager and
+Discord over HTTP (`fakes.py`), because the alert and the message are
+asserted as they would arrive there; and the mail relay by an SMTP server in
+this process, because the mail is asserted as the relay would take it.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,9 @@ import nats
 import psycopg
 import pytest
 import pytest_asyncio
+import respx
+from aiosmtpd.controller import Controller
+from aiosmtpd.smtp import SMTP, Envelope, Session
 from nats.js.api import AckPolicy, ConsumerConfig
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
@@ -26,6 +32,7 @@ from testcontainers.postgres import PostgresContainer
 from lares_agent_trigger.alerts import Alertmanager
 from lares_agent_trigger.config import Settings
 from lares_agent_trigger.consumer import EpisodeConsumer
+from lares_agent_trigger.deliveries import build_deliveries
 from lares_agent_trigger.event_runs import EventRuns
 from lares_agent_trigger.hermes import HermesClient
 from lares_agent_trigger.ledger import Ledger
@@ -42,6 +49,15 @@ ALERTMANAGER_URL = "http://alertmanager.test:9093"
 # Short enough to wait on, long enough to measure between two starts.
 RETRY_DELAY_SECONDS = 0.2
 
+DISCORD_TOKEN = "discord-bot-token-for-tests"
+# The home channel, as the harness has it.
+DISCORD_CHANNEL = "1548229055348736034"
+# The relay's one accepted sender, and the owner it writes to.
+MAIL_FROM = "Lares <admin@zimmermann.sh>"
+ACCEPTED_SENDER = "admin@zimmermann.sh"
+MAIL_TO = "admin@zimmermann.sh"
+DASHBOARD_EPISODE_URL = "https://grafana.test/d/knx-episodes?var-fault={fault}"
+
 USE_CASES = """
 use_cases:
   - name: explain-episode
@@ -54,7 +70,7 @@ use_cases:
         escalated: 2
     skill: lares-explain
     tools: [lares]
-    output: [stored]
+    output: [stored, discord, mail]
     budget:
       tool_calls: 40
       minutes: 10
@@ -62,6 +78,26 @@ use_cases:
     language: de
     memory: false
     enabled: true
+"""
+
+# Two entries copied from the engine's faults.yaml: one sentence with a dash
+# before its reason, one without. The rest of the schema is there to be ignored.
+FAULTS = """
+faults:
+  - name: channel_silence
+    sentence: "Ein Kanal, den die Engine lange genug kennt und der sonst
+      regelmäßig sendet, schweigt länger als das Fünffache der Sendepause, die
+      er sonst in 19 von 20 Fällen einhält."
+    unit: "× der üblichen Sendepause"
+    kind: silence
+    parameters:
+      gap_factor: 5
+      gap_quantile: 0.95
+  - name: appliance_runtime
+    sentence: "Ein Gerät zieht ununterbrochen länger Strom, als seine je Gerät
+      erlaubte Laufzeit zulässt — vergessen eingeschaltet oder hängen geblieben."
+    unit: "min"
+    kind: duration
 """
 
 # The ledger as bootstrap.sql creates it; the unique index is the dedupe key.
@@ -166,10 +202,82 @@ def execute(postgres: PostgresContainer) -> Iterator[Callable[..., None]]:
         yield run
 
 
+class Relay:
+    """The cluster's mail relay as the trigger meets it: plaintext SMTP, one accepted sender.
+
+    It keeps every message it took; `refuse` makes it answer the next DATA
+    with that reply instead, as a relay whose upstream turned a mail away.
+    """
+
+    def __init__(self) -> None:
+        self.messages: list[Envelope] = []
+        self.refuse: str | None = None
+
+    async def handle_MAIL(  # noqa: N802 — aiosmtpd's hook name
+        self, _server: SMTP, _session: Session, envelope: Envelope, address: str, options: list[str]
+    ) -> str:
+        if address != ACCEPTED_SENDER:
+            return "553 5.7.1 Sender address rejected: not owned by the account"
+        envelope.mail_from = address
+        envelope.mail_options.extend(options)
+        return "250 OK"
+
+    async def handle_DATA(  # noqa: N802 — aiosmtpd's hook name
+        self, _server: SMTP, _session: Session, envelope: Envelope
+    ) -> str:
+        if self.refuse is not None:
+            return self.refuse
+        self.messages.append(envelope)
+        return "250 OK"
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+@pytest.fixture(scope="session")
+def relay_server() -> Iterator[tuple[Relay, int]]:
+    relay = Relay()
+    port = _free_port()
+    controller = Controller(relay, hostname="127.0.0.1", port=port)
+    controller.start()
+    try:
+        yield relay, port
+    finally:
+        controller.stop()
+
+
 @pytest.fixture
-def settings(postgres: PostgresContainer, nats_url: str, tmp_path: Path) -> Settings:
+def relay(relay_server: tuple[Relay, int]) -> Relay:
+    """The relay, emptied for this test."""
+    server, _ = relay_server
+    server.messages.clear()
+    server.refuse = None
+    return server
+
+
+@pytest.fixture
+def discord(respx_mock: respx.MockRouter) -> Any:
+    """Discord's create-message endpoint on the home channel, as `fakes.fake_discord` keeps it."""
+    from .fakes import fake_discord  # fakes imports this module's constants
+
+    return fake_discord(respx_mock)
+
+
+@pytest.fixture
+def settings(
+    postgres: PostgresContainer,
+    nats_url: str,
+    relay_server: tuple[Relay, int],
+    tmp_path: Path,
+) -> Settings:
     use_cases_file = tmp_path / "use-cases.yaml"
     use_cases_file.write_text(USE_CASES, encoding="utf-8")
+    faults_file = tmp_path / "faults.yaml"
+    faults_file.write_text(FAULTS, encoding="utf-8")
+    _, relay_port = relay_server
     host = postgres.get_container_host_ip()
     return Settings(
         nats_servers=nats_url,
@@ -186,6 +294,14 @@ def settings(postgres: PostgresContainer, nats_url: str, tmp_path: Path) -> Sett
         alertmanager_url=ALERTMANAGER_URL,
         retry_delay_seconds=RETRY_DELAY_SECONDS,
         fetch_timeout_seconds=2.0,
+        discord_bot_token=DISCORD_TOKEN,
+        discord_home_channel=DISCORD_CHANNEL,
+        smtp_host="127.0.0.1",
+        smtp_port=relay_port,
+        mail_from=MAIL_FROM,
+        mail_to=MAIL_TO,
+        faults_file=faults_file,
+        dashboard_episode_url=DASHBOARD_EPISODE_URL,
     )
 
 
@@ -221,11 +337,18 @@ def publish_raw(stream: Any) -> Callable[[bytes], Awaitable[None]]:
 def publish(stream: Any) -> Callable[..., Awaitable[None]]:
     """Publish one episode event as the engine's adapter shapes it."""
 
-    async def _publish(kind: str, severity: int, *, episode_id: int = 15510) -> None:
+    async def _publish(
+        kind: str,
+        severity: int,
+        *,
+        episode_id: int = 15510,
+        fault: str = "appliance_runtime",
+        subject: str = "2/1/197",
+    ) -> None:
         body = {
             "episode_id": episode_id,
-            "fault": "appliance_runtime",
-            "subject": "2/1/197",
+            "fault": fault,
+            "subject": subject,
             "severity": severity,
             "kind": kind,
             "time": "2026-09-25T14:20:00+00:00",
@@ -237,19 +360,22 @@ def publish(stream: Any) -> Callable[..., Awaitable[None]]:
 
 @pytest_asyncio.fixture
 async def consumer(
-    settings: Settings, stream: Any
+    settings: Settings, stream: Any, relay: Relay, discord: Any
 ) -> AsyncIterator[tuple[EpisodeConsumer, Metrics]]:
-    """The service as it runs: real ledger, real consumer, one HTTP client to fake."""
+    """The service as it runs: real ledger, real consumer, the edges faked."""
     metrics = Metrics()
     ledger = Ledger(settings)
     await ledger.open()
     hermes = HermesClient(settings)
     alertmanager = Alertmanager(settings, metrics)
+    use_cases = load_use_cases(settings.use_cases_file)
+    deliveries = build_deliveries(settings, use_cases, metrics)
     runs = EventRuns(
-        load_use_cases(settings.use_cases_file),
+        use_cases,
         ledger,
         hermes,
         alertmanager,
+        deliveries,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
     )
@@ -261,4 +387,5 @@ async def consumer(
         await episode_consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()
+        await deliveries.aclose()
         await ledger.close()

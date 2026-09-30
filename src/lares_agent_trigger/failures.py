@@ -34,6 +34,8 @@ FailureClass = Literal[
     "unknown",
     # Not read off any text: the event path finds a row a dead pod left open.
     "trigger_restarted",
+    # Not read off any text: a declared target refused the finished output.
+    "delivery_failed",
 ]
 
 TRANSIENT: frozenset[FailureClass] = frozenset(
@@ -121,3 +123,8 @@ def classify_exception(exc: Exception) -> FailureClass:
             return "auth_failed"
         return "invalid_config"
     return "unknown"
+
+
+def describe(exc: Exception) -> str:
+    """The exception's own text; some transport errors carry none."""
+    return str(exc) or type(exc).__name__

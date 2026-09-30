@@ -17,8 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from .events import EventKind
 
-# Where a completed run's output is delivered. `stored` is the always-on one:
-# the text in the ledger. The rest arrive with their own tickets.
+# Where a completed run's output is delivered; `deliveries.py` holds one delivery
+# per target it can serve, and `stored` is the ledger row itself.
 OutputTarget = Literal[
     "stored",
     "discord",
