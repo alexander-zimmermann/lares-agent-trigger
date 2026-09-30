@@ -1,4 +1,4 @@
-"""The harness's Runs API: start a run, poll it to its terminal state.
+"""The harness's API server: the Runs API for event runs, the Jobs API for cron runs.
 
 The Runs API takes no toolset list, so what an API run may see is decided in
 the harness configuration (`platform_toolsets.api_server`, the read server
@@ -18,6 +18,9 @@ provider are, the top-level `model` being the gateway's own name. Its
 `created_at` and `updated_at` are unix seconds, and their difference is the
 run's real duration. Cost and the tool count live on the session record
 (`/api/sessions/{id}`), whose payload sits under a `session` key.
+
+A cron job's id is minted by the gateway, so what the job runs is read off its
+name through the Jobs API (`/api/jobs/{id}`, wrapped under `job`).
 """
 
 from __future__ import annotations
@@ -26,12 +29,12 @@ import asyncio
 import json
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 
 from .config import Settings
-from .ledger import Usage
+from .ledger import ClosedStatus, Usage
 
 # What the harness reports while a run is still going; anything else is final.
 _PENDING = ("queued", "running", "in_progress")
@@ -62,7 +65,7 @@ class RunOutcome:
     """
 
     harness_run_id: str
-    status: Literal["completed", "failed"]
+    status: ClosedStatus
     output: str | None
     error: str | None
     usage: Usage
@@ -182,6 +185,27 @@ class HermesClient:
             cost=Decimal(str(cost)) if cost is not None else None,
             tool_count=_int_or_none(session.get("tool_call_count")),
         )
+
+    async def job_name(self, job_id: str) -> str | None:
+        """The name of a cron job; None when the gateway holds no such job.
+
+        A gateway that cannot answer raises: without the name a cron run
+        belongs to no use case, so its delivery is refused and sent again.
+        """
+        response = await self._client.get(f"/api/jobs/{job_id}")
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            raise HermesError(
+                f"GET /api/jobs/{job_id} returned {response.status_code}: {response.text}",
+                status_code=response.status_code,
+            )
+        payload = response.json()
+        job = payload.get("job") if isinstance(payload, dict) else None
+        if not isinstance(job, dict):
+            raise HermesError(f"GET /api/jobs/{job_id} returned no job")
+        name = job.get("name")
+        return str(name) if name else None
 
     async def _get_run(self, harness_run_id: str) -> dict[str, Any]:
         response = await self._client.get(f"/v1/runs/{harness_run_id}")

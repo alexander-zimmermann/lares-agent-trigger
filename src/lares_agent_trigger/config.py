@@ -1,4 +1,4 @@
-"""Runtime configuration: NATS from the shared base, plus the ledger, the harness and delivery."""
+"""Runtime configuration: NATS from the shared base, plus ledger, harness, delivery and hook."""
 
 from __future__ import annotations
 
@@ -72,6 +72,12 @@ class Settings(NatsSettings):
     # The dashboard row of an episode; `{episode_id}` and `{fault}` are filled in.
     dashboard_episode_url: str = ""
 
+    # The receiver the harness's outbound hook posts every finished chat and
+    # cron turn to, and the HMAC secret both sides share.
+    http_port: int = 8080
+    hook_secret: str = Field(default="", repr=False)
+    hook_secret_file: Path | None = None
+
     @model_validator(mode="after")
     def _resolve_secret_files(self) -> Settings:
         if self.db_username_file:
@@ -82,12 +88,15 @@ class Settings(NatsSettings):
             self.hermes_api_key = self.hermes_api_key_file.read_text(encoding="utf-8").strip()
         if self.discord_bot_token_file:
             self.discord_bot_token = self.discord_bot_token_file.read_text(encoding="utf-8").strip()
+        if self.hook_secret_file:
+            self.hook_secret = self.hook_secret_file.read_text(encoding="utf-8").strip()
         missing = [
             name
             for name, value in (
                 ("DB_USERNAME", self.db_username),
                 ("DB_PASSWORD", self.db_password),
                 ("HERMES_API_KEY", self.hermes_api_key),
+                ("HOOK_SECRET", self.hook_secret),
             )
             if not value
         ]

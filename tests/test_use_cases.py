@@ -135,6 +135,33 @@ def test_an_unknown_field_is_refused(tmp_path: Path) -> None:
         load_use_cases(_write(tmp_path, broken))
 
 
+def test_a_chat_names_no_skill_and_everything_else_does(tmp_path: Path) -> None:
+    chat = VALID.replace("    skill: lares-answer\n", "", 1)
+    assert load_use_cases(_write(tmp_path, chat))["messenger"].skill is None
+
+    broken = VALID.replace("    skill: lares-explain\n", "", 1)
+    with pytest.raises(ValueError, match="event use case names its skill"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_second_enabled_chat_is_refused(tmp_path: Path) -> None:
+    """The harness has one chat surface; a turn it reports must belong to one use case."""
+    doubled = VALID + (
+        "  - name: messenger-2\n"
+        "    sentence: A second chat.\n"
+        "    trigger: {kind: message}\n"
+        "    tools: [lares]\n"
+        "    output: [discord]\n"
+        "    budget: {tool_calls: 40, minutes: 10, runs_per_day: 200}\n"
+        "    language: de\n"
+        "    memory: false\n"
+        "    enabled: true\n"
+    )
+
+    with pytest.raises(ValueError, match="only one enabled message use case"):
+        load_use_cases(_write(tmp_path, doubled))
+
+
 def test_two_use_cases_of_one_name_are_refused(tmp_path: Path) -> None:
     doubled = VALID + VALID.split("use_cases:")[1]
 

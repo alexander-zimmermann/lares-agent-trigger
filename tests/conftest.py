@@ -1,11 +1,12 @@
 """The trigger's one seam: a real NATS stream and a real ledger, fakes at the edge.
 
 Everything a neighbour would see is real here — the message on JetStream, the
-durable consumer, the rows in Postgres — and only the outside services are
-replaced: the harness, because a run is a model call; Alertmanager and
-Discord over HTTP (`fakes.py`), because the alert and the message are
-asserted as they would arrive there; and the mail relay by an SMTP server in
-this process, because the mail is asserted as the relay would take it.
+durable consumer, the signed POST to the hook receiver, the rows in
+Postgres — and only the outside services are replaced: the harness, because
+a run is a model call; Alertmanager and Discord over HTTP (`fakes.py`),
+because the alert and the message are asserted as they would arrive there;
+and the mail relay by an SMTP server in this process, because the mail is
+asserted as the relay would take it.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import nats
 import psycopg
 import pytest
@@ -37,6 +39,8 @@ from lares_agent_trigger.event_runs import EventRuns
 from lares_agent_trigger.hermes import HermesClient
 from lares_agent_trigger.ledger import Ledger
 from lares_agent_trigger.metrics import Metrics
+from lares_agent_trigger.receiver import create_app
+from lares_agent_trigger.turn_runs import TurnRuns
 from lares_agent_trigger.use_cases import load_use_cases
 
 # The ledger lives in the TimescaleDB instance; the two tables themselves are
@@ -46,6 +50,7 @@ NATS_IMAGE = "nats:2.10-alpine"
 
 HERMES_URL = "http://hermes.test:8642"
 ALERTMANAGER_URL = "http://alertmanager.test:9093"
+HOOK_SECRET = "h" * 32
 # Short enough to wait on, long enough to measure between two starts.
 RETRY_DELAY_SECONDS = 0.2
 
@@ -78,6 +83,52 @@ use_cases:
     language: de
     memory: false
     enabled: true
+
+  - name: messenger
+    sentence: Answers a message from the phone.
+    trigger:
+      kind: message
+    tools: [lares]
+    output: [discord]
+    budget:
+      tool_calls: 40
+      minutes: 10
+      runs_per_day: 200
+    language: de
+    memory: true
+    enabled: true
+
+  - name: propose-faults
+    sentence: Proposes changes to the fault list as pull requests.
+    trigger:
+      kind: schedule
+      cron: "0 3 * * 0"
+    skill: lares-propose
+    tools: [lares]
+    output: [github_pr]
+    budget:
+      tool_calls: 80
+      minutes: 20
+      runs_per_day: 1
+    language: en
+    memory: true
+    enabled: true
+
+  - name: summarise-week
+    sentence: Summarises the week on Sunday evening.
+    trigger:
+      kind: schedule
+      cron: "0 18 * * 0"
+    skill: lares-summary
+    tools: [lares]
+    output: [discord]
+    budget:
+      tool_calls: 20
+      minutes: 5
+      runs_per_day: 1
+    language: de
+    memory: false
+    dormant: Waits for its skill.
 """
 
 # Two entries copied from the engine's faults.yaml: one sentence with a dash
@@ -289,6 +340,7 @@ def settings(
         db_password="test",
         hermes_url=HERMES_URL,
         hermes_api_key="k" * 32,
+        hook_secret=HOOK_SECRET,
         # The poll loop is exercised, not waited on.
         hermes_poll_seconds=0.01,
         alertmanager_url=ALERTMANAGER_URL,
@@ -388,4 +440,23 @@ async def consumer(
         await hermes.aclose()
         await alertmanager.aclose()
         await deliveries.aclose()
+        await ledger.close()
+
+
+@pytest_asyncio.fixture
+async def receiver(settings: Settings) -> AsyncIterator[tuple[httpx.AsyncClient, Metrics]]:
+    """The hook receiver as Hermes reaches it: HTTP in, the real ledger behind it."""
+    metrics = Metrics()
+    ledger = Ledger(settings)
+    await ledger.open()
+    hermes = HermesClient(settings)
+    turns = TurnRuns(load_use_cases(settings.use_cases_file), ledger, hermes, metrics)
+    app = create_app(turns, settings.hook_secret, metrics)
+    # In-process: the ASGI app behind a real HTTP client, no port and no server.
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://trigger")
+    try:
+        yield client, metrics
+    finally:
+        await client.aclose()
+        await hermes.aclose()
         await ledger.close()

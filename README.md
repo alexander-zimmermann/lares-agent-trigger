@@ -4,7 +4,7 @@ The service that decides when the house explains itself.
 
 It reads the episode events [lares-diagnostics-engine](https://github.com/alexander-zimmermann/lares-diagnostics-engine) publishes on NATS, decides against a declared use-case file whether an event deserves an answer, starts a run on the [Hermes](https://github.com/NousResearch/hermes-agent) harness, waits for it, writes the result into one row of the agent ledger, and delivers it where the use case says: a Discord message, a mail.
 
-Besides the chat and the harness's own cron, this is the only thing that starts an agent run — and the only writer of `agent_runs`.
+Besides the chat and the harness's own cron, this is the only thing that starts an agent run — and the only writer of `agent_runs`. The runs it does not start still get their row: the harness reports every finished chat turn and cron execution to the trigger's hook receiver.
 
 ## Why a service and not a job
 
@@ -151,6 +151,33 @@ There is no `endsAt`, so Alertmanager resolves it after its resolve timeout. An 
 
 A row that a dead pod left `queued` or `running` is not started again when its event is redelivered — the harness may still be working on it — but closed as `trigger_restarted` and reported the same way.
 
+## Chat and cron runs
+
+The harness starts two kinds of run on its own: a turn in Discord, and a cron job coming due. The trigger hears of them as they happen, through the harness's outbound hook (`hooks.outbound` in its configuration), which posts two of its lifecycle hooks to `POST /hooks/hermes`, signed with HMAC-SHA256 over the raw body (`X-Hermes-Signature-256: sha256=<hex>`) under a secret both pods read:
+
+- `post_api_request`, once per call to the model: its tokens, the model and its source, when it started and ended, how many tools it asked for, and its reply. Each call is added to its turn's tally in memory.
+- `on_session_end`, which despite its name fires once per turn, after that turn's calls: whether it completed, and why it stopped. It writes the turn's row from the tally.
+
+| Platform      | Use case                                                        | Row                                                                    |
+| ------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `discord`     | the one enabled `message` use case                              | trigger `message`, subject kind `chat`, key `<session id>:<turn>`       |
+| `cron`        | the enabled `schedule` use case its job is named after          | trigger `schedule`, subject kind `none`, key `<job id>:<execution id>`  |
+| `api_server`  | —                                                               | none: the runs this service started hold their row already              |
+| anything else | —                                                               | none                                                                    |
+
+The gateway mints cron job ids itself, so a managed job carries its use case in its name: `lares:propose-faults`. A job without that prefix, or one naming a use case the file does not enable as a schedule, is left alone.
+
+The row holds what the turn's calls added up to: the tokens the model read (cache included) and wrote, the tools it asked for, the time from the first call's start to the last call's end, the model and model source of the last call — a fallback shows up there — and the last call's reply as the answer. Nothing is read off the session record, whose counters run over a whole conversation. A flat subscription bills nothing per call, so `cost` stays empty rather than guessed. A turn whose calls came in before a restart and whose end came after still gets its row, without the tally.
+
+What the receiver answers is what the gateway acts on — it sends a delivery at most twice, the second time only after a connection error or a 5xx:
+
+| Answer | When                                                                                 |
+| ------ | ------------------------------------------------------------------------------------ |
+| `200`  | The call is counted or the row written, either was already (a replay), or the turn is not ours. |
+| `401`  | The signature is missing or wrong. Counted, never parsed.                            |
+| `400`  | The body is neither hook.                                                            |
+| `503`  | The ledger or the Jobs API did not answer; the second try may succeed.              |
+
 ## Configuration
 
 Environment variables; every secret can arrive as a mounted file instead of a literal.
@@ -179,6 +206,8 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `MAIL_FROM` / `MAIL_TO`                     | —                                                  | The relay's accepted sender, and the owner.        |
 | `FAULTS_FILE`                               | `/etc/lares-agent-trigger/faults.yaml`             | The engine's fault list, for the mail subject.     |
 | `DASHBOARD_EPISODE_URL`                     | —                                                  | The episode on the dashboard; `{episode_id}` and `{fault}` are filled in. |
+| `HTTP_PORT`                                 | `8080`                                             | The hook receiver, `POST /hooks/hermes`.           |
+| `HOOK_SECRET_FILE`                          | —                                                  | The HMAC secret the harness signs deliveries with. |
 | `METRICS_PORT`                              | `9090`                                             | `/metrics` and `/healthz`.                         |
 | `LOG_LEVEL` / `LOG_FORMAT`                  | `INFO` / `json`                                    | Logging.                                           |
 | `TRACING_ENDPOINT`                          | —                                                  | OTLP/HTTP collector base URL; unset keeps it off.  |
@@ -195,12 +224,14 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_capped_total`            | `use_case`         | Events refused because the day's budget was spent.           |
 | `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |
 | `agent_trigger_run_duration_seconds`    | `use_case`         | Wall-clock time from start to terminal state.                |
+| `agent_trigger_hook_events_total`       | `outcome`          | Hook deliveries: `counted`, `recorded`, `duplicate`, `ignored`, `refused`, `invalid`, `error`. |
+| `agent_trigger_recorded_runs_total`     | `use_case`, `status` | Chat and cron runs written from the hook, by the status of their row. |
 
 `/healthz` is NATS- and ledger-gated. A harness outage is deliberately not part of it: that is a failed run with its own alert, never a restart loop.
 
 ## Tests
 
-One seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer; the ledger rows land in a real TimescaleDB container; the harness, Alertmanager and Discord are fakes over `respx` — the harness because a run is a model call, the other two so the alert and the message are asserted as they would arrive — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts.
+One seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery goes in over HTTP to the receiver's ASGI app in process, signed as the gateway signs it; the ledger rows land in a real TimescaleDB container; the harness, Alertmanager and Discord are fakes over `respx` — the harness because a run is a model call, the other two so the alert and the message are asserted as they would arrive — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts.
 
 ```bash
 uv sync --extra dev

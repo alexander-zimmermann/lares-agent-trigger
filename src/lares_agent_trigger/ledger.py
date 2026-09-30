@@ -5,6 +5,10 @@ This service is the ledger's only writer, and the ledger's unique key on
 is inserted *before* the run is started, so two deliveries of one event cannot
 become two runs. A conflict is therefore not an error but the answer "somebody
 already has this one".
+
+A run the harness started on its own — a chat turn, a cron execution — is
+already over when the trigger hears of it, so its row is written closed, in
+one statement, and the same key keeps a replayed delivery from a second one.
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ from .config import Settings
 
 SubjectKind = Literal["episode", "alert_group", "chat", "none"]
 TriggerKind = Literal["event", "schedule", "message", "manual"]
+# How a row ends that a run reached the end of.
+ClosedStatus = Literal["completed", "failed"]
 
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[DictRow]]
 
@@ -193,19 +199,8 @@ class Ledger:
         """Write what the run produced and what it cost; the row stays open.
 
         This is the `stored` output: the text is in the ledger before any other
-        target sees it. `tldr` is the first line of the text — the sentence an
-        explanation opens with — and the tool trace holds the call count, never
-        a raw result.
+        target sees it.
         """
-        tldr = text.strip().splitlines()[0] if text and text.strip() else None
-        duration = (
-            timedelta(seconds=usage.duration_seconds)
-            if usage.duration_seconds is not None
-            else None
-        )
-        trace: Jsonb | None = (
-            Jsonb({"tool_count": usage.tool_count}) if usage.tool_count is not None else None
-        )
         async with self._require_pool.connection() as conn:
             await conn.execute(
                 """
@@ -214,25 +209,14 @@ class Ledger:
                     tokens_out = %s, cost = %s, duration = %s, tool_trace = %s
                 WHERE id = %s
                 """,
-                (
-                    tldr,
-                    text,
-                    usage.model_source,
-                    usage.model,
-                    usage.tokens_in,
-                    usage.tokens_out,
-                    usage.cost,
-                    duration,
-                    trace,
-                    run_id,
-                ),
+                (*_output_columns(text, usage), run_id),
             )
 
     async def finish(
         self,
         run_id: int,
         *,
-        status: Literal["completed", "failed"],
+        status: ClosedStatus,
         error: str | None = None,
         output_ref: Sequence[str] = (),
     ) -> None:
@@ -252,3 +236,73 @@ class Ledger:
                 """,
                 (status, error, refs, [None] * len(refs), run_id),
             )
+
+    async def record_turn(
+        self,
+        *,
+        use_case: str,
+        trigger: TriggerKind,
+        subject_kind: SubjectKind,
+        subject_key: str,
+        session_id: str,
+        harness_run_id: str,
+        status: ClosedStatus,
+        language: str,
+        text: str | None,
+        error: str | None,
+        usage: Usage,
+    ) -> int | None:
+        """Write the closed row of a turn the harness ran on its own; None when it exists."""
+        async with self._require_pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    """
+                    INSERT INTO agent_runs
+                        (use_case, trigger, subject_kind, subject_key, session_id,
+                         harness_run_id, status, language, error, finished_at,
+                         tldr, text, model_source, model, tokens_in, tokens_out, cost,
+                         duration, tool_trace)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(),
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (use_case, subject_kind, subject_key) DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        use_case,
+                        trigger,
+                        subject_kind,
+                        subject_key,
+                        session_id,
+                        harness_run_id,
+                        status,
+                        language,
+                        error,
+                        *_output_columns(text, usage),
+                    ),
+                )
+            ).fetchall()
+        return int(rows[0]["id"]) if rows else None
+
+
+def _output_columns(text: str | None, usage: Usage) -> tuple[object, ...]:
+    """What a run produced and cost, in column order from `tldr` to `tool_trace`.
+
+    `tldr` is the first line of the text — the sentence an answer opens with —
+    and the tool trace holds the call count, never a raw result.
+    """
+    tldr = text.strip().splitlines()[0] if text and text.strip() else None
+    duration = (
+        timedelta(seconds=usage.duration_seconds) if usage.duration_seconds is not None else None
+    )
+    trace = Jsonb({"tool_count": usage.tool_count}) if usage.tool_count is not None else None
+    return (
+        tldr,
+        text,
+        usage.model_source,
+        usage.model,
+        usage.tokens_in,
+        usage.tokens_out,
+        usage.cost,
+        duration,
+        trace,
+    )
