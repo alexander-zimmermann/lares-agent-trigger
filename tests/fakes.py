@@ -1,4 +1,4 @@
-"""The fakes at the trigger's outer edge: the harness and Alertmanager, over respx.
+"""The fakes at the trigger's outer edge: the harness, Alertmanager and Discord, over respx.
 
 Each fake keeps the rule of the real service it stands in for, so a test can
 never pass against a fake that is laxer than the live side.
@@ -6,6 +6,7 @@ never pass against a fake that is laxer than the live side.
 
 from __future__ import annotations
 
+import itertools
 import json
 from typing import Any
 
@@ -15,12 +16,22 @@ from prometheus_client import CollectorRegistry
 
 from lares_agent_trigger.metrics import Metrics
 
-from .conftest import ALERTMANAGER_URL, HERMES_URL
+from .conftest import ALERTMANAGER_URL, DISCORD_CHANNEL, DISCORD_TOKEN, HERMES_URL
 
+# An answer in the shape the lares-explain skill asks for, as a live run wrote
+# one: the cause, a blank line, the proof lines, the open point.
 EXPLANATION = (
     "Die Waschmaschine hängt seit 14:20 im Spülgang.\n"
-    "Leistung 49 mA über 45 Minuten, Schwelle 30 mA."
+    "\n"
+    "-# Subject: appliance_runtime auf 2/1/197, seit 25.09. 14:20, Stufe 2\n"
+    "-# Channel: 49 mA, 3 min alt, Waschmaschine, Hauswirtschaftsraum\n"
+    "-# History: seit 14:20 durchgehend 45 bis 52 mA, davor 0 mA\n"
+    "-# Surroundings: niemand zu Hause seit 13:50, Präsenz aus\n"
+    "\n"
+    "Offen: Ob die Tür verriegelt ist, meldet kein Kanal."
 )
+
+DISCORD_MESSAGES = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL}/messages"
 
 # A run record as the live gateway returned one. `run_id`, never `id`; the
 # top-level `model` is the gateway's own name and `runtime` holds the model
@@ -137,6 +148,45 @@ def fake_alertmanager(respx_mock: respx.MockRouter, *, status: int | None = None
     if status is not None:
         return route.mock(return_value=httpx.Response(status))
     return route.mock(side_effect=_alertmanager_response)
+
+
+def _discord_response(request: httpx.Request, ids: Any) -> httpx.Response:
+    """Discord's rules on creating a message: a bot token, and 1 to 2000 characters of content."""
+    if request.headers.get("Authorization") != f"Bot {DISCORD_TOKEN}":
+        return httpx.Response(401, json={"message": "401: Unauthorized", "code": 0})
+    content = json.loads(request.content).get("content") or ""
+    if not content:
+        return httpx.Response(400, json={"message": "Cannot send an empty message", "code": 50006})
+    if len(content) > 2000:
+        return httpx.Response(
+            400,
+            json={
+                "message": "Invalid Form Body",
+                "code": 50035,
+                "errors": {
+                    "content": {
+                        "_errors": [
+                            {
+                                "code": "BASE_TYPE_MAX_LENGTH",
+                                "message": "Must be 2000 or fewer in length.",
+                            }
+                        ]
+                    }
+                },
+            },
+        )
+    return httpx.Response(
+        200,
+        json={"id": str(next(ids)), "channel_id": DISCORD_CHANNEL, "content": content, "type": 0},
+    )
+
+
+def fake_discord(respx_mock: respx.MockRouter) -> Any:
+    """The home channel's create-message endpoint, answering with snowflake ids in order."""
+    ids = itertools.count(1548300000000000001)
+    return respx_mock.post(DISCORD_MESSAGES).mock(
+        side_effect=lambda request: _discord_response(request, ids)
+    )
 
 
 def sample(metrics: Metrics, name: str, **labels: str) -> float:

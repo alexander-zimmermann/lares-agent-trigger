@@ -2,7 +2,7 @@
 
 The service that decides when the house explains itself.
 
-It reads the episode events [lares-diagnostics-engine](https://github.com/alexander-zimmermann/lares-diagnostics-engine) publishes on NATS, decides against a declared use-case file whether an event deserves an answer, starts a run on the [Hermes](https://github.com/NousResearch/hermes-agent) harness, waits for it, and writes the result into one row of the agent ledger.
+It reads the episode events [lares-diagnostics-engine](https://github.com/alexander-zimmermann/lares-diagnostics-engine) publishes on NATS, decides against a declared use-case file whether an event deserves an answer, starts a run on the [Hermes](https://github.com/NousResearch/hermes-agent) harness, waits for it, writes the result into one row of the agent ledger, and delivers it where the use case says: a Discord message, a mail.
 
 Besides the chat and the harness's own cron, this is the only thing that starts an agent run — and the only writer of `agent_runs`.
 
@@ -69,11 +69,50 @@ episode.ended ────┘             │
                    GET  /v1/runs/{id} until terminal, or the budget expires
                                 │
                                 ▼
-       UPDATE agent_runs: status, tldr (first line), text, model, tokens,
+       UPDATE agent_runs: tldr (first line), text, model, tokens,
                           cost, duration, tool_trace = {"tool_count": n}
+                                │
+                                ▼
+                   deliver to each declared output (Discord, mail)
+                                │
+                                ▼
+       UPDATE agent_runs: status, output_ref = one entry per delivery
 ```
 
 The message is acknowledged once the row is closed, which is why the consumer's `ackWait` has to outlast two of the longest declared budgets plus the retry delay.
+
+## Delivery
+
+The model never delivers. On an API run the harness posts nothing itself; once a run has completed, the trigger carries its text to every target the use case declares under `output`, in that order:
+
+| Target    | What it does                                                                                                                         | `output_ref`                    |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
+| `stored`  | The row itself: the text is written before any other target sees it.                                                                 | —                               |
+| `discord` | Posts to the home channel through the bot's REST API, with the token the harness chats with. No mention in the text can ping anyone. | `discord:<channel>/<message>`, one per message |
+| `mail`    | Sends a plaintext mail through the cluster's relay, from its one accepted sender to the owner.                                        | `mail:<Message-ID>`             |
+
+Discord takes 2000 characters a message. A text that fits goes as it is; a longer one goes as the cause and its proof lines (the `-# ` lines the skill writes), then the rest in a second message. A part still too long is cut on a line and ends in `… (run <id>)`: the row holds the whole text.
+
+The mail's subject names what was measured and where — `[Explain] <fault sentence up to its dash> · <channel>` — and its body is the explanation, a footer with model, tokens, cost and duration, and the link to the episode on the dashboard:
+
+```
+Subject: [Explain] Ein Gerät zieht ununterbrochen länger Strom, als seine je Gerät erlaubte Laufzeit zulässt · 2/1/197
+
+Die Waschmaschine hängt seit 14:20 im Spülgang.
+
+-# Subject: appliance_runtime auf 2/1/197, seit 25.09. 14:20, Stufe 2
+…
+
+--
+gpt-5.5 (openai-codex) · 4200 + 310 Tokens · 0.0210 USD · 11 s
+https://grafana.zimmermann.sh/d/knx-episodes?var-fault=appliance_runtime
+```
+
+The fault sentence comes from the engine's own `faults.yaml`, mounted unchanged; an event whose fault the list no longer holds is named by the fault's name.
+
+A target that refuses does not stop the next one from trying. The run then closes `failed` with each refusal's raw text as the error, keeps its text and the refs of everything that was created — the first message of a split post included — and raises `AgentRunFailed` like any failed run. The model is not asked again: running it twice would not change what Discord or the relay make of the answer. A run the harness reports completed but without any output fails before delivery, as `unknown`.
+
+Only targets an enabled event use case declares are built, and a declared target without its settings, or one this trigger does not deliver (`alert`, the GitHub targets, `wiki_page`), stops the pod at startup.
 
 ## When a run fails
 
@@ -92,6 +131,7 @@ Nothing fails silently. A failed run is retried once when the failure fixes itse
 | `invalid_config`     | no    | A model, provider or request the gateway does not accept.                |
 | `unknown`            | no    | Nothing above matched; the raw error in the alert says what it was.      |
 | `trigger_restarted`  | no    | A redelivered event found its row still open: this pod died mid-run.     |
+| `delivery_failed`    | no    | The run completed, but a declared target refused its output.             |
 
 The harness reports a failed run as free text, so the class is read off the text by rules that follow the gateway's own cron classifier. The retry starts after `RETRY_DELAY_SECONDS` on the same row, with `attempt = 2` and its own idempotency key — the ledger key with `/2` appended, because the gateway replays the run it holds for a key it has seen, failed or not.
 
@@ -131,6 +171,14 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `RETRY_DELAY_SECONDS`                       | `300.0`                                            | How long a transient failure waits for its retry.  |
 | `ALERTMANAGER_URL`                          | `http://prometheus-alertmanager.prometheus.svc.cluster.local:9093` | Where `AgentRunFailed` is posted. |
 | `ALERTMANAGER_REQUEST_TIMEOUT_SECONDS`      | `10.0`                                             | Per-request timeout against Alertmanager.          |
+| `DISCORD_BOT_TOKEN_FILE`                    | —                                                  | The bot token; needed by the `discord` output.     |
+| `DISCORD_HOME_CHANNEL`                      | —                                                  | The channel id the `discord` output posts into.    |
+| `DISCORD_REQUEST_TIMEOUT_SECONDS`           | `10.0`                                             | Per-request timeout against Discord.               |
+| `SMTP_HOST` / `SMTP_PORT`                   | — / `25`                                           | The relay the `mail` output sends through.         |
+| `SMTP_TIMEOUT_SECONDS`                      | `30.0`                                             | Socket timeout against the relay.                  |
+| `MAIL_FROM` / `MAIL_TO`                     | —                                                  | The relay's accepted sender, and the owner.        |
+| `FAULTS_FILE`                               | `/etc/lares-agent-trigger/faults.yaml`             | The engine's fault list, for the mail subject.     |
+| `DASHBOARD_EPISODE_URL`                     | —                                                  | The episode on the dashboard; `{episode_id}` and `{fault}` are filled in. |
 | `METRICS_PORT`                              | `9090`                                             | `/metrics` and `/healthz`.                         |
 | `LOG_LEVEL` / `LOG_FORMAT`                  | `INFO` / `json`                                    | Logging.                                           |
 | `TRACING_ENDPOINT`                          | —                                                  | OTLP/HTTP collector base URL; unset keeps it off.  |
@@ -142,6 +190,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_events_total`            | `kind`, `outcome`  | Events read, and whether the filter wanted them.             |
 | `agent_trigger_runs_total`              | `use_case`, `status` | Runs started, by the status their row closed with.         |
 | `agent_trigger_failures_total`          | `use_case`, `class`  | Failed attempts, by failure class — a retry that went through still shows here. |
+| `agent_trigger_deliveries_total`        | `use_case`, `target`, `outcome` | Outputs carried to a target, `sent` or `failed`. |
 | `agent_trigger_alerts_total`            | `outcome`          | `AgentRunFailed` posts, `sent` or `failed`.                  |
 | `agent_trigger_capped_total`            | `use_case`         | Events refused because the day's budget was spent.           |
 | `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |
@@ -151,7 +200,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 ## Tests
 
-One seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer; the ledger rows land in a real TimescaleDB container; only the harness and Alertmanager are fakes, over `respx` — the harness because a run is a model call, Alertmanager so the alert is asserted as it would arrive. The failure classes have a table test of their own against the gateway's error texts.
+One seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer; the ledger rows land in a real TimescaleDB container; the harness, Alertmanager and Discord are fakes over `respx` — the harness because a run is a model call, the other two so the alert and the message are asserted as they would arrive — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts.
 
 ```bash
 uv sync --extra dev

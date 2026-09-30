@@ -30,6 +30,12 @@ class Metrics:
             ["use_case", "class"],
             registry=self.registry,
         )
+        self.deliveries = Counter(
+            "agent_trigger_deliveries_total",
+            "Outputs carried to a declared target, by use case, target and whether it took them.",
+            ["use_case", "target", "outcome"],  # sent | failed
+            registry=self.registry,
+        )
         self.alerts = Counter(
             "agent_trigger_alerts_total",
             "AgentRunFailed posts to Alertmanager, by whether it took them.",

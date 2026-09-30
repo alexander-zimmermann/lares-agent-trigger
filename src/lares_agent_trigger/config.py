@@ -1,4 +1,4 @@
-"""Runtime configuration: NATS from the shared base, plus the ledger and the harness."""
+"""Runtime configuration: NATS from the shared base, plus the ledger, the harness and delivery."""
 
 from __future__ import annotations
 
@@ -54,6 +54,24 @@ class Settings(NatsSettings):
     alertmanager_url: str = "http://prometheus-alertmanager.prometheus.svc.cluster.local:9093"
     alertmanager_request_timeout_seconds: float = 10.0
 
+    # Delivery. Each target's settings are required only when an enabled use
+    # case declares that target; the check runs when the deliveries are built.
+    # Discord: the bot the harness chats as, posting into its home channel.
+    discord_bot_token: str = Field(default="", repr=False)
+    discord_bot_token_file: Path | None = None
+    discord_home_channel: str = ""
+    discord_request_timeout_seconds: float = 10.0
+    # Mail: plaintext SMTP to the cluster's relay, from its one accepted sender.
+    smtp_host: str = ""
+    smtp_port: int = 25
+    smtp_timeout_seconds: float = 30.0
+    mail_from: str = ""
+    mail_to: str = ""
+    # The engine's fault list, for the sentence a mail names in its subject.
+    faults_file: Path = Path("/etc/lares-agent-trigger/faults.yaml")
+    # The dashboard row of an episode; `{episode_id}` and `{fault}` are filled in.
+    dashboard_episode_url: str = ""
+
     @model_validator(mode="after")
     def _resolve_secret_files(self) -> Settings:
         if self.db_username_file:
@@ -62,6 +80,8 @@ class Settings(NatsSettings):
             self.db_password = self.db_password_file.read_text(encoding="utf-8").strip()
         if self.hermes_api_key_file:
             self.hermes_api_key = self.hermes_api_key_file.read_text(encoding="utf-8").strip()
+        if self.discord_bot_token_file:
+            self.discord_bot_token = self.discord_bot_token_file.read_text(encoding="utf-8").strip()
         missing = [
             name
             for name, value in (

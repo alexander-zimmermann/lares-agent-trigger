@@ -7,6 +7,19 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "aiosmtpd"
+version = "1.4.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "atpublic" },
+    { name = "attrs" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c4/ca/b2b7cc880403ef24be77383edaadfcf0098f5d7b9ddbf3e2c17ef0a6af0d/aiosmtpd-1.4.6.tar.gz", hash = "sha256:5a811826e1a5a06c25ebc3e6c4a704613eb9a1bcf6b78428fbe865f4f6c9a4b8", size = 152775, upload-time = "2024-05-18T11:37:50.029Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/39/d401756df60a8344848477d54fdf4ce0f50531f6149f3b8eaae9c06ae3dc/aiosmtpd-1.4.6-py3-none-any.whl", hash = "sha256:72c99179ba5aa9ae0abbda6994668239b64a5ce054471955fe75f581d2592475", size = 154263, upload-time = "2024-05-18T11:37:47.877Z" },
+]
+
+[[package]]
 name = "annotated-types"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -90,6 +103,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/8a/82/60367e58ef346a41ebc90d3f28593c1b8f5c2cb5314c7b2bbd98910ee131/ast_serialize-0.11.2-cp39-abi3-win32.whl", hash = "sha256:d70556a2f9230a44c99a655774cde823f056efc34466eabfb4085f0cb1ea9f99", size = 1125873, upload-time = "2026-09-13T18:48:50.661Z" },
     { url = "https://files.pythonhosted.org/packages/23/bf/b419c3205ce1143ba7c69baef4f0ba43c14d8712113bf34f9e0d27d609be/ast_serialize-0.11.2-cp39-abi3-win_amd64.whl", hash = "sha256:b9065dd23131a23b41f5bab3bf4e9b3c350a3fe8e36e8200eded9b729fcea484", size = 1165434, upload-time = "2026-09-13T18:48:52.169Z" },
     { url = "https://files.pythonhosted.org/packages/91/a7/c8bbb2173f7a7131b3b2412035b2d814ab5ef2ce9799bd06f07c451640e4/ast_serialize-0.11.2-cp39-abi3-win_arm64.whl", hash = "sha256:dab599cbdcb7b45b18c41fad746645580b3a24357082b7f0e8921cd373804f27", size = 1136031, upload-time = "2026-09-13T18:48:54.04Z" },
+]
+
+[[package]]
+name = "atpublic"
+version = "8.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/da/105fb4e9e966f61eedef4cee081a99a8bf18792ad56aa64467618e8b23c0/atpublic-8.0.1.tar.gz", hash = "sha256:4cc00a2b8ea5645a268edc310667302fe1de2b91aba88d0bd634c0e6564f6ef4", size = 27401, upload-time = "2026-09-21T23:15:08.96Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/53/6864ee88ca91a6b1ecc0c0dff9fb6114628a416f3786e0dd80bddbce207f/atpublic-8.0.1-py3-none-any.whl", hash = "sha256:8696fe5b26ec7c8ea521cc8e5487495ba1d3530a9b9a9dc350c8f4f82848f77c", size = 11111, upload-time = "2026-09-21T23:15:08.112Z" },
 ]
 
 [[package]]
@@ -502,6 +524,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "aiosmtpd" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -515,6 +538,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosmtpd", marker = "extra == 'dev'", specifier = ">=1.4.6" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3.1" },
     { name = "nats-bridge-core", git = "https://github.com/alexander-zimmermann/nats-bridge-core?rev=v0.8.0" },
