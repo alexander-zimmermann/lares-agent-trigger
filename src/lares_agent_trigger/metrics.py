@@ -1,4 +1,4 @@
-"""Prometheus metrics: what the consumer saw, and what became of it."""
+"""Prometheus metrics: what the consumer and the hook receiver saw, and what became of it."""
 
 from __future__ import annotations
 
@@ -56,6 +56,20 @@ class Metrics:
             "agent_trigger_duplicate_events_total",
             "Events whose subject the ledger already held, by use case.",
             ["use_case"],
+            registry=self.registry,
+        )
+        # The hook path: what became of each delivery, and the rows it wrote.
+        self.hook_events = Counter(
+            "agent_trigger_hook_events_total",
+            "Deliveries of the harness's hook, by what the receiver made of them.",
+            # counted | recorded | duplicate | ignored | refused | invalid | error
+            ["outcome"],
+            registry=self.registry,
+        )
+        self.recorded_runs = Counter(
+            "agent_trigger_recorded_runs_total",
+            "Chat and cron runs the harness ran on its own, by use case and row status.",
+            ["use_case", "status"],  # completed | failed
             registry=self.registry,
         )
         self.run_duration = Histogram(

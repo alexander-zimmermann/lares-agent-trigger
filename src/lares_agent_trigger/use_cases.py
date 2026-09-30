@@ -9,6 +9,7 @@ declared.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -16,6 +17,10 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .events import EventKind
+
+# The gateway mints cron job ids itself, so a job the trigger manages carries
+# its use case in the name: `lares:propose-faults`.
+MANAGED_JOB_PREFIX = "lares:"
 
 # Where a completed run's output is delivered; `deliveries.py` holds one delivery
 # per target it can serve, and `stored` is the ledger row itself.
@@ -90,7 +95,9 @@ class UseCase(_Strict):
     name: str = Field(min_length=1)
     sentence: str = Field(min_length=1)
     trigger: Trigger
-    skill: str = Field(min_length=1)
+    # What an event or schedule run is told to run. A chat names none: the
+    # person's message is the assignment.
+    skill: str | None = Field(default=None, min_length=1)
     # The tool servers the use case may see; the harness gets them as
     # `mcp-<name>` and the bridge's own allowlist is the hard ceiling.
     tools: tuple[str, ...] = Field(min_length=1)
@@ -121,6 +128,14 @@ class UseCase(_Strict):
             )
         return self
 
+    @model_validator(mode="after")
+    def _skill_is_named(self) -> UseCase:
+        if self.skill is None and not isinstance(self.trigger, MessageTrigger):
+            raise ValueError(
+                f"use case {self.name}: a {self.trigger.kind} use case names its skill"
+            )
+        return self
+
     @property
     def is_enabled(self) -> bool:
         return self.enabled is True
@@ -132,17 +147,40 @@ class UseCase(_Strict):
             return self.trigger
         return None
 
+    @property
+    def is_chat(self) -> bool:
+        """True for an enabled use case a person starts by writing in chat."""
+        return self.is_enabled and isinstance(self.trigger, MessageTrigger)
+
+    @property
+    def is_schedule(self) -> bool:
+        """True for an enabled use case the harness's cron starts."""
+        return self.is_enabled and isinstance(self.trigger, ScheduleTrigger)
+
 
 class _File(_Strict):
     use_cases: list[UseCase] = Field(min_length=1)
+
+
+def chat_use_case(use_cases: Mapping[str, UseCase]) -> UseCase | None:
+    """The use case a chat turn belongs to; the loader allows one."""
+    return next((use_case for use_case in use_cases.values() if use_case.is_chat), None)
+
+
+def scheduled_use_case(use_cases: Mapping[str, UseCase], job_name: str) -> UseCase | None:
+    """The use case a cron job runs, known by the job's managed name."""
+    if not job_name.startswith(MANAGED_JOB_PREFIX):
+        return None
+    use_case = use_cases.get(job_name.removeprefix(MANAGED_JOB_PREFIX))
+    return use_case if use_case is not None and use_case.is_schedule else None
 
 
 def load_use_cases(path: Path) -> dict[str, UseCase]:
     """Read and validate the use-case file, keyed by name.
 
     Every failure — missing file, unparsable YAML, a field the schema does not
-    know, two entries of one name — is a ``ValueError`` naming the file, so the
-    startup log says what to fix.
+    know, two entries of one name, two chats — is a ``ValueError`` naming the
+    file, so the startup log says what to fix.
     """
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -161,4 +199,9 @@ def load_use_cases(path: Path) -> dict[str, UseCase]:
         if use_case.name in by_name:
             raise ValueError(f"{path}: use case {use_case.name} is declared twice")
         by_name[use_case.name] = use_case
+
+    # The harness has one chat surface, so a turn it reports belongs to one use case.
+    chats = [use_case.name for use_case in by_name.values() if use_case.is_chat]
+    if len(chats) > 1:
+        raise ValueError(f"{path}: only one enabled message use case, not {', '.join(chats)}")
     return by_name

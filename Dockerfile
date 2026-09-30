@@ -35,6 +35,6 @@ COPY --from=builder /opt/venv /opt/venv
 USER app
 WORKDIR /app
 
-EXPOSE 9090
+EXPOSE 8080 9090
 
 ENTRYPOINT ["lares-agent-trigger"]

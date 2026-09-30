@@ -1,4 +1,4 @@
-"""Entry point: load the declaration, build its deliveries, open the ledger, bind the consumer."""
+"""Entry point: load the declaration and its deliveries, open the ledger, bind consumer and hook."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from .event_runs import EventRuns
 from .hermes import HermesClient
 from .ledger import Ledger
 from .metrics import Metrics
+from .receiver import ReceiverServer, create_app
+from .turn_runs import TurnRuns
 from .use_cases import load_use_cases
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ async def _amain() -> int:
         retry_delay_seconds=settings.retry_delay_seconds,
     )
     consumer = EpisodeConsumer(settings, runs, metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, metrics)
+    receiver = ReceiverServer(create_app(turns, settings.hook_secret, metrics), settings.http_port)
 
     async def is_healthy() -> bool:
         # The harness is deliberately not part of health: a gateway outage is
@@ -77,17 +81,26 @@ async def _amain() -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
+    receiving: asyncio.Task[None] | None = None
     try:
         await ledger.open()
         await consumer.connect()
+        # Only once the ledger is open: a delivery before that could not be written.
+        receiving = asyncio.create_task(receiver.serve())
         logger.info("trigger is up")
         while not stop.is_set():
             await consumer.run_once()
+            if receiving.done():
+                raise RuntimeError("the hook receiver stopped") from receiving.exception()
     except Exception:
         logger.exception("fatal error in trigger startup/run")
         return 1
     finally:
         logger.info("shutting down")
+        if receiving is not None:
+            receiver.should_exit = True
+            with contextlib.suppress(Exception):
+                await receiving
         await consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()

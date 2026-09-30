@@ -150,6 +150,8 @@ class EventRuns:
         again.
         """
         budget = use_case.budget
+        # The loader refuses an event use case that names no skill.
+        assert use_case.skill is not None
         try:
             harness_run_id = await self.hermes.start_run(
                 idempotency_key=idempotency_key,
