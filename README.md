@@ -70,7 +70,7 @@ episode.ended ────┘             │
                                 │
                                 ▼
        UPDATE agent_runs: tldr (first line), text, model, tokens,
-                          cost, duration, tool_trace = {"tool_count": n}
+                          cost, duration, tool_trace (count + calls)
                                 │
                                 ▼
                    deliver to each declared output (Discord, mail)
@@ -155,19 +155,30 @@ A row that a dead pod left `queued` or `running` is not started again when its e
 
 The harness starts two kinds of run on its own: a turn in Discord, and a cron job coming due. The trigger hears of them as they happen, through the harness's outbound hook (`hooks.outbound` in its configuration), which posts two of its lifecycle hooks to `POST /hooks/hermes`, signed with HMAC-SHA256 over the raw body (`X-Hermes-Signature-256: sha256=<hex>`) under a secret both pods read:
 
-- `post_api_request`, once per call to the model: its tokens, the model and its source, when it started and ended, how many tools it asked for, and its reply. Each call is added to its turn's tally in memory.
+- `post_api_request`, once per call to the model: its tokens, the model and its source, when it started and ended, the tools it asked for with their arguments, and its reply. Each call is added to its turn's tally in memory.
 - `on_session_end`, which despite its name fires once per turn, after that turn's calls: whether it completed, and why it stopped. It writes the turn's row from the tally.
 
 | Platform      | Use case                                                        | Row                                                                    |
 | ------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `discord`     | the one enabled `message` use case                              | trigger `message`, subject kind `chat`, key `<session id>:<turn>`       |
 | `cron`        | the enabled `schedule` use case its job is named after          | trigger `schedule`, subject kind `none`, key `<job id>:<execution id>`  |
-| `api_server`  | —                                                               | none: the runs this service started hold their row already              |
+| `api_server`  | —                                                               | none: the event run it belongs to takes its calls (see below)           |
 | anything else | —                                                               | none                                                                    |
 
 The gateway mints cron job ids itself, so a managed job carries its use case in its name: `lares:propose-faults`. A job without that prefix, or one naming a use case the file does not enable as a schedule, is left alone.
 
 The row holds what the turn's calls added up to: the tokens the model read (cache included) and wrote, the tools it asked for, the time from the first call's start to the last call's end, the model and model source of the last call — a fallback shows up there — and the last call's reply as the answer. Nothing is read off the session record, whose counters run over a whole conversation. A flat subscription bills nothing per call, so `cost` stays empty rather than guessed. A turn whose calls came in before a restart and whose end came after still gets its row, without the tally.
+
+`tool_trace` records which tools a run asked for, never what they returned:
+
+```json
+{"tool_count": 1,
+ "calls": [{"call": 1, "tokens_in": 42000, "tokens_out": 300, "seconds": 3.0,
+            "tools": [{"name": "list_episodes", "arguments": "{\"state\":\"open\",\"days\":7}"}]},
+           {"call": 2, "tokens_in": 48000, "tokens_out": 300, "seconds": 6.5, "tools": []}]}
+```
+
+Arguments are cut at 300 characters. An event run gets its calls the same way: its turn comes in on the `api_server` platform under the session the Runs API gave the run, and the event path collects them by that session once the run is over, waiting up to `TRACE_WAIT_SECONDS` for the turn's end to arrive. Past the wait the row keeps the count alone.
 
 What the receiver answers is what the gateway acts on — it sends a delivery at most twice, the second time only after a connection error or a 5xx:
 
@@ -208,6 +219,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `DASHBOARD_EPISODE_URL`                     | —                                                  | The episode on the dashboard; `{episode_id}` and `{fault}` are filled in. |
 | `HTTP_PORT`                                 | `8080`                                             | The hook receiver, `POST /hooks/hermes`.           |
 | `HOOK_SECRET_FILE`                          | —                                                  | The HMAC secret the harness signs deliveries with. |
+| `TRACE_WAIT_SECONDS`                        | `5.0`                                              | How long a finished event run waits for its calls. |
 | `METRICS_PORT`                              | `9090`                                             | `/metrics` and `/healthz`.                         |
 | `LOG_LEVEL` / `LOG_FORMAT`                  | `INFO` / `json`                                    | Logging.                                           |
 | `TRACING_ENDPOINT`                          | —                                                  | OTLP/HTTP collector base URL; unset keeps it off.  |
@@ -224,8 +236,9 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_capped_total`            | `use_case`         | Events refused because the day's budget was spent.           |
 | `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |
 | `agent_trigger_run_duration_seconds`    | `use_case`         | Wall-clock time from start to terminal state.                |
-| `agent_trigger_hook_events_total`       | `outcome`          | Hook deliveries: `counted`, `recorded`, `duplicate`, `ignored`, `refused`, `invalid`, `error`. |
+| `agent_trigger_hook_events_total`       | `outcome`          | Hook deliveries: `counted`, `recorded`, `traced` (an event run's turn ended), `duplicate`, `ignored`, `refused`, `invalid`, `error`. |
 | `agent_trigger_recorded_runs_total`     | `use_case`, `status` | Chat and cron runs written from the hook, by the status of their row. |
+| `agent_trigger_orphaned_calls_total`    | —                  | Model calls of turns that never reported their end within an hour — the harness's own work after an answer, spent and in no row. |
 
 `/healthz` is NATS- and ledger-gated. A harness outage is deliberately not part of it: that is a failed run with its own alert, never a restart loop.
 

@@ -249,6 +249,7 @@ def model_call(
     output_tokens: int = 300,
     usage: bool = True,
     tool_calls: int = 0,
+    arguments: str = '{"state":"open","days":7}',
     content: str | None = None,
     started_at: float = 1790756100.0,
     seconds: float = 4.0,
@@ -277,8 +278,15 @@ def model_call(
         if usage
         else None
     )
+    # The gateway's `ToolCall` dataclass through `asdict`: flat, `function` is
+    # only a property on it — `agent/transports/types.py`.
     calls = [
-        {"id": f"call_{number}_{i}", "type": "function", "function": {"name": "list_episodes"}}
+        {
+            "id": f"call_{number}_{i}",
+            "name": "list_episodes",
+            "arguments": arguments,
+            "provider_data": {"call_id": f"call_{number}_{i}", "response_item_id": f"fc_{i}"},
+        }
         for i in range(tool_calls)
     ]
     finish_reason = "tool_calls" if tool_calls else "stop"

@@ -27,10 +27,14 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .ledger import ToolUse
+
 MODEL_CALL = "post_api_request"
 TURN_ENDED = "on_session_end"
 
 _SIGNATURE_PREFIX = "sha256="
+# Enough of a call's arguments to see what was asked; a long filter list is cut.
+_ARGUMENTS_LIMIT = 300
 # A cron run's task id: `cron:<job id>:<execution id>`.
 _CRON_TASK_PREFIX = "cron"
 
@@ -54,6 +58,8 @@ class ModelCall:
     ended_at: float
     # The text of the reply; the last call's is the turn's answer.
     content: str | None
+    # The tools the reply asked for, in order.
+    tools: tuple[ToolUse, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +150,27 @@ def _model_call(extra: dict[str, Any]) -> ModelCall:
         started_at=_seconds(extra, "started_at"),
         ended_at=_seconds(extra, "ended_at"),
         content=content if isinstance(content, str) and content.strip() else None,
+        tools=_tools(reply.get("tool_calls") if isinstance(reply, dict) else None),
     )
+
+
+def _tools(calls: Any) -> tuple[ToolUse, ...]:
+    """Name and arguments of each tool call.
+
+    The gateway sends its own `ToolCall` dataclass as a dict: `name` and
+    `arguments` (a JSON string) at the top, next to `id` and `provider_data`.
+    """
+    if not isinstance(calls, list):
+        return ()
+    tools: list[ToolUse] = []
+    for call in calls:
+        if not isinstance(call, dict) or not call.get("name"):
+            raise ValueError("hook body carries a tool call without a name")
+        arguments = call.get("arguments") or ""
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        tools.append(ToolUse(str(call["name"]), arguments[:_ARGUMENTS_LIMIT]))
+    return tuple(tools)
 
 
 def _turn_ended(raw: dict[str, Any], extra: dict[str, Any]) -> TurnEnded:

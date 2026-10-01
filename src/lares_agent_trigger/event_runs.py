@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Protocol
 
 import httpx
 
@@ -23,8 +24,8 @@ from .alerts import Alertmanager
 from .deliveries import Deliveries, RunOutput
 from .events import EpisodeEvent
 from .failures import TRANSIENT, FailureClass, classify_error, classify_exception, describe
-from .hermes import HermesClient, HermesError, instructions_for
-from .ledger import Ledger, Usage
+from .hermes import HermesClient, HermesError, RunOutcome, instructions_for
+from .ledger import CallTrace, Ledger, Usage
 from .metrics import Metrics
 from .use_cases import UseCase
 
@@ -43,6 +44,12 @@ class _Failure:
     usage: Usage | None = None
 
 
+class CallTraces(Protocol):
+    """Where the model calls of a run come from: the hook, by the run's session."""
+
+    async def calls_of(self, session_id: str, *, wait_seconds: float) -> tuple[CallTrace, ...]: ...
+
+
 @dataclass(frozen=True)
 class EventRuns:
     """The event path, wired to the things it talks to."""
@@ -54,6 +61,8 @@ class EventRuns:
     deliveries: Deliveries
     metrics: Metrics
     retry_delay_seconds: float
+    traces: CallTraces
+    trace_wait_seconds: float
 
     def matching(self, event: EpisodeEvent) -> list[UseCase]:
         """The enabled event use cases whose filter wants this event."""
@@ -171,6 +180,7 @@ class EventRuns:
             )
         except (HermesError, httpx.HTTPError, OSError) as exc:
             return _Failure(classify_exception(exc), describe(exc))
+        outcome = await self._with_calls(outcome)
 
         if outcome.status == "failed":
             error = outcome.error or "the harness failed the run without a reason"
@@ -184,6 +194,13 @@ class EventRuns:
         await self.ledger.record(run_id, text=outcome.output, usage=outcome.usage)
         await self._deliver(use_case, event, run_id, outcome.output, outcome.usage)
         return None
+
+    async def _with_calls(self, outcome: RunOutcome) -> RunOutcome:
+        """The outcome with the model calls its turn reported through the hook, if they came."""
+        if outcome.session_id is None:
+            return outcome
+        calls = await self.traces.calls_of(outcome.session_id, wait_seconds=self.trace_wait_seconds)
+        return replace(outcome, usage=replace(outcome.usage, calls=calls))
 
     async def _deliver(
         self, use_case: UseCase, event: EpisodeEvent, run_id: int, text: str, usage: Usage

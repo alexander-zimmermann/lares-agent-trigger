@@ -35,6 +35,25 @@ _Pool = AsyncConnectionPool[psycopg.AsyncConnection[DictRow]]
 
 
 @dataclass(frozen=True)
+class ToolUse:
+    """One tool the model asked for: its name and its arguments, never its result."""
+
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class CallTrace:
+    """One call to the model inside a run: what it read, wrote, took and asked for."""
+
+    number: int
+    tokens_in: int | None
+    tokens_out: int | None
+    seconds: float
+    tools: tuple[ToolUse, ...]
+
+
+@dataclass(frozen=True)
 class Usage:
     """What a finished run reports about itself, as far as the harness knows it."""
 
@@ -45,6 +64,8 @@ class Usage:
     cost: Decimal | None = None
     duration_seconds: float | None = None
     tool_count: int | None = None
+    # The model calls in order, when the harness's hook reported them.
+    calls: tuple[CallTrace, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -288,13 +309,28 @@ def _output_columns(text: str | None, usage: Usage) -> tuple[object, ...]:
     """What a run produced and cost, in column order from `tldr` to `tool_trace`.
 
     `tldr` is the first line of the text — the sentence an answer opens with —
-    and the tool trace holds the call count, never a raw result.
+    and the tool trace holds the tool count and, where the hook reported
+    them, the model calls in order with the tools each asked for. Never a raw
+    result.
     """
     tldr = text.strip().splitlines()[0] if text and text.strip() else None
     duration = (
         timedelta(seconds=usage.duration_seconds) if usage.duration_seconds is not None else None
     )
-    trace = Jsonb({"tool_count": usage.tool_count}) if usage.tool_count is not None else None
+    trace: dict[str, object] = {}
+    if usage.tool_count is not None:
+        trace["tool_count"] = usage.tool_count
+    if usage.calls:
+        trace["calls"] = [
+            {
+                "call": call.number,
+                "tokens_in": call.tokens_in,
+                "tokens_out": call.tokens_out,
+                "seconds": call.seconds,
+                "tools": [{"name": t.name, "arguments": t.arguments} for t in call.tools],
+            }
+            for call in usage.calls
+        ]
     return (
         tldr,
         text,
@@ -304,5 +340,5 @@ def _output_columns(text: str | None, usage: Usage) -> tuple[object, ...]:
         usage.tokens_out,
         usage.cost,
         duration,
-        trace,
+        Jsonb(trace) if trace else None,
     )

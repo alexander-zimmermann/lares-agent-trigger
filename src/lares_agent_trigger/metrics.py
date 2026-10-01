@@ -62,8 +62,15 @@ class Metrics:
         self.hook_events = Counter(
             "agent_trigger_hook_events_total",
             "Deliveries of the harness's hook, by what the receiver made of them.",
-            # counted | recorded | duplicate | ignored | refused | invalid | error
+            # counted | recorded | traced | duplicate | ignored | refused | invalid | error
             ["outcome"],
+            registry=self.registry,
+        )
+        # Calls of turns that never sent their end, e.g. the harness's own
+        # background work after an answer: spent, and in no row.
+        self.orphaned_calls = Counter(
+            "agent_trigger_orphaned_calls_total",
+            "Model calls whose turn never reported its end within an hour.",
             registry=self.registry,
         )
         self.recorded_runs = Counter(
