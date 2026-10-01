@@ -1,15 +1,18 @@
 """The declared use cases: one schema and one loader, for rendering and for runtime.
 
-The file lives in lares and is mounted here; the generator (#2111) renders the
-harness configuration from the same models, which is why schema and loader sit
-in this package rather than in the generator alone. A file that does not
-validate is refused at startup — a half-read catalogue would start runs nobody
-declared.
+The file lives in lares and is mounted here; the generator renders the harness
+configuration from the same models, which is why schema and loader sit in this
+package rather than in the generator alone. Beside the use cases it declares
+the tool servers they may name and where the harness reports every finished
+turn. A file that does not validate is refused at startup — a half-read
+catalogue would start runs nobody declared.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -36,6 +39,16 @@ OutputTarget = Literal[
 ]
 
 
+# Where an event comes from. The trigger consumes the episode stream; the other
+# sources are paths a dormant use case may wait for, never an enabled one.
+EventSource = Literal["episode", "alert", "pull_request", "ets_export", "new_device"]
+CONSUMED_EVENT_SOURCES: frozenset[EventSource] = frozenset({"episode"})
+
+# Where a tool server may be granted: `read` anywhere, `write` only to the schedule
+# use cases that name it, `request` (a request a person approves) only to the chat.
+ToolAccess = Literal["read", "write", "request"]
+
+
 class _Strict(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -46,19 +59,23 @@ class EventTrigger(_Strict):
     `filter` maps an event kind to the lowest severity that deserves a run; a
     kind left out never runs. That is the whole filter: `{appeared: 2,
     escalated: 2}` explains an episode that opens at 2 or worse and again when
-    it rises, and never explains one that ended.
+    it rises, and never explains one that ended. Only an episode event has
+    kinds and severities, so only an episode trigger names a filter.
     """
 
     kind: Literal["event"]
-    # Only the episode stream today. The alert path is designed on the spec and
-    # built with the cluster use case; until then a declaration naming it would
-    # be silently ignored, so the schema refuses it instead.
-    source: Literal["episode"]
-    filter: dict[EventKind, int] = Field(min_length=1)
+    source: EventSource
+    filter: dict[EventKind, int] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _episode_names_its_filter(self) -> EventTrigger:
+        if (self.source == "episode") != (self.filter is not None):
+            raise ValueError("filter: an episode trigger names one, any other source none")
+        return self
 
     def wants(self, event_kind: EventKind, severity: int) -> bool:
         """True when this use case wants a run for that kind at that severity."""
-        minimum = self.filter.get(event_kind)
+        minimum = self.filter.get(event_kind) if self.filter is not None else None
         return minimum is not None and severity >= minimum
 
 
@@ -136,6 +153,20 @@ class UseCase(_Strict):
             )
         return self
 
+    @model_validator(mode="after")
+    def _source_is_consumed(self) -> UseCase:
+        trigger = self.trigger
+        if (
+            self.enabled
+            and isinstance(trigger, EventTrigger)
+            and trigger.source not in CONSUMED_EVENT_SOURCES
+        ):
+            raise ValueError(
+                f"use case {self.name}: the trigger consumes episode events only; "
+                f"a {trigger.source} use case stays dormant until its path is built"
+            )
+        return self
+
     @property
     def is_enabled(self) -> bool:
         return self.enabled is True
@@ -158,8 +189,44 @@ class UseCase(_Strict):
         return self.is_enabled and isinstance(self.trigger, ScheduleTrigger)
 
 
+class ToolServer(_Strict):
+    """A tool server the harness reaches: one bridge client, its key and its allowlist.
+
+    `tools` (names or fnmatch globs) is both the bridge's allowlist for the
+    client, the hard ceiling, and the harness's include list on top of it.
+    """
+
+    name: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    # The bridge's machine client the key maps to, and where the harness holds the key.
+    client: str = Field(min_length=1)
+    key_env: str = Field(min_length=1)
+    timeout_seconds: int = Field(gt=0)
+    access: ToolAccess
+    tools: tuple[str, ...] = Field(min_length=1)
+
+
+class LedgerHook(_Strict):
+    """Where the harness reports every finished turn, so each one gets its ledger row."""
+
+    trigger_url: str = Field(min_length=1)
+    # The harness's environment variable holding the HMAC secret both sides share.
+    secret_env: str = Field(min_length=1)
+
+
 class _File(_Strict):
+    ledger_hook: LedgerHook
+    tool_servers: list[ToolServer] = Field(min_length=1)
     use_cases: list[UseCase] = Field(min_length=1)
+
+
+@dataclass(frozen=True)
+class UseCaseFile:
+    """The whole declaration: use cases and tool servers keyed by name, in file order."""
+
+    use_cases: dict[str, UseCase]
+    tool_servers: dict[str, ToolServer]
+    ledger_hook: LedgerHook
 
 
 def chat_use_case(use_cases: Mapping[str, UseCase]) -> UseCase | None:
@@ -176,11 +243,17 @@ def scheduled_use_case(use_cases: Mapping[str, UseCase], job_name: str) -> UseCa
 
 
 def load_use_cases(path: Path) -> dict[str, UseCase]:
-    """Read and validate the use-case file, keyed by name.
+    """Read and validate the use-case file; the use cases keyed by name."""
+    return load_use_case_file(path).use_cases
+
+
+def load_use_case_file(path: Path) -> UseCaseFile:
+    """Read and validate the use-case file.
 
     Every failure — missing file, unparsable YAML, a field the schema does not
-    know, two entries of one name, two chats — is a ``ValueError`` naming the
-    file, so the startup log says what to fix.
+    know, two entries of one name, two chats, a tool server an enabled use case
+    may not hold — is a ``ValueError`` naming the file, so the startup log and
+    the pre-commit hook say what to fix.
     """
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -194,14 +267,73 @@ def load_use_cases(path: Path) -> dict[str, UseCase]:
     except ValidationError as exc:
         raise ValueError(f"{path}: {exc}") from exc
 
+    servers: dict[str, ToolServer] = {}
+    clients: dict[str, str] = {}
+    for server in parsed.tool_servers:
+        if server.name in servers:
+            raise ValueError(f"{path}: tool server {server.name} is declared twice")
+        if server.client in clients:
+            raise ValueError(
+                f"{path}: tool server {server.name}: client {server.client} is already "
+                f"the client of {clients[server.client]}"
+            )
+        servers[server.name] = server
+        clients[server.client] = server.name
+    _check_one_server_per_tool(path, servers)
+
     by_name: dict[str, UseCase] = {}
     for use_case in parsed.use_cases:
         if use_case.name in by_name:
             raise ValueError(f"{path}: use case {use_case.name} is declared twice")
         by_name[use_case.name] = use_case
+        if use_case.is_enabled:
+            _check_grants(path, use_case, servers)
 
     # The harness has one chat surface, so a turn it reports belongs to one use case.
     chats = [use_case.name for use_case in by_name.values() if use_case.is_chat]
     if len(chats) > 1:
         raise ValueError(f"{path}: only one enabled message use case, not {', '.join(chats)}")
-    return by_name
+    return UseCaseFile(use_cases=by_name, tool_servers=servers, ledger_hook=parsed.ledger_hook)
+
+
+def _check_one_server_per_tool(path: Path, servers: Mapping[str, ToolServer]) -> None:
+    """Refuse a tool two servers grant, so each tool keeps the access of its one server.
+
+    An entry of one server, read as a name, must match no entry of another;
+    for globs that catches the overlaps a declaration can show (`get_*` over
+    `get_write_request`), not every pair two globs could share.
+    """
+    for server in servers.values():
+        for other in servers.values():
+            if other is server:
+                continue
+            for pattern in server.tools:
+                for entry in other.tools:
+                    if fnmatchcase(entry, pattern):
+                        raise ValueError(
+                            f"{path}: tool server {server.name}: {pattern} also grants "
+                            f"{entry} of tool server {other.name}; a tool sits on one server only"
+                        )
+
+
+def _check_grants(path: Path, use_case: UseCase, servers: Mapping[str, ToolServer]) -> None:
+    """Refuse a tool server an enabled use case names but may not hold.
+
+    A dormant use case may name servers still to be built: it renders nothing.
+    """
+    for name in use_case.tools:
+        server = servers.get(name)
+        if server is None:
+            raise ValueError(
+                f"{path}: use case {use_case.name}: tools: no tool server named {name}"
+            )
+        if server.access == "write" and not use_case.is_schedule:
+            raise ValueError(
+                f"{path}: use case {use_case.name}: tools: {name} writes and is granted "
+                "to schedule use cases only"
+            )
+        if server.access == "request" and not use_case.is_chat:
+            raise ValueError(
+                f"{path}: use case {use_case.name}: tools: {name} places requests and is "
+                "granted to the chat only"
+            )

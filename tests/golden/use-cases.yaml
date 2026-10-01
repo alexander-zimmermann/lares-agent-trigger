@@ -1,0 +1,92 @@
+# Every surface once: a chat, an event, a schedule with a writing server and a
+# pinned model, and a dormant schedule naming a server nothing else uses.
+
+ledger_hook:
+  trigger_url: http://lares-agent-trigger.agents.svc.cluster.local:8080
+  secret_env: LARES_AGENT_TRIGGER_HOOK_SECRET
+
+tool_servers:
+  - name: lares
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    client: lares-agent
+    key_env: LARES_MCP_KEY
+    timeout_seconds: 60
+    access: read
+    tools: [list_*, get_current_knx, get_episode, query_*, correlate_events, search_wiki]
+
+  - name: lares-control
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    client: lares-control
+    key_env: LARES_CONTROL_KEY
+    timeout_seconds: 30
+    access: request
+    tools: [request_knx_write, get_write_request]
+
+  - name: lares-memory
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    client: lares-memory
+    key_env: LARES_MEMORY_KEY
+    timeout_seconds: 60
+    access: write
+    tools: [append_memory]
+
+  - name: lares-wiki
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    client: lares-wiki
+    key_env: LARES_WIKI_KEY
+    timeout_seconds: 60
+    access: write
+    tools: [update_wiki_page]
+
+use_cases:
+  - name: messenger
+    sentence: Answers a message from the phone.
+    trigger:
+      kind: message
+    tools: [lares, lares-control]
+    output: [discord]
+    budget: {tool_calls: 40, minutes: 10, runs_per_day: 200}
+    language: de
+    memory: true
+    enabled: true
+
+  - name: explain-episode
+    sentence: Explains a new or escalated episode on its own event.
+    trigger:
+      kind: event
+      source: episode
+      filter: {appeared: 2, escalated: 2}
+    skill: lares-explain
+    tools: [lares]
+    output: [stored, discord, mail]
+    budget: {tool_calls: 40, minutes: 10, runs_per_day: 10}
+    language: de
+    memory: false
+    enabled: true
+
+  - name: propose-faults
+    sentence: Proposes changes to the fault list as pull requests.
+    trigger:
+      kind: schedule
+      cron: "0 3 * * 0"
+    skill: lares-propose
+    tools: [lares, lares-memory]
+    output: [github_pr]
+    budget: {tool_calls: 80, minutes: 20, runs_per_day: 1}
+    language: en
+    memory: true
+    model: gpt-6-sol
+    enabled: true
+
+  - name: basalte-prose
+    sentence: Writes the prose for the logic blocks.
+    trigger:
+      kind: schedule
+      cron: "0 4 * * 6"
+    skill: lares-basalte-prose
+    tools: [lares, lares-wiki]
+    output: [wiki_page]
+    budget: {tool_calls: 60, minutes: 15, runs_per_day: 1}
+    language: de
+    memory: false
+    dormant: Waits for the wiki write key.

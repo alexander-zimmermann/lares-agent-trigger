@@ -1,4 +1,7 @@
-"""Entry point: load the declaration and its deliveries, open the ledger, bind consumer and hook."""
+"""Entry point: load the declaration and its deliveries, open the ledger, bind consumer and hook.
+
+`lares-agent-trigger generate …` renders the declaration instead (see `generate.py`).
+"""
 
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ from nats_bridge_core import configure as configure_logging
 from nats_bridge_core import serve as serve_metrics
 from nats_bridge_core import tracing, watchdog_ok
 
+from . import generate
 from .alerts import Alertmanager
 from .config import Settings
 from .consumer import EpisodeConsumer
@@ -116,7 +120,9 @@ async def _amain() -> int:
 
 
 def run() -> None:
-    """Console entry point."""
+    """Console entry point: the service, or the generator as `generate`."""
+    if sys.argv[1:2] == ["generate"]:
+        sys.exit(generate.main(sys.argv[2:]))
     sys.exit(asyncio.run(_amain()))
 
 

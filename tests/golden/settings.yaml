@@ -1,0 +1,12 @@
+# Hand-written Hermes settings: everything the generator does not own.
+
+# Codex first, Grok when it fails.
+model:
+  provider: openai-codex
+  default: gpt-6-sol
+
+agent:
+  disabled_toolsets:
+    - terminal
+    # Switched on by any explicit Discord list; stays off.
+    - discord
