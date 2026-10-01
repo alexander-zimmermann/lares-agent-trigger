@@ -73,13 +73,17 @@ class RunOutcome:
     session_id: str | None = None
 
 
+def language_name(language: str) -> str:
+    """The word an instruction line uses for an ISO 639-1 code."""
+    return _LANGUAGE_NAMES.get(language, language)
+
+
 def instructions_for(skill: str, language: str, tool_calls: int, minutes: int) -> str:
     """The instruction block an API run gets in place of the fields it has no room for."""
-    spoken = _LANGUAGE_NAMES.get(language, language)
     return (
         f"Run the skill `{skill}`.\n"
         f"The subject is the episode named in the input; explain that one and nothing else.\n"
-        f"Answer in {spoken}. Open with the cause in one sentence.\n"
+        f"Answer in {language_name(language)}. Open with the cause in one sentence.\n"
         f"Stay within {tool_calls} tool calls and {minutes} minutes."
     )
 

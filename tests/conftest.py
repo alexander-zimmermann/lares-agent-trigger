@@ -65,6 +65,19 @@ MAIL_TO = "admin@zimmermann.sh"
 DASHBOARD_EPISODE_URL = "https://grafana.test/d/knx-episodes?var-fault={fault}"
 
 USE_CASES = """
+ledger_hook:
+  trigger_url: http://lares-agent-trigger.test:8080
+  secret_env: LARES_AGENT_TRIGGER_HOOK_SECRET
+
+tool_servers:
+  - name: lares
+    url: http://lares-mcp-bridge.test:8080/mcp
+    client: lares-agent
+    key_env: LARES_MCP_KEY
+    timeout_seconds: 60
+    access: read
+    tools: [list_*, get_*, query_*]
+
 use_cases:
   - name: explain-episode
     sentence: Explains a new or escalated episode on its own event.
