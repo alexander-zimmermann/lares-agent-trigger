@@ -1,5 +1,7 @@
 """The HTTP receiver of the harness's outbound hook: verify, parse, hand on, answer.
 
+The trigger's own API (`api.py`) shares the app and the port.
+
 The answer is what the gateway acts on. It sends a delivery at most twice,
 once more only after a connection error or a 5xx, so every answer here is
 chosen for that: 2xx for a delivery that is done with — a call counted, a row
@@ -24,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from .api import TriggerApi
 from .hermes import HermesError
 from .hooks import parse_hook, verify_signature
 from .metrics import Metrics
@@ -38,8 +41,8 @@ _SIGNATURE_HEADER = "X-Hermes-Signature-256"
 HookOutcome = Outcome | Literal["refused", "invalid", "error"]
 
 
-def create_app(turns: TurnRuns, secret: str, metrics: Metrics) -> Starlette:
-    """The ASGI app: one route, the one the harness configuration points its hook at."""
+def create_app(turns: TurnRuns, secret: str, api: TriggerApi, metrics: Metrics) -> Starlette:
+    """The ASGI app: the route the harness's hook posts to, and the trigger's own API."""
 
     async def hermes_hook(request: Request) -> JSONResponse:
         body = await request.body()
@@ -58,7 +61,7 @@ def create_app(turns: TurnRuns, secret: str, metrics: Metrics) -> Starlette:
             return _answer(metrics, "error", 503)
         return _answer(metrics, outcome, 200)
 
-    return Starlette(routes=[Route(HOOK_PATH, hermes_hook, methods=["POST"])])
+    return Starlette(routes=[Route(HOOK_PATH, hermes_hook, methods=["POST"]), *api.routes()])
 
 
 def _answer(metrics: Metrics, outcome: HookOutcome, status_code: int) -> JSONResponse:

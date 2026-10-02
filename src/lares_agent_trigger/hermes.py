@@ -1,4 +1,4 @@
-"""The harness's API server: the Runs API for event runs, the Jobs API for cron runs.
+"""The harness's API server: the Runs API for event runs, the Jobs API for cron jobs.
 
 The Runs API takes no toolset list, so what an API run may see is decided in
 the harness configuration (`platform_toolsets.api_server`, the read server
@@ -20,7 +20,12 @@ run's real duration. Cost and the tool count live on the session record
 (`/api/sessions/{id}`), whose payload sits under a `session` key.
 
 A cron job's id is minted by the gateway, so what the job runs is read off its
-name through the Jobs API (`/api/jobs/{id}`, wrapped under `job`).
+name through the Jobs API (`/api/jobs/{id}`, wrapped under `job`). The same API
+creates, updates, deletes and runs the managed jobs: a create takes the name,
+the schedule, the prompt, the skills and the delivery and ignores everything
+else, an update takes those through a whitelist, and a list leaves paused jobs
+out unless asked for them. A job's `schedule` comes back parsed, the cron
+expression under `expr`.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
+from .cron_jobs import CronJob
 from .ledger import ClosedStatus, Usage
 
 # What the harness reports while a run is still going; anything else is final.
@@ -71,6 +77,21 @@ class RunOutcome:
     usage: Usage
     # The session the run was given; its hook deliveries carry the same id.
     session_id: str | None = None
+
+
+@dataclass(frozen=True)
+class HarnessJob:
+    """A cron job as the Jobs API reports it, in the fields the reconcile manages."""
+
+    id: str
+    name: str
+    # The cron expression; None for a job on another kind of schedule.
+    schedule: str | None
+    prompt: str
+    skills: tuple[str, ...]
+    deliver: str | None
+    # False for a paused job.
+    enabled: bool
 
 
 def language_name(language: str) -> str:
@@ -198,32 +219,80 @@ class HermesClient:
         A gateway that cannot answer raises: without the name a cron run
         belongs to no use case, so its delivery is refused and sent again.
         """
-        response = await self._client.get(f"/api/jobs/{job_id}")
-        if response.status_code == 404:
-            return None
-        if response.status_code >= 400:
-            raise HermesError(
-                f"GET /api/jobs/{job_id} returned {response.status_code}: {response.text}",
-                status_code=response.status_code,
-            )
-        payload = response.json()
-        job = payload.get("job") if isinstance(payload, dict) else None
+        try:
+            payload = await self._send("GET", f"/api/jobs/{job_id}")
+        except HermesError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        job = payload.get("job")
         if not isinstance(job, dict):
             raise HermesError(f"GET /api/jobs/{job_id} returned no job")
         name = job.get("name")
         return str(name) if name else None
 
-    async def _get_run(self, harness_run_id: str) -> dict[str, Any]:
-        response = await self._client.get(f"/v1/runs/{harness_run_id}")
+    async def list_jobs(self) -> list[HarnessJob]:
+        """Every cron job the gateway holds, paused ones included."""
+        payload = await self._send("GET", "/api/jobs", params={"include_disabled": "true"})
+        jobs = payload.get("jobs")
+        if not isinstance(jobs, list):
+            raise HermesError("GET /api/jobs returned no job list")
+        return [_harness_job(job, "GET /api/jobs") for job in jobs]
+
+    async def create_job(self, job: CronJob) -> str:
+        """Create a job and return the id the gateway minted for it."""
+        payload = await self._send("POST", "/api/jobs", json=job.model_dump(mode="json"))
+        return _harness_job(payload.get("job"), "POST /api/jobs").id
+
+    async def update_job(self, job_id: str, fields: dict[str, Any]) -> None:
+        """Change these fields of a job and leave the rest of it as it is."""
+        await self._send("PATCH", f"/api/jobs/{job_id}", json=fields)
+
+    async def delete_job(self, job_id: str) -> None:
+        """Delete a job; one the gateway no longer holds is already where it should be."""
+        try:
+            await self._send("DELETE", f"/api/jobs/{job_id}")
+        except HermesError as exc:
+            if exc.status_code != 404:
+                raise
+
+    async def run_job(self, job_id: str) -> None:
+        """Have the gateway run a job on its next tick, outside its schedule."""
+        await self._send("POST", f"/api/jobs/{job_id}/run")
+
+    async def _send(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        """One request to the API server; a refusal or a body that is no object raises."""
+        response = await self._client.request(method, path, **kwargs)
         if response.status_code >= 400:
             raise HermesError(
-                f"GET /v1/runs/{harness_run_id} returned {response.status_code}: {response.text}",
+                f"{method} {path} returned {response.status_code}: {response.text}",
                 status_code=response.status_code,
             )
-        body = response.json()
-        if not isinstance(body, dict):
-            raise HermesError(f"GET /v1/runs/{harness_run_id} returned {type(body).__name__}")
-        return body
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise HermesError(f"{method} {path} returned {type(payload).__name__}")
+        return payload
+
+    async def _get_run(self, harness_run_id: str) -> dict[str, Any]:
+        return await self._send("GET", f"/v1/runs/{harness_run_id}")
+
+
+def _harness_job(record: Any, request: str) -> HarnessJob:
+    if not isinstance(record, dict) or not record.get("id") or not record.get("name"):
+        raise HermesError(f"{request} returned a job without an id or a name")
+    schedule = record.get("schedule")
+    expression = schedule.get("expr") if isinstance(schedule, dict) else None
+    skills = record.get("skills")
+    deliver = record.get("deliver")
+    return HarnessJob(
+        id=str(record["id"]),
+        name=str(record["name"]),
+        schedule=str(expression) if expression is not None else None,
+        prompt=str(record.get("prompt") or ""),
+        skills=tuple(str(skill) for skill in skills) if isinstance(skills, list) else (),
+        deliver=str(deliver) if deliver is not None else None,
+        enabled=record.get("enabled") is not False,
+    )
 
 
 def _outcome(harness_run_id: str, body: dict[str, Any], status: str, usage: Usage) -> RunOutcome:

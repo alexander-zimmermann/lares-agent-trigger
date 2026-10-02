@@ -58,11 +58,3 @@ mcp_servers:
       include:
         - request_knx_write
         - get_write_request
-  lares-memory:
-    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    headers:
-      Authorization: Bearer ${env:LARES_MEMORY_KEY}
-    timeout: 60
-    tools:
-      include:
-        - append_memory

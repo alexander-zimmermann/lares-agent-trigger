@@ -1,4 +1,4 @@
-"""The `agent_runs` table: claim a subject, count the day, close the row.
+"""The `agent_runs` table: claim a subject, count the day, close the row — and the memory.
 
 This service is the ledger's only writer, and the ledger's unique key on
 (use_case, subject_kind, subject_key) is also the trigger's dedupe key: the row
@@ -9,6 +9,10 @@ already has this one".
 A run the harness started on its own — a chat turn, a cron execution — is
 already over when the trigger hears of it, so its row is written closed, in
 one statement, and the same key keeps a replayed delivery from a second one.
+
+`agent_memory` holds one row of notes per use case, which this service alone
+appends to; and a run a person asks for on an episode reads that episode from
+the engine's table, the one table here this service only reads.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from . import memory
 from .config import Settings
 
 SubjectKind = Literal["episode", "alert_group", "chat", "none"]
@@ -66,6 +71,27 @@ class Usage:
     tool_count: int | None = None
     # The model calls in order, when the harness's hook reported them.
     calls: tuple[CallTrace, ...] = ()
+
+
+@dataclass(frozen=True)
+class Episode:
+    """An episode as the engine recorded it, in what a run on it needs."""
+
+    episode_id: int
+    fault: str
+    # The channel, room or plant it was measured on.
+    subject: str
+    severity: int
+
+
+@dataclass(frozen=True)
+class AbandonedRow:
+    """A requested run's row a stopped pod left open, as it was closed."""
+
+    id: int
+    use_case: str
+    subject_key: str
+    attempt: int
 
 
 @dataclass(frozen=True)
@@ -164,11 +190,11 @@ class Ledger:
             ).fetchall()
         return OpenRow(id=int(rows[0]["id"]), attempt=int(rows[0]["attempt"])) if rows else None
 
-    async def runs_today(self, use_case: str, *, excluding: int) -> int:
+    async def runs_today(self, use_case: str, *, excluding: int | None = None) -> int:
         """How many runs this use case has already spent today.
 
         Capped rows do not count — an event refused for the day must not push
-        the next one further away. The row just claimed is excluded by id, so
+        the next one further away. A row just claimed is excluded by id, so
         the count is of runs that came before it.
         """
         # Postgres does the day arithmetic, so a pod on UTC and a psql session
@@ -180,7 +206,7 @@ class Ledger:
                     SELECT count(*) AS runs FROM agent_runs
                     WHERE use_case = %s
                       AND status <> 'capped'
-                      AND id <> %s
+                      AND id IS DISTINCT FROM %s
                       AND created_at >= date_trunc('day', now() AT TIME ZONE %s) AT TIME ZONE %s
                     """,
                     (use_case, excluding, self._settings.timezone, self._settings.timezone),
@@ -303,6 +329,91 @@ class Ledger:
                 )
             ).fetchall()
         return int(rows[0]["id"]) if rows else None
+
+    async def close_abandoned_requests(self, error: str) -> list[AbandonedRow]:
+        """Close as failed every requested run still open; the rows closed.
+
+        A run a person asked for is started by no event, so no redelivery ever
+        finds its row again. Chat rows are written closed and never match.
+        """
+        async with self._require_pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    """
+                    UPDATE agent_runs SET status = 'failed', finished_at = now(), error = %s
+                    WHERE trigger = 'message' AND status IN ('queued', 'running')
+                    RETURNING id, use_case, subject_key, attempt
+                    """,
+                    (error,),
+                )
+            ).fetchall()
+        return [
+            AbandonedRow(
+                id=int(row["id"]),
+                use_case=str(row["use_case"]),
+                subject_key=str(row["subject_key"]),
+                attempt=int(row["attempt"]),
+            )
+            for row in rows
+        ]
+
+    async def open_request(self, use_case: str, episode_id: int) -> int | None:
+        """The run a person asked for on this episode that is still queued or running."""
+        async with self._require_pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    """
+                    SELECT id FROM agent_runs
+                    WHERE use_case = %s AND trigger = 'message' AND subject_kind = 'episode'
+                      AND split_part(subject_key, ':', 1) = %s
+                      AND status IN ('queued', 'running')
+                    """,
+                    (use_case, str(episode_id)),
+                )
+            ).fetchall()
+        return int(rows[0]["id"]) if rows else None
+
+    async def episode(self, episode_id: int) -> Episode | None:
+        """The episode of this id in the engine's table; None when there is none."""
+        async with self._require_pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT id, fault, subject, severity FROM episodes WHERE id = %s",
+                    (episode_id,),
+                )
+            ).fetchall()
+        if not rows:
+            return None
+        row = rows[0]
+        return Episode(
+            episode_id=int(row["id"]),
+            fault=str(row["fault"]),
+            subject=str(row["subject"]),
+            severity=int(row["severity"]),
+        )
+
+    async def append_memory(self, use_case: str, note: str) -> int:
+        """Append a note to the use case's memory, cut to its bound; the bytes it now holds.
+
+        Read and written under a row lock, so two notes at once both land.
+        """
+        async with self._require_pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO agent_memory (use_case, text) VALUES (%s, '')"
+                " ON CONFLICT (use_case) DO NOTHING",
+                (use_case,),
+            )
+            rows = await (
+                await conn.execute(
+                    "SELECT text FROM agent_memory WHERE use_case = %s FOR UPDATE", (use_case,)
+                )
+            ).fetchall()
+            text = memory.appended(str(rows[0]["text"]), note)
+            await conn.execute(
+                "UPDATE agent_memory SET text = %s, updated_at = now() WHERE use_case = %s",
+                (text, use_case),
+            )
+        return len(text.encode("utf-8"))
 
 
 def _output_columns(text: str | None, usage: Usage) -> tuple[object, ...]:

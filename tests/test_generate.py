@@ -73,17 +73,9 @@ def test_each_surface_sees_only_the_servers_its_use_cases_may_hold(tmp_path: Pat
     assert toolsets["discord"] == ["hermes-discord", "lares", "lares-control"]
     # An event run reads, nothing else.
     assert toolsets["api_server"] == ["lares"]
-    # A cron job without a list of its own falls back to this: every read server in use.
+    # Every managed cron job sees this, the Jobs API taking no list per job:
+    # every read server in use.
     assert toolsets["cron"] == ["hermes-cron", "lares"]
-
-
-def test_a_writing_server_lands_only_on_the_cron_job_that_names_it(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-
-    assert all("lares-memory" not in names for names in config["platform_toolsets"].values())
-    assert [job["enabled_toolsets"] for job in _jobs(tmp_path)] == [["lares", "lares-memory"]]
-    # The harness must still know the server for the job to reach it.
-    assert "lares-memory" in config["mcp_servers"]
 
 
 def test_every_tool_server_entry_carries_its_key_and_include_list(tmp_path: Path) -> None:
@@ -129,8 +121,6 @@ def test_a_schedule_use_case_becomes_one_managed_cron_job(tmp_path: Path) -> Non
             "prompt": "Answer in English. Stay within 80 tool calls and 20 minutes.",
             # The trigger delivers; the harness keeps the output to itself.
             "deliver": "local",
-            "enabled_toolsets": ["lares", "lares-memory"],
-            "model": "gpt-6-sol",
         }
     ]
 
@@ -146,7 +136,6 @@ def test_each_client_of_a_server_in_use_gets_its_allowlist(tmp_path: Path) -> No
             "search_wiki",
         ],
         "lares-control": ["request_knx_write", "get_write_request"],
-        "lares-memory": ["append_memory"],
     }
 
 

@@ -242,6 +242,39 @@ def test_a_writing_server_is_granted_to_schedule_use_cases_only(tmp_path: Path) 
         load_use_cases(_write(tmp_path, broken))
 
 
+# Propose as it would run: enabled, still naming its writing server and its model.
+_PROPOSE_ENABLED = VALID.replace(
+    '    dormant: "Waits for the GitHub App of #2114."\n', "    enabled: true\n", 1
+)
+
+
+def test_a_schedule_use_case_cannot_hold_a_writing_server_yet(tmp_path: Path) -> None:
+    """The Jobs API takes no tool list per job: every cron job sees the cron surface only."""
+    broken = _PROPOSE_ENABLED.replace("    model: gpt-6-sol\n", "", 1)
+
+    with pytest.raises(
+        ValueError, match="propose-faults: tools: lares-memory writes, and the Jobs API"
+    ):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_schedule_use_case_cannot_pin_a_model(tmp_path: Path) -> None:
+    broken = _PROPOSE_ENABLED.replace(
+        "    tools: [lares, lares-memory]\n", "    tools: [lares]\n", 1
+    )
+
+    with pytest.raises(ValueError, match="propose-faults: model: the Jobs API"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_schedule_use_case_reading_through_the_cron_surface_runs(tmp_path: Path) -> None:
+    reading = _PROPOSE_ENABLED.replace(
+        "    tools: [lares, lares-memory]\n", "    tools: [lares]\n", 1
+    ).replace("    model: gpt-6-sol\n", "", 1)
+
+    assert load_use_cases(_write(tmp_path, reading))["propose-faults"].is_schedule
+
+
 def test_a_request_server_is_granted_to_the_chat_only(tmp_path: Path) -> None:
     broken = VALID.replace("    tools: [lares]\n", "    tools: [lares, lares-control]\n", 1)
 

@@ -9,9 +9,12 @@ call's reply as the answer.
 
 Whose run a turn was is decided at its end. A Discord turn belongs to the chat
 use case; a cron execution to the schedule use case its managed job is named
-after. An API-server turn is a run this service started itself and whose row
-it writes on the event path, so its tally is kept for that path to collect by
-session id (:meth:`TurnRuns.calls_of`). The rest is left alone.
+after, started by its schedule — or by a person, when the chat asked for the
+job to run now and this is the job's first turn since
+(:meth:`TurnRuns.expect_requested`). An API-server turn is a run this service
+started itself and whose row it writes on the event path, so its tally is kept
+for that path to collect by session id (:meth:`TurnRuns.calls_of`). The rest is
+left alone.
 
 The tallies live in memory. A turn whose calls came in before a restart and
 whose end came after gets its row without them, never with a guess.
@@ -126,12 +129,23 @@ class TurnRuns:
         # Ended API-server turns, by session id, until the event path collects them.
         self._finished: dict[str, _Tally] = {}
         self._arrivals: dict[str, asyncio.Event] = {}
+        # Jobs a person asked to run now, by job id, with when they asked.
+        self._requested: dict[str, float] = {}
 
     async def handle(self, hook: ModelCall | TurnEnded) -> Outcome:
         """Add a call to its turn's tally, or write the row of a turn that ended."""
         if isinstance(hook, ModelCall):
             return self._count(hook)
         return await self._record(hook)
+
+    def expect_requested(self, job_id: str) -> None:
+        """Note that a person asked this job to run now: its next cron turn is theirs.
+
+        The run-now answer carries no execution id, so the job's first turn
+        after the request is taken as the requested one. The note lives in
+        memory: a restart before that turn ends leaves its row on `schedule`.
+        """
+        self._requested[job_id] = time.monotonic()
 
     async def calls_of(self, session_id: str, *, wait_seconds: float) -> tuple[CallTrace, ...]:
         """The model calls of the API run held by this session, waiting a moment for its end.
@@ -184,6 +198,8 @@ class TurnRuns:
             usage=usage,
         )
         self._tallies.pop(turn.turn_id, None)
+        if turn.cron_run is not None:
+            self._requested.pop(turn.cron_run.job_id, None)
         if run_id is None:
             return "duplicate"
         self._metrics.recorded_runs.labels(use_case=owner.use_case.name, status=status).inc()
@@ -214,8 +230,9 @@ class TurnRuns:
         if use_case is None:
             logger.info("cron job %s (%s) runs no declared use case", run.job_id, name or "gone")
             return None
+        trigger: TriggerKind = "message" if run.job_id in self._requested else "schedule"
         # Job, then execution: the part before the colon finds every run of the job.
-        return _Owner(use_case, "schedule", "none", f"{run.job_id}:{run.execution_id}")
+        return _Owner(use_case, trigger, "none", f"{run.job_id}:{run.execution_id}")
 
     def _hand_over(self, turn: TurnEnded) -> Outcome:
         """Keep an ended API-server turn's calls for the event run that started it."""
@@ -240,6 +257,9 @@ class TurnRuns:
             self._metrics.orphaned_calls.inc(len(tally.calls))
         for session_id in [key for key, tally in self._finished.items() if tally.touched < cutoff]:
             del self._finished[session_id]
+        # A request whose run never came: the job's next turn is its schedule's again.
+        for job_id in [key for key, asked in self._requested.items() if asked < cutoff]:
+            del self._requested[job_id]
 
 
 def _plus(total: int | None, part: int | None) -> int | None:

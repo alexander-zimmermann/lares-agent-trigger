@@ -28,7 +28,7 @@ from typing import Protocol
 import httpx
 
 from .config import Settings
-from .events import EpisodeEvent
+from .events import Occasion
 from .failures import describe
 from .faults import first_clause, load_fault_sentences
 from .ledger import Usage
@@ -62,7 +62,8 @@ class RunOutput:
 
     run_id: int
     use_case: str
-    event: EpisodeEvent
+    # The event or the request the run was started for.
+    occasion: Occasion
     text: str
     usage: Usage
 
@@ -238,18 +239,18 @@ class MailDelivery:
         return (f"mail:{str(message['Message-ID']).strip('<>')}",)
 
     def _compose(self, output: RunOutput) -> EmailMessage:
-        event = output.event
-        sentence = self._sentences.get(event.fault)
-        # An event can outlive its fault's entry; the fault's name still says what it was.
-        what = first_clause(sentence) if sentence else event.fault
+        episode = output.occasion
+        sentence = self._sentences.get(episode.fault)
+        # An episode can outlive its fault's entry; the fault's name still says what it was.
+        what = first_clause(sentence) if sentence else episode.fault
         message = EmailMessage()
-        message["Subject"] = f"[Explain] {what} · {event.subject}"
+        message["Subject"] = f"[Explain] {what} · {episode.subject}"
         message["From"] = self._settings.mail_from
         message["To"] = self._settings.mail_to
         message["Date"] = formatdate(localtime=True)
         message["Message-ID"] = make_msgid(domain=self._domain)
         link = self._settings.dashboard_episode_url.format(
-            episode_id=event.episode_id, fault=event.fault
+            episode_id=episode.episode_id, fault=episode.fault
         )
         body = _as_mail(output.text.strip())
         message.set_content(f"{body}\n\n-- \n{_footer(output.usage)}\n{link}\n")

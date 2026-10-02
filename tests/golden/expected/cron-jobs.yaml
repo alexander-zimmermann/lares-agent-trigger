@@ -7,7 +7,3 @@ jobs:
       - lares-propose
     prompt: Answer in English. Stay within 80 tool calls and 20 minutes.
     deliver: local
-    enabled_toolsets:
-      - lares
-      - lares-memory
-    model: gpt-6-sol

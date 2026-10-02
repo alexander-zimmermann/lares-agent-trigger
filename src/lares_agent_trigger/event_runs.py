@@ -1,7 +1,10 @@
-"""One episode event, from the filter to a closed ledger row.
+"""A run on an episode, from an event or a person's request to a closed ledger row.
 
 The order is the contract: match the filter, claim the row (that is the
-dedupe), check the day's cap, only then start a run. A run that fails for a
+dedupe), check the day's cap, only then start a run. A run a person asks for
+in chat skips the filter and takes the same path from the claim on, under a
+key of its own, beside the consumer rather than in its place; the request is
+answered once the row is claimed. A run that fails for a
 reason that fixes itself is started once more after the retry delay; one that
 is still failed after that, or failed for a reason that does not, closes its
 row and is posted to Alertmanager. A run that completed stores its text on the
@@ -15,17 +18,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, replace
-from typing import Protocol
+from dataclasses import dataclass, field, replace
+from typing import Literal, Protocol
 
 import httpx
 
 from .alerts import Alertmanager
 from .deliveries import Deliveries, RunOutput
-from .events import EpisodeEvent
+from .events import EpisodeEvent, EpisodeRequest, Occasion
 from .failures import TRANSIENT, FailureClass, classify_error, classify_exception, describe
 from .hermes import HermesClient, HermesError, RunOutcome, instructions_for
-from .ledger import CallTrace, Ledger, Usage
+from .ledger import CallTrace, Ledger, TriggerKind, Usage
 from .metrics import Metrics
 from .use_cases import UseCase
 
@@ -42,6 +45,15 @@ class _Failure:
     failure_class: FailureClass
     error: str
     usage: Usage | None = None
+
+
+@dataclass(frozen=True)
+class Requested:
+    """What became of a person's request: its row, and whether a run is on its way."""
+
+    run_id: int | None
+    # `running`: a run asked for on that episode is still open, and `run_id` is it.
+    status: Literal["queued", "capped", "running", "duplicate"]
 
 
 class CallTraces(Protocol):
@@ -63,6 +75,10 @@ class EventRuns:
     retry_delay_seconds: float
     traces: CallTraces
     trace_wait_seconds: float
+    # The requested runs still going, held so they are neither collected nor lost.
+    _requested: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    # One request claims at a time, so two at once cannot both find nothing open.
+    _claiming: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     def matching(self, event: EpisodeEvent) -> list[UseCase]:
         """The enabled event use cases whose filter wants this event."""
@@ -82,25 +98,86 @@ class EventRuns:
         for use_case in wanted:
             await self._run(use_case, event)
 
+    async def request(self, use_case: UseCase, request: EpisodeRequest) -> Requested:
+        """Claim the row of a person's request and start its run in the background.
+
+        The run takes its minutes beside the consumer, and its output goes
+        where the use case delivers, as an event's would. A request while a run
+        asked for on the same episode is still open is that run: the model
+        sending its call twice, or a person asking before the answer came.
+        """
+        async with self._claiming:
+            open_run = await self.ledger.open_request(use_case.name, request.episode_id)
+            if open_run is not None:
+                self.metrics.duplicates.labels(use_case=use_case.name).inc()
+                return Requested(open_run, "running")
+            run_id = await self._claim(use_case, request, "message")
+        if run_id is None:
+            self.metrics.duplicates.labels(use_case=use_case.name).inc()
+            return Requested(None, "duplicate")
+        if await self._capped(use_case, run_id):
+            return Requested(run_id, "capped")
+        task = asyncio.create_task(self._run_requested(use_case, request, run_id))
+        self._requested.add(task)
+        task.add_done_callback(self._requested.discard)
+        return Requested(run_id, "queued")
+
+    async def close_abandoned(self) -> None:
+        """Close and report the requested runs a stopped pod left open.
+
+        Called before the API takes requests, so none of them is still going.
+        """
+        error = "the trigger restarted before the requested run closed its row"
+        for row in await self.ledger.close_abandoned_requests(error):
+            self.metrics.failures.labels(row.use_case, "trigger_restarted").inc()
+            self.metrics.runs.labels(use_case=row.use_case, status="failed").inc()
+            summary = _failed(row.use_case, row.subject_key, row.attempt, "trigger_restarted")
+            logger.error("%s: %s", summary, error)
+            await self.alertmanager.run_failed(use_case=row.use_case, summary=summary, error=error)
+
+    async def aclose(self) -> None:
+        """Stop the requested runs still going; the next pod closes their rows."""
+        for task in self._requested:
+            task.cancel()
+        await asyncio.gather(*self._requested, return_exceptions=True)
+
     async def _run(self, use_case: UseCase, event: EpisodeEvent) -> None:
-        run_id = await self.ledger.claim(
-            use_case=use_case.name,
-            trigger="event",
-            subject_kind="episode",
-            subject_key=event.subject_key,
-            language=use_case.language,
-        )
+        run_id = await self._claim(use_case, event, "event")
         if run_id is None:
             await self._seen_before(use_case, event)
             return
-
-        spent = await self.ledger.runs_today(use_case.name, excluding=run_id)
-        if spent >= use_case.budget.runs_per_day:
-            await self.ledger.mark_capped(run_id)
-            self.metrics.capped.labels(use_case=use_case.name).inc()
+        if await self._capped(use_case, run_id):
             return
-
         await self._run_with_retry(use_case, event, run_id)
+
+    async def _run_requested(self, use_case: UseCase, request: EpisodeRequest, run_id: int) -> None:
+        """A requested run, with nobody waiting on it to hear that it broke."""
+        try:
+            await self._run_with_retry(use_case, request, run_id)
+        except Exception:
+            logger.exception(
+                "%s %s stopped before its row was closed", use_case.name, request.subject_key
+            )
+
+    async def _claim(
+        self, use_case: UseCase, occasion: Occasion, trigger: TriggerKind
+    ) -> int | None:
+        return await self.ledger.claim(
+            use_case=use_case.name,
+            trigger=trigger,
+            subject_kind="episode",
+            subject_key=occasion.subject_key,
+            language=use_case.language,
+        )
+
+    async def _capped(self, use_case: UseCase, run_id: int) -> bool:
+        """Close the row as capped when the day's runs are spent; True when it was."""
+        spent = await self.ledger.runs_today(use_case.name, excluding=run_id)
+        if spent < use_case.budget.runs_per_day:
+            return False
+        await self.ledger.mark_capped(run_id)
+        self.metrics.capped.labels(use_case=use_case.name).inc()
+        return True
 
     async def _seen_before(self, use_case: UseCase, event: EpisodeEvent) -> None:
         """The unique key already holds this subject: a duplicate, or a run a dead pod left open.
@@ -123,13 +200,13 @@ class EventRuns:
         self.metrics.failures.labels(use_case.name, failure.failure_class).inc()
         await self._report(use_case, event, left_open.id, left_open.attempt, failure)
 
-    async def _run_with_retry(self, use_case: UseCase, event: EpisodeEvent, run_id: int) -> None:
-        key = ledger_key(use_case.name, "episode", event.subject_key)
+    async def _run_with_retry(self, use_case: UseCase, occasion: Occasion, run_id: int) -> None:
+        key = ledger_key(use_case.name, "episode", occasion.subject_key)
         for attempt in range(1, _ATTEMPTS + 1):
             # The gateway replays the run it already holds for a key, failed or
             # not, so a retry needs a key of its own.
             idempotency_key = key if attempt == 1 else f"{key}/{attempt}"
-            failure = await self._attempt(use_case, event, run_id, idempotency_key)
+            failure = await self._attempt(use_case, occasion, run_id, idempotency_key)
             if failure is None:
                 return
             self.metrics.failures.labels(use_case.name, failure.failure_class).inc()
@@ -137,7 +214,7 @@ class EventRuns:
                 logger.warning(
                     "%s %s attempt %d failed (%s), retrying in %.0f s: %s",
                     use_case.name,
-                    event.subject_key,
+                    occasion.subject_key,
                     attempt,
                     failure.failure_class,
                     self.retry_delay_seconds,
@@ -146,11 +223,11 @@ class EventRuns:
                 await self.ledger.mark_retrying(run_id, attempt=attempt + 1, error=failure.error)
                 await asyncio.sleep(self.retry_delay_seconds)
                 continue
-            await self._report(use_case, event, run_id, attempt, failure)
+            await self._report(use_case, occasion, run_id, attempt, failure)
             return
 
     async def _attempt(
-        self, use_case: UseCase, event: EpisodeEvent, run_id: int, idempotency_key: str
+        self, use_case: UseCase, occasion: Occasion, run_id: int, idempotency_key: str
     ) -> _Failure | None:
         """Start one run and wait for it; None when it completed and its row is closed.
 
@@ -164,7 +241,7 @@ class EventRuns:
         try:
             harness_run_id = await self.hermes.start_run(
                 idempotency_key=idempotency_key,
-                run_input=event.as_input(),
+                run_input=occasion.as_input(),
                 instructions=instructions_for(
                     use_case.skill, use_case.language, budget.tool_calls, budget.minutes
                 ),
@@ -192,7 +269,7 @@ class EventRuns:
             )
 
         await self.ledger.record(run_id, text=outcome.output, usage=outcome.usage)
-        await self._deliver(use_case, event, run_id, outcome.output, outcome.usage)
+        await self._deliver(use_case, occasion, run_id, outcome.output, outcome.usage)
         return None
 
     async def _with_calls(self, outcome: RunOutcome) -> RunOutcome:
@@ -203,12 +280,14 @@ class EventRuns:
         return replace(outcome, usage=replace(outcome.usage, calls=calls))
 
     async def _deliver(
-        self, use_case: UseCase, event: EpisodeEvent, run_id: int, text: str, usage: Usage
+        self, use_case: UseCase, occasion: Occasion, run_id: int, text: str, usage: Usage
     ) -> None:
         """Carry the stored text to every declared target and close the row with what they made."""
         delivered = await self.deliveries.deliver(
             use_case.output,
-            RunOutput(run_id=run_id, use_case=use_case.name, event=event, text=text, usage=usage),
+            RunOutput(
+                run_id=run_id, use_case=use_case.name, occasion=occasion, text=text, usage=usage
+            ),
         )
         if not delivered.refusals:
             await self.ledger.finish(run_id, status="completed", output_ref=delivered.refs)
@@ -219,7 +298,7 @@ class EventRuns:
             use_case,
             run_id,
             summary=(
-                f"{use_case.name} could not deliver episode {event.subject_key}"
+                f"{use_case.name} could not deliver episode {occasion.subject_key}"
                 f" to {delivered.refused}"
             ),
             error=delivered.error,
@@ -230,7 +309,7 @@ class EventRuns:
     async def _report(
         self,
         use_case: UseCase,
-        event: EpisodeEvent,
+        occasion: Occasion,
         run_id: int,
         attempt: int,
         failure: _Failure,
@@ -242,7 +321,7 @@ class EventRuns:
         logger.error(
             "%s %s failed after %d attempt(s) (%s): %s",
             use_case.name,
-            event.subject_key,
+            occasion.subject_key,
             attempt,
             failure.failure_class,
             failure.error,
@@ -252,10 +331,7 @@ class EventRuns:
         await self._close_failed(
             use_case,
             run_id,
-            summary=(
-                f"{use_case.name} failed on episode {event.subject_key}"
-                f" after {attempt} attempt{'s' if attempt > 1 else ''} ({failure.failure_class})"
-            ),
+            summary=_failed(use_case.name, occasion.subject_key, attempt, failure.failure_class),
             error=failure.error,
             usage=failure.usage,
         )
@@ -279,6 +355,12 @@ class EventRuns:
         self.metrics.runs.labels(use_case=use_case.name, status=status).inc()
         if usage is not None and usage.duration_seconds is not None:
             self.metrics.run_duration.labels(use_case=use_case.name).observe(usage.duration_seconds)
+
+
+def _failed(use_case: str, subject_key: str, attempt: int, failure_class: FailureClass) -> str:
+    """The summary of AgentRunFailed for a run on an episode."""
+    attempts = f"{attempt} attempt{'s' if attempt > 1 else ''}"
+    return f"{use_case} failed on episode {subject_key} after {attempts} ({failure_class})"
 
 
 def ledger_key(use_case: str, subject_kind: str, subject_key: str) -> str:

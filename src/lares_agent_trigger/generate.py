@@ -18,8 +18,8 @@ the `no_mcp` sentinel. A list for Discord or cron starts with the platform's own
 composite, or the chat would lose memory and skills; an explicit Discord list
 also switches on the harness's `discord` toolset, which the settings keep
 disabled. The API server gets no composite: an event run reads, nothing else.
-A cron job without a list of its own falls back to the cron surface, which
-holds every read server in use and never a writing one.
+The Jobs API takes no list per job, so every managed cron job sees the cron
+surface, which holds every read server in use and never a writing one.
 """
 
 from __future__ import annotations
@@ -34,11 +34,11 @@ from typing import Any, override
 
 import yaml
 
+from .cron_jobs import CronJob, dump_cron_jobs, job_name
 from .hermes import language_name
 from .hooks import MODEL_CALL, TURN_ENDED
 from .receiver import HOOK_PATH
 from .use_cases import (
-    MANAGED_JOB_PREFIX,
     ScheduleTrigger,
     ToolAccess,
     ToolServer,
@@ -102,10 +102,11 @@ def render(declared: UseCaseFile, settings: str) -> Rendering:
         "# and the hook that reports every finished turn.\n"
         f"{_dump(generated)}"
     )
+    jobs = [_cron_job(use_case) for use_case in enabled if use_case.is_schedule]
     cron_jobs = (
         f"{GENERATED_LINE}\n"
         "# The cron jobs the harness runs, one per enabled schedule use case.\n"
-        f"{_dump({'jobs': [_cron_job(use_case) for use_case in enabled if use_case.is_schedule]})}"
+        f"{_dump(dump_cron_jobs(jobs))}"
     )
     allowlists = {server.client: list(server.tools) for server in in_use}
     client_tools = (
@@ -182,26 +183,23 @@ def _mcp_servers(in_use: Sequence[ToolServer]) -> dict[str, Any]:
     }
 
 
-def _cron_job(use_case: UseCase) -> dict[str, Any]:
+def _cron_job(use_case: UseCase) -> CronJob:
     trigger = use_case.trigger
     assert isinstance(trigger, ScheduleTrigger)
     # The loader refuses a schedule use case that names no skill.
     assert use_case.skill is not None
     budget = use_case.budget
-    job: dict[str, Any] = {
-        "name": f"{MANAGED_JOB_PREFIX}{use_case.name}",
-        "schedule": trigger.cron,
-        "skills": [use_case.skill],
-        "prompt": (
+    return CronJob(
+        name=job_name(use_case),
+        schedule=trigger.cron,
+        skills=(use_case.skill,),
+        prompt=(
             f"Answer in {language_name(use_case.language)}. "
             f"Stay within {budget.tool_calls} tool calls and {budget.minutes} minutes."
         ),
-        "deliver": "local",
-        "enabled_toolsets": list(use_case.tools),
-    }
-    if use_case.model is not None:
-        job["model"] = use_case.model
-    return job
+        # The trigger delivers; the harness keeps the output to itself.
+        deliver="local",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
