@@ -19,7 +19,9 @@ composite, or the chat would lose memory and skills; an explicit Discord list
 also switches on the harness's `discord` toolset, which the settings keep
 disabled. The API server gets no composite: an event run reads, nothing else.
 The Jobs API takes no list per job, so every managed cron job sees the cron
-surface, which holds every read server in use and never a writing one.
+surface, which holds every read server in use, the memory servers the schedule
+use cases name, and never a writing one; the loader keeps a memory off a
+shared surface any of its use cases would see without keeping one.
 """
 
 from __future__ import annotations
@@ -141,6 +143,16 @@ def _servers_named(
     ]
 
 
+def _cron_servers(declared: UseCaseFile, enabled: Sequence[UseCase]) -> list[ToolServer]:
+    """Every read server in use and the memory servers schedule use cases name, in file order."""
+    schedules = [use_case for use_case in enabled if use_case.is_schedule]
+    held = {
+        *(server.name for server in _servers_named(declared, enabled, access="read")),
+        *(server.name for server in _servers_named(declared, schedules, access="memory")),
+    }
+    return [server for name, server in declared.tool_servers.items() if name in held]
+
+
 def _surface(composite: str | None, servers: Sequence[ToolServer]) -> list[str]:
     head = [composite] if composite is not None else []
     return [*head, *([server.name for server in servers] or [_NO_TOOL_SERVER])]
@@ -152,7 +164,7 @@ def _platform_toolsets(declared: UseCaseFile, enabled: Sequence[UseCase]) -> dic
     return {
         "discord": _surface("hermes-discord", _servers_named(declared, chat)),
         "api_server": _surface(None, _servers_named(declared, events)),
-        "cron": _surface("hermes-cron", _servers_named(declared, enabled, access="read")),
+        "cron": _surface("hermes-cron", _cron_servers(declared, enabled)),
     }
 
 

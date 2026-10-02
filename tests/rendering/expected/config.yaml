@@ -26,6 +26,7 @@ platform_toolsets:
   cron:
     - hermes-cron
     - lares
+    - lares-memory
 hooks:
   outbound:
     - name: lares-agent-trigger
@@ -58,3 +59,12 @@ mcp_servers:
       include:
         - request_knx_write
         - get_write_request
+  lares-memory:
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    headers:
+      Authorization: Bearer ${env:LARES_MEMORY_MCP_KEY}
+    timeout: 30
+    tools:
+      include:
+        - get_memory
+        - append_memory

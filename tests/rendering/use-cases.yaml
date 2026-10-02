@@ -1,6 +1,6 @@
 # Every surface once: a chat with a request server, an event, a schedule that
-# reads through the cron surface, and a dormant schedule naming a writing server
-# nothing else uses.
+# reads and keeps its memory through the cron surface, and a dormant schedule
+# naming a writing server nothing else uses.
 
 ledger_hook:
   trigger_url: http://lares-agent-trigger.agents.svc.cluster.local:8080
@@ -22,6 +22,14 @@ tool_servers:
     timeout_seconds: 30
     access: request
     tools: [request_knx_write, get_write_request]
+
+  - name: lares-memory
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    client: lares-memory
+    key_env: LARES_MEMORY_MCP_KEY
+    timeout_seconds: 30
+    access: memory
+    tools: [get_memory, append_memory]
 
   - name: lares-wiki
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
@@ -63,7 +71,7 @@ use_cases:
       kind: schedule
       cron: "0 3 * * 0"
     skill: lares-propose
-    tools: [lares]
+    tools: [lares, lares-memory]
     output: [github_pr]
     budget: {tool_calls: 80, minutes: 20, runs_per_day: 1}
     language: en

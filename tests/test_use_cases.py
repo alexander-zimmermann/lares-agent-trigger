@@ -34,9 +34,17 @@ tool_servers:
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-memory
     key_env: LARES_MEMORY_KEY
+    timeout_seconds: 30
+    access: memory
+    tools: [get_memory, append_memory]
+
+  - name: lares-wiki
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    client: lares-wiki
+    key_env: LARES_WIKI_KEY
     timeout_seconds: 60
     access: write
-    tools: [append_memory]
+    tools: [update_wiki_page]
 
 use_cases:
   - name: explain-episode
@@ -213,7 +221,7 @@ def test_every_field_of_a_tool_server_and_the_ledger_hook(tmp_path: Path) -> Non
     assert lares.timeout_seconds == 60
     assert lares.access == "read"
     assert lares.tools == ("list_*", "get_episode", "query_*")
-    assert list(declared.tool_servers) == ["lares", "lares-control", "lares-memory"]
+    assert list(declared.tool_servers) == ["lares", "lares-control", "lares-memory", "lares-wiki"]
 
     assert declared.ledger_hook.trigger_url == (
         "http://lares-agent-trigger.agents.svc.cluster.local:8080"
@@ -236,9 +244,9 @@ def test_a_dormant_use_case_may_name_a_tool_server_still_to_be_built(tmp_path: P
 
 
 def test_a_writing_server_is_granted_to_schedule_use_cases_only(tmp_path: Path) -> None:
-    broken = VALID.replace("    tools: [lares]\n", "    tools: [lares, lares-memory]\n", 1)
+    broken = VALID.replace("    tools: [lares]\n", "    tools: [lares, lares-wiki]\n", 1)
 
-    with pytest.raises(ValueError, match="explain-episode: tools: lares-memory writes"):
+    with pytest.raises(ValueError, match="explain-episode: tools: lares-wiki writes"):
         load_use_cases(_write(tmp_path, broken))
 
 
@@ -250,10 +258,12 @@ _PROPOSE_ENABLED = VALID.replace(
 
 def test_a_schedule_use_case_cannot_hold_a_writing_server_yet(tmp_path: Path) -> None:
     """The Jobs API takes no tool list per job: every cron job sees the cron surface only."""
-    broken = _PROPOSE_ENABLED.replace("    model: gpt-6-sol\n", "", 1)
+    broken = _PROPOSE_ENABLED.replace("    model: gpt-6-sol\n", "", 1).replace(
+        "    tools: [lares, lares-memory]\n", "    tools: [lares, lares-wiki]\n", 1
+    )
 
     with pytest.raises(
-        ValueError, match="propose-faults: tools: lares-memory writes, and the Jobs API"
+        ValueError, match="propose-faults: tools: lares-wiki writes, and the Jobs API"
     ):
         load_use_cases(_write(tmp_path, broken))
 
@@ -273,6 +283,95 @@ def test_a_schedule_use_case_reading_through_the_cron_surface_runs(tmp_path: Pat
     ).replace("    model: gpt-6-sol\n", "", 1)
 
     assert load_use_cases(_write(tmp_path, reading))["propose-faults"].is_schedule
+
+
+def test_a_memory_server_is_granted_to_use_cases_that_keep_one(tmp_path: Path) -> None:
+    broken = VALID.replace("    tools: [lares]\n", "    tools: [lares, lares-memory]\n", 1)
+
+    with pytest.raises(
+        ValueError,
+        match="explain-episode: tools: lares-memory holds a use case's memory, "
+        "and explain-episode keeps none",
+    ):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_schedule_use_case_holds_its_memory_through_the_cron_surface(tmp_path: Path) -> None:
+    keeping = _PROPOSE_ENABLED.replace("    model: gpt-6-sol\n", "", 1)
+
+    propose = load_use_cases(_write(tmp_path, keeping))["propose-faults"]
+    assert propose.is_schedule
+    assert propose.tools == ("lares", "lares-memory")
+
+
+# A second schedule use case beside Propose: the cron surface is the one both jobs see.
+_REPORT = """
+  - name: energy-report
+    sentence: Mails the monthly energy report.
+    trigger:
+      kind: schedule
+      cron: "0 7 1 * *"
+    skill: lares-energy-report
+    tools: [lares]
+    output: [mail]
+    budget:
+      tool_calls: 40
+      minutes: 10
+      runs_per_day: 1
+    language: de
+    memory: false
+    enabled: true
+"""
+
+
+def test_a_shared_surface_carries_a_memory_only_when_every_use_case_on_it_keeps_one(
+    tmp_path: Path,
+) -> None:
+    """Every cron job sees the cron surface, so a job that keeps no memory would see Propose's."""
+    broken = _PROPOSE_ENABLED.replace("    model: gpt-6-sol\n", "", 1) + _REPORT
+
+    with pytest.raises(
+        ValueError,
+        match="energy-report keeps no memory, and every cron job sees lares-memory, "
+        "which propose-faults holds",
+    ):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_shared_surface_whose_every_use_case_keeps_a_memory_carries_it(tmp_path: Path) -> None:
+    keeping = _PROPOSE_ENABLED.replace("    model: gpt-6-sol\n", "", 1) + _REPORT.replace(
+        "    memory: false\n", "    memory: true\n"
+    )
+
+    assert load_use_cases(_write(tmp_path, keeping))["energy-report"].memory
+
+
+def test_the_event_surface_is_shared_the_same_way(tmp_path: Path) -> None:
+    second_event = """
+  - name: explain-episode-again
+    sentence: Explains an episode a second way, with a memory of its own.
+    trigger:
+      kind: event
+      source: episode
+      filter:
+        escalated: 3
+    skill: lares-explain-again
+    tools: [lares, lares-memory]
+    output: [stored]
+    budget:
+      tool_calls: 40
+      minutes: 10
+      runs_per_day: 10
+    language: de
+    memory: true
+    enabled: true
+"""
+    with pytest.raises(
+        ValueError,
+        match="explain-episode keeps no memory, and every event run sees lares-memory, "
+        "which explain-episode-again holds",
+    ):
+        load_use_cases(_write(tmp_path, VALID + second_event))
 
 
 def test_a_request_server_is_granted_to_the_chat_only(tmp_path: Path) -> None:
@@ -303,7 +402,8 @@ def test_a_glob_reaching_another_servers_tool_is_refused(tmp_path: Path) -> None
 
 def test_one_tool_named_by_two_servers_is_refused(tmp_path: Path) -> None:
     broken = VALID.replace(
-        "    tools: [append_memory]\n", "    tools: [append_memory, get_episode]\n"
+        "    tools: [get_memory, append_memory]\n",
+        "    tools: [get_memory, append_memory, get_episode]\n",
     )
 
     with pytest.raises(ValueError, match="also grants get_episode"):

@@ -74,8 +74,8 @@ def test_each_surface_sees_only_the_servers_its_use_cases_may_hold(tmp_path: Pat
     # An event run reads, nothing else.
     assert toolsets["api_server"] == ["lares"]
     # Every managed cron job sees this, the Jobs API taking no list per job:
-    # every read server in use.
-    assert toolsets["cron"] == ["hermes-cron", "lares"]
+    # every read server in use, and the memory the schedule use cases keep.
+    assert toolsets["cron"] == ["hermes-cron", "lares", "lares-memory"]
 
 
 def test_every_tool_server_entry_carries_its_key_and_include_list(tmp_path: Path) -> None:
@@ -95,6 +95,19 @@ def test_every_tool_server_entry_carries_its_key_and_include_list(tmp_path: Path
                 "search_wiki",
             ]
         },
+    }
+
+
+def test_a_memory_server_reaches_only_the_surface_of_the_use_cases_keeping_one(
+    tmp_path: Path,
+) -> None:
+    """The chat keeps a memory too, but names no memory server: Discord does not get it."""
+    toolsets = _config(tmp_path)["platform_toolsets"]
+
+    assert "lares-memory" not in toolsets["discord"]
+    assert "lares-memory" not in toolsets["api_server"]
+    assert _config(tmp_path)["mcp_servers"]["lares-memory"]["tools"] == {
+        "include": ["get_memory", "append_memory"]
     }
 
 
@@ -136,6 +149,7 @@ def test_each_client_of_a_server_in_use_gets_its_allowlist(tmp_path: Path) -> No
             "search_wiki",
         ],
         "lares-control": ["request_knx_write", "get_write_request"],
+        "lares-memory": ["get_memory", "append_memory"],
     }
 
 
