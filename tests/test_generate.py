@@ -1,8 +1,8 @@
 """Generator tests: the use-case file and the settings in, the three rendered files out.
 
-`golden/` holds one declaration that touches every surface and the files it
+`rendering/` holds one declaration that touches every surface and the files it
 renders to. A deliberate change to the rendering is reviewed as a diff of
-those files: `UPDATE_GOLDEN=1 pytest tests/test_generate.py` rewrites them.
+those files: `UPDATE_RENDERING=1 pytest tests/test_generate.py` rewrites them.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import yaml
 from lares_agent_trigger.generate import GENERATED_LINE, Rendering, main, render
 from lares_agent_trigger.use_cases import load_use_case_file
 
-GOLDEN = Path(__file__).parent / "golden"
-USE_CASES = GOLDEN / "use-cases.yaml"
-SETTINGS = GOLDEN / "settings.yaml"
-EXPECTED = GOLDEN / "expected"
+RENDERING = Path(__file__).parent / "rendering"
+USE_CASES = RENDERING / "use-cases.yaml"
+SETTINGS = RENDERING / "settings.yaml"
+EXPECTED = RENDERING / "expected"
 
 
 def _render(tmp_path: Path, use_cases: str | None = None, settings: str | None = None) -> Rendering:
@@ -51,14 +51,14 @@ def _allowlists(tmp_path: Path, use_cases: str | None = None) -> dict[str, list[
     return loaded
 
 
-def test_the_rendering_matches_the_golden_files(tmp_path: Path) -> None:
+def test_the_rendering_matches_the_expected_files(tmp_path: Path) -> None:
     rendered = _render(tmp_path)
     files = {
         "config.yaml": rendered.hermes_config,
         "cron-jobs.yaml": rendered.cron_jobs,
         "client-tools.env": rendered.client_tools,
     }
-    if os.environ.get("UPDATE_GOLDEN"):
+    if os.environ.get("UPDATE_RENDERING"):
         for name, text in files.items():
             (EXPECTED / name).write_text(text, encoding="utf-8")
 

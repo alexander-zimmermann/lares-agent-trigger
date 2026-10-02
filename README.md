@@ -343,7 +343,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 ## Tests
 
-The generator is pure and tested apart: the declaration and settings in `tests/golden/` go in, and the three rendered files must equal `tests/golden/expected/`. After a deliberate change, `UPDATE_GOLDEN=1 uv run pytest tests/test_generate.py` rewrites them for review.
+The generator is pure and tested apart: the declaration and settings in `tests/rendering/` go in, and the three rendered files must equal `tests/rendering/expected/`. After a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review.
 
 Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the gateway and the bridge send it; the ledger rows land in a real TimescaleDB container; the harness, Alertmanager and Discord are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the gateway's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the gateway refuses, resumes a paused job it runs, hides paused jobs from a plain list), the other two so the alert and the message are asserted as they would arrive — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts.
 
