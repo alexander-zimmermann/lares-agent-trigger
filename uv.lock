@@ -518,7 +518,7 @@ wheels = [
 
 [[package]]
 name = "lares-agent-trigger"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
