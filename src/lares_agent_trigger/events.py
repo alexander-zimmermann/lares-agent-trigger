@@ -1,4 +1,6 @@
-"""The episode event as it arrives on the bus: a pointer, never a report.
+"""What a run on an episode starts from: an event off the bus, or a person's request.
+
+Either is a pointer, never a report.
 
 The engine publishes one message per notification event on `episode.<kind>`;
 `lares-diagnostics-engine.nats_publisher.publish_episode_event` is the other
@@ -10,7 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal, get_args
 
 # The three notification events an episode emits, as the engine publishes them
@@ -50,6 +52,40 @@ class EpisodeEvent:
             "kind": self.kind,
             "time": self.time.isoformat(),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeRequest:
+    """A run on one episode a person asked for in chat, rather than an event on the bus.
+
+    `subject` is what the episode was measured on, as on the event; there is
+    no event kind, because no event started it.
+    """
+
+    episode_id: int
+    fault: str
+    subject: str
+    severity: int
+    requested_at: datetime
+
+    @property
+    def subject_key(self) -> str:
+        """The episode id, then when it was asked for: each request is a run of its own."""
+        return f"{self.episode_id}:message:{self.requested_at.astimezone(UTC):%Y%m%dT%H%M%SZ}"
+
+    def as_input(self) -> dict[str, Any]:
+        """The pointer handed to the harness as the run's input."""
+        return {
+            "episode_id": self.episode_id,
+            "fault": self.fault,
+            "subject": self.subject,
+            "severity": self.severity,
+            "requested_at": self.requested_at.isoformat(),
+        }
+
+
+# What a run on an episode was started for.
+Occasion = EpisodeEvent | EpisodeRequest
 
 
 def parse_episode_event(data: bytes) -> EpisodeEvent:

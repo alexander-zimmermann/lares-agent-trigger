@@ -79,6 +79,25 @@ class Metrics:
             ["use_case", "status"],  # completed | failed
             registry=self.registry,
         )
+        self.api_requests = Counter(
+            "agent_trigger_api_requests_total",
+            "Requests to the trigger's own API, by route and the status code they were answered.",
+            ["route", "code"],  # runs | memory
+            registry=self.registry,
+        )
+        # The cron job set brought into the harness at startup.
+        self.reconciles = Counter(
+            "agent_trigger_reconciles_total",
+            "Reconciles of the managed cron jobs, by whether the gateway let them through.",
+            ["outcome"],  # done | failed | refused
+            registry=self.registry,
+        )
+        self.cron_jobs = Counter(
+            "agent_trigger_cron_jobs_total",
+            "Managed cron jobs the reconcile changed in the harness, by what it did.",
+            ["action"],  # created | updated | deleted
+            registry=self.registry,
+        )
         self.run_duration = Histogram(
             "agent_trigger_run_duration_seconds",
             "Wall-clock time from starting a harness run to its terminal state.",

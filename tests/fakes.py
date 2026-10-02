@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import itertools
 import json
+import re
 from typing import Any
 
 import httpx
@@ -375,3 +376,163 @@ def fake_job(respx_mock: respx.MockRouter, *, job_id: str = JOB_ID, name: str | 
     if name is None:
         return route.mock(return_value=httpx.Response(404, json={"error": "Job not found"}))
     return route.mock(return_value=httpx.Response(200, json={"job": {"id": job_id, "name": name}}))
+
+
+class FakeJobs:
+    """The gateway's Jobs API over a job list it keeps, with the gateway's own rules.
+
+    `gateway/platforms/api_server.py` and `cron/jobs.py`: the gateway mints a
+    12-hex id and ignores one sent along; a create takes name, schedule,
+    prompt, skills and deliver and nothing else; a PATCH takes only its
+    whitelist and refuses a body without one of them; a name over 200
+    characters, a prompt over 5000 or a schedule that is no cron expression
+    is a 400; a run resumes a paused job; a list hides paused jobs unless
+    `include_disabled` is asked for; an id that is not 12 hex is a 400, a
+    missing job a 404. Every create, update, delete and run is kept in
+    `changes` as (method, job id), so a test sees what was touched. The
+    gateway's scan of a prompt for injections is not kept: the prompts here
+    are the generator's own.
+    """
+
+    _CREATE_FIELDS = ("name", "schedule", "prompt", "skills", "deliver")
+    # `_UPDATE_ALLOWED_FIELDS` of the gateway.
+    _UPDATE_FIELDS = frozenset(
+        {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
+    )
+
+    def __init__(self, respx_mock: respx.MockRouter) -> None:
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.changes: list[tuple[str, str]] = []
+        # How many lists answer 503 before the gateway is up.
+        self.unavailable = 0
+        self._ids = (f"{n:012x}" for n in itertools.count(0xB0B000000001))
+        base = f"{HERMES_URL}/api/jobs"
+        one = rf"^{HERMES_URL}/api/jobs/(?P<job_id>[^/]+)$"
+        respx_mock.get(base).mock(side_effect=self._list)
+        respx_mock.post(base).mock(side_effect=self._create)
+        respx_mock.route(method="GET", url__regex=one).mock(side_effect=self._get)
+        respx_mock.route(method="PATCH", url__regex=one).mock(side_effect=self._update)
+        respx_mock.route(method="DELETE", url__regex=one).mock(side_effect=self._delete)
+        respx_mock.route(method="POST", url__regex=rf"^{base}/(?P<job_id>[^/]+)/run$").mock(
+            side_effect=self._run
+        )
+
+    def add(
+        self,
+        name: str,
+        *,
+        schedule: str = "0 3 * * 0",
+        prompt: str = "Answer in English. Stay within 80 tool calls and 20 minutes.",
+        skills: tuple[str, ...] = ("lares-propose",),
+        deliver: str = "local",
+        enabled: bool = True,
+    ) -> str:
+        """A job already in the harness; its id, as the gateway minted it."""
+        job_id = next(self._ids)
+        self.jobs[job_id] = {
+            "id": job_id,
+            "name": name,
+            "prompt": prompt,
+            "skills": list(skills),
+            "skill": skills[0] if skills else None,
+            "schedule": self._schedule(schedule),
+            "schedule_display": schedule,
+            "enabled": enabled,
+            "state": "scheduled" if enabled else "paused",
+            "deliver": deliver,
+            "enabled_toolsets": None,
+            "model": None,
+        }
+        return job_id
+
+    def named(self, name: str) -> list[dict[str, Any]]:
+        return [job for job in self.jobs.values() if job["name"] == name]
+
+    @staticmethod
+    def _schedule(expr: str) -> dict[str, Any]:
+        return {"kind": "cron", "expr": expr, "display": expr}
+
+    @staticmethod
+    def _invalid(fields: dict[str, Any]) -> httpx.Response | None:
+        """The gateway's 400 for a name, prompt or schedule it does not take."""
+        if len(fields.get("name") or "") > 200:
+            return httpx.Response(400, json={"error": "Name must be ≤ 200 characters"})
+        if len(fields.get("prompt") or "") > 5000:
+            return httpx.Response(400, json={"error": "Prompt must be ≤ 5000 characters"})
+        schedule = fields.get("schedule")
+        if schedule is not None:
+            parts = str(schedule).split()
+            if len(parts) < 5 or not all(
+                re.fullmatch(r"[A-Za-z\d\*\-,/]+", part) for part in parts[:5]
+            ):
+                return httpx.Response(400, json={"error": f"Invalid cron expression '{schedule}'"})
+        return None
+
+    def _list(self, request: httpx.Request) -> httpx.Response:
+        if self.unavailable:
+            self.unavailable -= 1
+            return httpx.Response(503, json={"error": "Gateway is draining"})
+        everything = request.url.params.get("include_disabled", "").lower() in {"true", "1"}
+        jobs = [job for job in self.jobs.values() if everything or job["enabled"]]
+        return httpx.Response(200, json={"jobs": jobs})
+
+    def _create(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if not (body.get("name") or "").strip():
+            return httpx.Response(400, json={"error": "Name is required"})
+        if not (body.get("schedule") or "").strip():
+            return httpx.Response(400, json={"error": "Schedule is required"})
+        fields = {key: body[key] for key in self._CREATE_FIELDS if key in body}
+        if refused := self._invalid(fields):
+            return refused
+        job_id = self.add(
+            fields["name"],
+            schedule=fields["schedule"],
+            prompt=fields.get("prompt", ""),
+            skills=tuple(fields.get("skills") or ()),
+            deliver=fields.get("deliver", "local"),
+        )
+        self.changes.append(("POST", job_id))
+        return httpx.Response(200, json={"job": self.jobs[job_id]})
+
+    def _found(self, job_id: str) -> httpx.Response | None:
+        if not re.fullmatch(r"[a-f0-9]{12}", job_id):
+            return httpx.Response(400, json={"error": "Invalid job ID format"})
+        if job_id not in self.jobs:
+            return httpx.Response(404, json={"error": "Job not found"})
+        return None
+
+    def _get(self, _request: httpx.Request, job_id: str) -> httpx.Response:
+        return self._found(job_id) or httpx.Response(200, json={"job": self.jobs[job_id]})
+
+    def _update(self, request: httpx.Request, job_id: str) -> httpx.Response:
+        if refused := self._found(job_id):
+            return refused
+        body = json.loads(request.content)
+        fields = {key: value for key, value in body.items() if key in self._UPDATE_FIELDS}
+        if not fields:
+            return httpx.Response(400, json={"error": "No valid fields to update"})
+        if refused := self._invalid(fields):
+            return refused
+        job = self.jobs[job_id]
+        if "schedule" in fields:
+            fields["schedule"] = self._schedule(fields["schedule"])
+            job["schedule_display"] = fields["schedule"]["display"]
+        job.update(fields)
+        self.changes.append(("PATCH", job_id))
+        return httpx.Response(200, json={"job": job})
+
+    def _delete(self, _request: httpx.Request, job_id: str) -> httpx.Response:
+        if refused := self._found(job_id):
+            return refused
+        del self.jobs[job_id]
+        self.changes.append(("DELETE", job_id))
+        return httpx.Response(200, json={"ok": True})
+
+    def _run(self, _request: httpx.Request, job_id: str) -> httpx.Response:
+        if refused := self._found(job_id):
+            return refused
+        job = self.jobs[job_id]
+        job.update({"enabled": True, "state": "scheduled", "manual_run_at": "2026-10-02T14:20:05"})
+        self.changes.append(("RUN", job_id))
+        return httpx.Response(200, json={"job": job})

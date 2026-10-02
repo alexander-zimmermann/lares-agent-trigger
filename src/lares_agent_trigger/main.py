@@ -1,4 +1,4 @@
-"""Entry point: load the declaration and its deliveries, open the ledger, bind consumer and hook.
+"""Entry point: load the declaration, open the ledger, reconcile the jobs, bind consumer and API.
 
 `lares-agent-trigger generate …` renders the declaration instead (see `generate.py`).
 """
@@ -18,14 +18,17 @@ from nats_bridge_core import tracing, watchdog_ok
 
 from . import generate
 from .alerts import Alertmanager
+from .api import TriggerApi
 from .config import Settings
 from .consumer import EpisodeConsumer
+from .cron_jobs import load_cron_jobs
 from .deliveries import build_deliveries
 from .event_runs import EventRuns
 from .hermes import HermesClient
 from .ledger import Ledger
 from .metrics import Metrics
 from .receiver import ReceiverServer, create_app
+from .schedules import Schedules
 from .turn_runs import TurnRuns
 from .use_cases import load_use_cases
 
@@ -39,11 +42,13 @@ async def _amain() -> int:
     logger.info("lares-agent-trigger starting")
 
     metrics = Metrics()
-    # A file that does not validate, or an output nobody could deliver, stops
-    # the pod here with the reason in the log: starting runs from a half-read
-    # catalogue is worse than not starting.
+    # A file that does not validate, a job set rendered from another
+    # declaration, or an output nobody could deliver stops the pod here with
+    # the reason in the log: starting runs from a half-read catalogue is worse
+    # than not starting.
     try:
         use_cases = load_use_cases(settings.use_cases_file)
+        cron_jobs = load_cron_jobs(settings.cron_jobs_file, use_cases)
         deliveries = build_deliveries(settings, use_cases, metrics)
     except ValueError as exc:
         logger.error("refusing to start: %s", exc)
@@ -70,8 +75,14 @@ async def _amain() -> int:
         traces=turns,
         trace_wait_seconds=settings.trace_wait_seconds,
     )
+    schedules = Schedules(
+        cron_jobs, hermes, turns, metrics, retry_seconds=settings.reconcile_retry_seconds
+    )
     consumer = EpisodeConsumer(settings, runs, metrics)
-    receiver = ReceiverServer(create_app(turns, settings.hook_secret, metrics), settings.http_port)
+    api = TriggerApi(use_cases, runs, schedules, ledger, settings.api_key, metrics)
+    receiver = ReceiverServer(
+        create_app(turns, settings.hook_secret, api, metrics), settings.http_port
+    )
 
     async def is_healthy() -> bool:
         # The harness is deliberately not part of health: a gateway outage is
@@ -88,9 +99,14 @@ async def _amain() -> int:
         loop.add_signal_handler(sig, stop.set)
 
     receiving: asyncio.Task[None] | None = None
+    reconciling: asyncio.Task[None] | None = None
     try:
         await ledger.open()
         await consumer.connect()
+        # Beside the consumer: a gateway rolling on the same commit is asked again.
+        reconciling = asyncio.create_task(schedules.keep_reconciling())
+        # Before the API takes a request, so nothing it closes is still going.
+        await runs.close_abandoned()
         # Only once the ledger is open: a delivery before that could not be written.
         receiving = asyncio.create_task(receiver.serve())
         logger.info("trigger is up")
@@ -98,6 +114,8 @@ async def _amain() -> int:
             await consumer.run_once()
             if receiving.done():
                 raise RuntimeError("the hook receiver stopped") from receiving.exception()
+            if reconciling.done() and (broken := reconciling.exception()) is not None:
+                raise RuntimeError("the cron job reconcile stopped") from broken
     except Exception:
         logger.exception("fatal error in trigger startup/run")
         return 1
@@ -107,6 +125,11 @@ async def _amain() -> int:
             receiver.should_exit = True
             with contextlib.suppress(Exception):
                 await receiving
+        if reconciling is not None:
+            reconciling.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reconciling
+        await runs.aclose()
         await consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()

@@ -33,14 +33,17 @@ from testcontainers.core.waiting_utils import wait_for_logs
 from testcontainers.postgres import PostgresContainer
 
 from lares_agent_trigger.alerts import Alertmanager
+from lares_agent_trigger.api import TriggerApi
 from lares_agent_trigger.config import Settings
 from lares_agent_trigger.consumer import EpisodeConsumer
+from lares_agent_trigger.cron_jobs import load_cron_jobs
 from lares_agent_trigger.deliveries import build_deliveries
 from lares_agent_trigger.event_runs import EventRuns
 from lares_agent_trigger.hermes import HermesClient
 from lares_agent_trigger.ledger import Ledger
 from lares_agent_trigger.metrics import Metrics
 from lares_agent_trigger.receiver import create_app
+from lares_agent_trigger.schedules import Schedules
 from lares_agent_trigger.turn_runs import TurnRuns
 from lares_agent_trigger.use_cases import load_use_cases
 
@@ -52,6 +55,8 @@ NATS_IMAGE = "nats:2.10-alpine"
 HERMES_URL = "http://hermes.test:8642"
 ALERTMANAGER_URL = "http://alertmanager.test:9093"
 HOOK_SECRET = "h" * 32
+# The key the bridge sends to the trigger's own API.
+API_KEY = "a" * 32
 # Short enough to wait on, long enough to measure between two starts.
 RETRY_DELAY_SECONDS = 0.2
 
@@ -128,6 +133,22 @@ use_cases:
     memory: true
     enabled: true
 
+  - name: restore-probe
+    sentence: Reports whether the backups could be restored.
+    trigger:
+      kind: schedule
+      cron: "0 8 * * 1"
+    skill: lares-restore-probe
+    tools: [lares]
+    output: [github_issue]
+    budget:
+      tool_calls: 30
+      minutes: 10
+      runs_per_day: 1
+    language: en
+    memory: false
+    enabled: true
+
   - name: summarise-week
     sentence: Summarises the week on Sunday evening.
     trigger:
@@ -143,6 +164,21 @@ use_cases:
     language: de
     memory: false
     dormant: Waits for its skill.
+"""
+
+# The job set the generator renders from USE_CASES: one job per enabled schedule.
+CRON_JOBS = """
+jobs:
+  - name: lares:propose-faults
+    schedule: 0 3 * * 0
+    skills: [lares-propose]
+    prompt: Answer in English. Stay within 80 tool calls and 20 minutes.
+    deliver: local
+  - name: lares:restore-probe
+    schedule: 0 8 * * 1
+    skills: [lares-restore-probe]
+    prompt: Answer in English. Stay within 30 tool calls and 10 minutes.
+    deliver: local
 """
 
 # Two entries copied from the engine's faults.yaml: one sentence with a dash
@@ -209,6 +245,14 @@ CREATE TABLE agent_memory (
     text       TEXT        NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- The engine's table, in the columns a run on an episode reads from it.
+CREATE TABLE episodes (
+    id         BIGINT      PRIMARY KEY,
+    fault      TEXT        NOT NULL,
+    subject    TEXT        NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    severity   SMALLINT    NOT NULL CHECK (severity BETWEEN 1 AND 3)
+);
 """
 
 
@@ -254,6 +298,30 @@ def rows(postgres: PostgresContainer) -> Iterator[Callable[[], list[dict[str, An
             return list(c.execute("SELECT * FROM agent_runs ORDER BY id"))
 
         yield read
+
+
+@pytest.fixture
+def memory(postgres: PostgresContainer) -> Iterator[Callable[[], dict[str, str]]]:
+    """Read the use-case memory, text by use case, and leave it empty for the next test."""
+    with psycopg.connect(_dsn(postgres), autocommit=True, row_factory=psycopg.rows.dict_row) as c:
+        c.execute("TRUNCATE agent_memory")
+
+        def read() -> dict[str, str]:
+            return {row["use_case"]: row["text"] for row in c.execute("SELECT * FROM agent_memory")}
+
+        yield read
+
+
+@pytest.fixture
+def episode(postgres: PostgresContainer) -> Iterator[int]:
+    """One episode in the engine's table, as the washing machine left it; its id."""
+    with psycopg.connect(_dsn(postgres), autocommit=True) as conn:
+        conn.execute("TRUNCATE episodes")
+        conn.execute(
+            "INSERT INTO episodes (id, fault, subject, started_at, severity)"
+            " VALUES (15510, 'appliance_runtime', '2/1/197', '2026-09-25T14:20:00+00:00', 2)"
+        )
+        yield 15510
 
 
 @pytest.fixture
@@ -340,6 +408,8 @@ def settings(
 ) -> Settings:
     use_cases_file = tmp_path / "use-cases.yaml"
     use_cases_file.write_text(USE_CASES, encoding="utf-8")
+    cron_jobs_file = tmp_path / "cron-jobs.yaml"
+    cron_jobs_file.write_text(CRON_JOBS, encoding="utf-8")
     faults_file = tmp_path / "faults.yaml"
     faults_file.write_text(FAULTS, encoding="utf-8")
     _, relay_port = relay_server
@@ -347,6 +417,7 @@ def settings(
     return Settings(
         nats_servers=nats_url,
         use_cases_file=use_cases_file,
+        cron_jobs_file=cron_jobs_file,
         db_host=host,
         db_port=int(postgres.get_exposed_port(5432)),
         db_name="homelab",
@@ -355,6 +426,9 @@ def settings(
         hermes_url=HERMES_URL,
         hermes_api_key="k" * 32,
         hook_secret=HOOK_SECRET,
+        api_key=API_KEY,
+        # A reconcile the harness refused is tried again after this long.
+        reconcile_retry_seconds=0.01,
         # An event run waits this long for its calls; the tests deliver them first.
         trace_wait_seconds=0.05,
         # The poll loop is exercised, not waited on.
@@ -433,6 +507,10 @@ class Service:
     consumer: EpisodeConsumer
     client: httpx.AsyncClient
     metrics: Metrics
+    schedules: Schedules
+    runs: EventRuns
+    hermes: HermesClient
+    turns: TurnRuns
 
 
 @pytest_asyncio.fixture
@@ -459,14 +537,23 @@ async def service(
         traces=turns,
         trace_wait_seconds=settings.trace_wait_seconds,
     )
+    schedules = Schedules(
+        load_cron_jobs(settings.cron_jobs_file, use_cases),
+        hermes,
+        turns,
+        metrics,
+        retry_seconds=settings.reconcile_retry_seconds,
+    )
     episode_consumer = EpisodeConsumer(settings, runs, metrics)
     await episode_consumer.connect()
-    app = create_app(turns, settings.hook_secret, metrics)
+    api = TriggerApi(use_cases, runs, schedules, ledger, settings.api_key, metrics)
+    app = create_app(turns, settings.hook_secret, api, metrics)
     # In-process: the ASGI app behind a real HTTP client, no port and no server.
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://trigger")
     try:
-        yield Service(episode_consumer, client, metrics)
+        yield Service(episode_consumer, client, metrics, schedules, runs, hermes, turns)
     finally:
+        await runs.aclose()
         await client.aclose()
         await episode_consumer.close()
         await hermes.aclose()
@@ -484,4 +571,10 @@ def consumer(service: Service) -> tuple[EpisodeConsumer, Metrics]:
 @pytest.fixture
 def receiver(service: Service) -> tuple[httpx.AsyncClient, Metrics]:
     """The hook receiver as Hermes reaches it: HTTP in, the real ledger behind it."""
+    return service.client, service.metrics
+
+
+@pytest.fixture
+def api(service: Service) -> tuple[httpx.AsyncClient, Metrics]:
+    """The trigger's own API as the bridge reaches it, on the same app as the receiver."""
     return service.client, service.metrics

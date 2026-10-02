@@ -1,4 +1,4 @@
-"""Runtime configuration: NATS from the shared base, plus ledger, harness, delivery and hook."""
+"""Runtime configuration: NATS from the shared base, then ledger, harness, delivery, hook, API."""
 
 from __future__ import annotations
 
@@ -24,8 +24,10 @@ class Settings(NatsSettings):
     # ten runs a day never need concurrency.
     fetch_timeout_seconds: float = 5.0
 
-    # The declared use cases, mounted from lares as a hashed ConfigMap.
+    # The declared use cases and the cron job set rendered from them, both
+    # mounted from lares as hashed ConfigMaps.
     use_cases_file: Path = Path("/etc/lares-agent-trigger/use-cases.yaml")
+    cron_jobs_file: Path = Path("/etc/lares-agent-trigger/cron-jobs.yaml")
 
     # Ledger: the one table this service writes.
     db_host: str
@@ -49,6 +51,9 @@ class Settings(NatsSettings):
     # A transient failure is started once more after this long; a setting so
     # tests can shorten it.
     retry_delay_seconds: float = 300.0
+    # A reconcile of the cron jobs the gateway did not answer is tried again
+    # after this long, until one goes through.
+    reconcile_retry_seconds: float = 60.0
 
     # Where a run that failed for good is reported as AgentRunFailed.
     alertmanager_url: str = "http://prometheus-alertmanager.prometheus.svc.cluster.local:9093"
@@ -80,6 +85,10 @@ class Settings(NatsSettings):
     # How long an event run waits, once over, for its model calls to arrive
     # through the hook before it is recorded without them.
     trace_wait_seconds: float = 5.0
+    # The key the trigger's own API takes on the same port: the bridge holds
+    # it too and forwards its start_run tool with it.
+    api_key: str = Field(default="", repr=False)
+    api_key_file: Path | None = None
 
     @model_validator(mode="after")
     def _resolve_secret_files(self) -> Settings:
@@ -93,6 +102,8 @@ class Settings(NatsSettings):
             self.discord_bot_token = self.discord_bot_token_file.read_text(encoding="utf-8").strip()
         if self.hook_secret_file:
             self.hook_secret = self.hook_secret_file.read_text(encoding="utf-8").strip()
+        if self.api_key_file:
+            self.api_key = self.api_key_file.read_text(encoding="utf-8").strip()
         missing = [
             name
             for name, value in (
@@ -100,12 +111,15 @@ class Settings(NatsSettings):
                 ("DB_PASSWORD", self.db_password),
                 ("HERMES_API_KEY", self.hermes_api_key),
                 ("HOOK_SECRET", self.hook_secret),
+                ("API_KEY", self.api_key),
             )
             if not value
         ]
         if missing:
             joined = ", ".join(f"{name} or {name}_FILE" for name in missing)
             raise ValueError(f"missing required configuration: {joined}")
+        if len(self.api_key) < 32:
+            raise ValueError("API_KEY must be at least 32 characters")
         return self
 
     @property

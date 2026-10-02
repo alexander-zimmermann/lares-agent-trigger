@@ -288,6 +288,7 @@ def load_use_case_file(path: Path) -> UseCaseFile:
         by_name[use_case.name] = use_case
         if use_case.is_enabled:
             _check_grants(path, use_case, servers)
+            _check_cron_job(path, use_case)
 
     # The harness has one chat surface, so a turn it reports belongs to one use case.
     chats = [use_case.name for use_case in by_name.values() if use_case.is_chat]
@@ -332,8 +333,27 @@ def _check_grants(path: Path, use_case: UseCase, servers: Mapping[str, ToolServe
                 f"{path}: use case {use_case.name}: tools: {name} writes and is granted "
                 "to schedule use cases only"
             )
+        if server.access == "write":
+            raise ValueError(
+                f"{path}: use case {use_case.name}: tools: {name} writes, and the Jobs API "
+                "gives a cron job no tool list of its own; it stays dormant until the "
+                "harness can carry one"
+            )
         if server.access == "request" and not use_case.is_chat:
             raise ValueError(
                 f"{path}: use case {use_case.name}: tools: {name} places requests and is "
                 "granted to the chat only"
             )
+
+
+def _check_cron_job(path: Path, use_case: UseCase) -> None:
+    """Refuse a schedule use case its managed job could not carry.
+
+    The Jobs API creates a job with its name, schedule, prompt, skills and
+    delivery, and with nothing else: no model of its own.
+    """
+    if use_case.is_schedule and use_case.model is not None:
+        raise ValueError(
+            f"{path}: use case {use_case.name}: model: the Jobs API gives a cron job no "
+            "model of its own; a schedule use case runs on the harness's default"
+        )
