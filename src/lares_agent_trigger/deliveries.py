@@ -8,6 +8,21 @@ so the row can record it in `output_ref`. A target that refuses fails the run:
 the others are still tried, the stored text stays, and the refusal's raw text
 becomes the row's error.
 
+`wiki_page` takes a structured output, validated before anything leaves: the
+run opens with its sentence, as every run does, then names its page in a block
+and ends with the page itself —
+
+    <sentence>
+
+    ---
+    path: haus/wartungsplan
+    title: Wartungsplan
+    ---
+    <the page in Markdown, to the end of the text>
+
+A block that does not hold is a refusal like any other, and the wiki is never
+called.
+
 Only the targets an enabled use case declares are built, and a declared target
 without its settings — or without a delivery at all — stops the pod at
 startup, the same rule as a use-case file that does not validate.
@@ -23,9 +38,11 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 from importlib.metadata import version
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import Settings
 from .events import Occasion
@@ -42,6 +59,8 @@ _DISCORD_API = "https://discord.com/api/v10"
 _DISCORD_LIMIT = 2000
 # How the skill marks a proof line; Discord renders it small and grey.
 _PROOF_PREFIX = "-# "
+# The line that opens and closes a wiki page block.
+_PAGE_BLOCK_DELIMITER = "---"
 
 
 class DeliveryError(RuntimeError):
@@ -289,6 +308,179 @@ def _footer(usage: Usage) -> str:
     return " · ".join(parts)
 
 
+class _PageHeader(BaseModel):
+    """What a page block names: where the page lives and what it is called."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+
+
+@dataclass(frozen=True)
+class WikiPage:
+    """One page as a run delivers it."""
+
+    path: str
+    title: str
+    content: str
+
+
+def wiki_page(text: str) -> WikiPage:
+    """The page the output's block names, or a `DeliveryError` saying what does not hold."""
+    lines = text.strip().splitlines()
+    try:
+        opening = lines.index(_PAGE_BLOCK_DELIMITER)
+    except ValueError:
+        raise DeliveryError(
+            "the output holds no page block: a line ---, its path and title, a line ---,"
+            " then the page"
+        ) from None
+    if opening == 0:
+        raise DeliveryError("the output opens with its sentence, then the page block")
+    try:
+        closing = lines.index(_PAGE_BLOCK_DELIMITER, opening + 1)
+    except ValueError:
+        raise DeliveryError("the page block has no closing --- line") from None
+    try:
+        raw = yaml.safe_load("\n".join(lines[opening + 1 : closing]))
+    except yaml.YAMLError as exc:
+        raise DeliveryError(f"the page block is not valid YAML: {exc}") from exc
+    try:
+        header = _PageHeader.model_validate(raw)
+    except ValidationError as exc:
+        reasons = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc']) or 'block'}: {error['msg']}"
+            for error in exc.errors()
+        )
+        raise DeliveryError(f"the page block does not hold: {reasons}") from exc
+    content = "\n".join(lines[closing + 1 :]).strip()
+    if not content:
+        raise DeliveryError("the page block is followed by no content")
+    return WikiPage(path=header.path.strip("/"), title=header.title, content=f"{content}\n")
+
+
+_WIKI_LIST_QUERY = """\
+query ($locale: String!) {
+  pages {
+    list(locale: $locale) { id path locale description isPublished tags }
+  }
+}"""
+
+# A write answers with the raw page row, which has `localeCode` and no
+# `locale`: selecting `locale` here fails the answer after the write went through.
+_WIKI_RESULT = """\
+      responseResult { succeeded slug message }
+      page { id path }"""
+
+_WIKI_CREATE = f"""\
+mutation ($content: String!, $locale: String!, $path: String!, $title: String!) {{
+  pages {{
+    create(content: $content, description: "", editor: "markdown", isPublished: true,
+           isPrivate: false, locale: $locale, path: $path, tags: [], title: $title) {{
+{_WIKI_RESULT}
+    }}
+  }}
+}}"""
+
+_WIKI_UPDATE = f"""\
+mutation ($id: Int!, $content: String!, $title: String!, $description: String,
+          $isPublished: Boolean!, $tags: [String]!) {{
+  pages {{
+    update(id: $id, content: $content, title: $title, description: $description,
+           isPublished: $isPublished, tags: $tags) {{
+{_WIKI_RESULT}
+    }}
+  }}
+}}"""
+
+
+class WikiPageDelivery:
+    """A page in the house wiki, through Wiki.js's GraphQL API under the write key.
+
+    The path is looked up in the configured locale: a new path is created as a
+    published page, an existing page gets the block's content and title and
+    keeps its description, tags and publish flag — Wiki.js resets whatever an
+    update leaves out. A publish window set in the editor is not in the page
+    list, so an update clears it. Every update leaves the previous revision in
+    the page's history.
+    """
+
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+        missing = [
+            name
+            for name, value in (
+                ("WIKIJS_URL", settings.wikijs_url),
+                ("WIKIJS_TOKEN or WIKIJS_TOKEN_FILE", settings.wikijs_token),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"the wiki_page output needs {', '.join(missing)}")
+        self._locale = settings.wikijs_locale
+        self._client = client or httpx.AsyncClient(
+            base_url=settings.wikijs_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {settings.wikijs_token}"},
+            timeout=settings.wikijs_request_timeout_seconds,
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def deliver(self, output: RunOutput, /) -> tuple[str, ...]:
+        """Create or update the page the block names; the ref is its locale and path."""
+        page = wiki_page(output.text)
+        listed = await self._graphql(_WIKI_LIST_QUERY, {"locale": self._locale})
+        existing = next((entry for entry in listed["list"] if entry["path"] == page.path), None)
+        if existing is None:
+            action, mutation = "create", _WIKI_CREATE
+            variables: dict[str, Any] = {
+                "content": page.content,
+                "locale": self._locale,
+                "path": page.path,
+                "title": page.title,
+            }
+        else:
+            action, mutation = "update", _WIKI_UPDATE
+            variables = {
+                "id": existing["id"],
+                "content": page.content,
+                "title": page.title,
+                "description": existing["description"],
+                "isPublished": existing["isPublished"],
+                "tags": existing["tags"],
+            }
+        result = (await self._graphql(mutation, variables))[action]
+        status = result["responseResult"]
+        if not status["succeeded"]:
+            raise DeliveryError(
+                f"Wiki.js refused to {action} {page.path}: {status['slug']}: {status['message']}"
+            )
+        return (f"wiki:{self._locale}/{result['page']['path']}",)
+
+    async def _graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        """One GraphQL request; its `pages` payload, or a `DeliveryError` with Wiki.js's answer."""
+        try:
+            response = await self._client.post(
+                "/graphql", json={"query": query, "variables": variables}
+            )
+        except httpx.HTTPError as exc:
+            raise DeliveryError(f"Wiki.js could not be reached: {describe(exc)}") from exc
+        if response.status_code >= 400:
+            raise DeliveryError(f"Wiki.js returned {response.status_code}: {response.text}")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise DeliveryError(
+                f"Wiki.js returned {response.status_code} without JSON: {response.text}"
+            ) from exc
+        if body.get("errors"):
+            messages = "; ".join(str(error.get("message")) for error in body["errors"])
+            raise DeliveryError(f"Wiki.js refused the request: {messages}")
+        pages: dict[str, Any] = body["data"]["pages"]
+        return pages
+
+
 class Deliveries:
     """The registry the event path hands a completed run to."""
 
@@ -336,6 +528,7 @@ _REGISTRY: dict[OutputTarget, Callable[[Settings], Delivery]] = {
     "stored": lambda _settings: StoredDelivery(),
     "discord": DiscordDelivery,
     "mail": MailDelivery,
+    "wiki_page": WikiPageDelivery,
 }
 
 

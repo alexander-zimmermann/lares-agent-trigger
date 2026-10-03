@@ -76,6 +76,13 @@ class Settings(NatsSettings):
     faults_file: Path = Path("/etc/lares-agent-trigger/faults.yaml")
     # The dashboard row of an episode; `{episode_id}` and `{fault}` are filled in.
     dashboard_episode_url: str = ""
+    # Wiki: the house wiki's GraphQL API under the key whose group may write
+    # pages; a page is looked up and created in one locale.
+    wikijs_url: str = ""
+    wikijs_token: str = Field(default="", repr=False)
+    wikijs_token_file: Path | None = None
+    wikijs_locale: str = "de"
+    wikijs_request_timeout_seconds: float = 15.0
 
     # The receiver the harness's outbound hook posts every finished chat and
     # cron turn to, and the HMAC secret both sides share.
@@ -100,6 +107,8 @@ class Settings(NatsSettings):
             self.hermes_api_key = self.hermes_api_key_file.read_text(encoding="utf-8").strip()
         if self.discord_bot_token_file:
             self.discord_bot_token = self.discord_bot_token_file.read_text(encoding="utf-8").strip()
+        if self.wikijs_token_file:
+            self.wikijs_token = self.wikijs_token_file.read_text(encoding="utf-8").strip()
         if self.hook_secret_file:
             self.hook_secret = self.hook_secret_file.read_text(encoding="utf-8").strip()
         if self.api_key_file:
