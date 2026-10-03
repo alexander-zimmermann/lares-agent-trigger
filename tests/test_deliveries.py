@@ -414,11 +414,11 @@ def test_a_declared_target_without_its_settings_refuses_to_start(settings: Setti
 def test_a_declared_target_this_trigger_cannot_deliver_refuses_to_start(
     settings: Settings, tmp_path: Path
 ) -> None:
-    declared = tmp_path / "wiki.yaml"
+    declared = tmp_path / "pull-request.yaml"
     declared.write_text(
-        USE_CASES.replace("output: [stored, discord, mail]", "output: [stored, wiki_page]"),
+        USE_CASES.replace("output: [stored, discord, mail]", "output: [stored, github_pr]"),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="wiki_page"):
+    with pytest.raises(ValueError, match="github_pr"):
         build_deliveries(settings, load_use_cases(declared), Metrics())

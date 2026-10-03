@@ -2,7 +2,7 @@
 
 The service that decides when the house explains itself.
 
-It reads the episode events [lares-diagnostics-engine](https://github.com/alexander-zimmermann/lares-diagnostics-engine) publishes on NATS, decides against a declared use-case file whether an event deserves an answer, starts a run on the [Hermes](https://github.com/NousResearch/hermes-agent) harness, waits for it, writes the result into one row of the agent ledger, and delivers it where the use case says: a Discord message, a mail.
+It reads the episode events [lares-diagnostics-engine](https://github.com/alexander-zimmermann/lares-diagnostics-engine) publishes on NATS, decides against a declared use-case file whether an event deserves an answer, starts a run on the [Hermes](https://github.com/NousResearch/hermes-agent) harness, waits for it, writes the result into one row of the agent ledger, and delivers it where the use case says: a Discord message, a mail, a wiki page.
 
 Besides the chat and the harness's own cron, this is the only thing that starts an agent run — and the only writer of `agent_runs` and `agent_memory`. The runs it does not start still get their row: the harness reports every finished chat turn and cron execution to the trigger's hook receiver. The cron jobs themselves it keeps in line with the declaration, and a person in chat can have it start a use case now.
 
@@ -184,6 +184,7 @@ The model never delivers. On an API run the harness posts nothing itself; once a
 | `stored`  | The row itself: the text is written before any other target sees it.                                                                 | —                               |
 | `discord` | Posts to the home channel through the bot's REST API, with the token the harness chats with. No mention in the text can ping anyone. | `discord:<channel>/<message>`, one per message |
 | `mail`    | Sends a plaintext mail through the cluster's relay, from its one accepted sender to the owner.                                        | `mail:<Message-ID>`             |
+| `wiki_page` | Writes the page the run's page block names into Wiki.js, under the key whose group may write pages: creates it, or replaces content and title of the page at that path. | `wiki:<locale>/<path>`          |
 
 Discord takes 2000 characters a message. A text that fits goes as it is; a longer one goes as the cause and its proof lines (the `-# ` lines the skill writes), then the rest in a second message. A part still too long is cut on a line and ends in `… (run <id>)`: the row holds the whole text.
 
@@ -204,9 +205,24 @@ https://grafana.zimmermann.sh/d/knx-episodes?var-fault=appliance_runtime
 
 The fault sentence comes from the engine's own `faults.yaml`, mounted unchanged; an event whose fault the list no longer holds is named by the fault's name.
 
+A run that delivers to the wiki opens with its sentence like every run — it is the row's `tldr` — and then names its page in a block, the page itself following to the end of the text:
+
+```
+Wartungsplan auf den Stand vom Oktober gebracht.
+
+---
+path: haus/wartungsplan
+title: Wartungsplan
+---
+# Wartungsplan
+…
+```
+
+The block is checked before the wiki is called: exactly `path` and `title`, both non-empty, and a page after it. One that does not hold is a refusal like any other, with the reason as the row's error. The path is looked up in `WIKIJS_LOCALE`; a new page is created published and without tags, an existing one keeps its description, tags and publish flag, because Wiki.js resets whatever an update leaves out; a publish window set in the editor is not in the page list and is cleared. Every update leaves the previous revision in the page's history.
+
 A target that refuses does not stop the next one from trying. The run then closes `failed` with each refusal's raw text as the error, keeps its text and the refs of everything that was created — the first message of a split post included — and raises `AgentRunFailed` like any failed run. The model is not asked again: running it twice would not change what Discord or the relay make of the answer. A run the harness reports completed but without any output fails before delivery, as `unknown`.
 
-Only targets an enabled event use case declares are built, and a declared target without its settings, or one this trigger does not deliver (`alert`, the GitHub targets, `wiki_page`), stops the pod at startup.
+Only targets an enabled event use case declares are built, and a declared target without its settings, or one this trigger does not deliver (`alert`, the GitHub targets), stops the pod at startup.
 
 ## When a run fails
 
@@ -313,6 +329,10 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `MAIL_FROM` / `MAIL_TO`                     | —                                                  | The relay's accepted sender, and the owner.        |
 | `FAULTS_FILE`                               | `/etc/lares-agent-trigger/faults.yaml`             | The engine's fault list, for the mail subject.     |
 | `DASHBOARD_EPISODE_URL`                     | —                                                  | The episode on the dashboard; `{episode_id}` and `{fault}` are filled in. |
+| `WIKIJS_URL`                                | —                                                  | Wiki.js base URL; needed by the `wiki_page` output. |
+| `WIKIJS_TOKEN_FILE`                         | —                                                  | A Wiki.js API key whose group has `read:pages` and `write:pages`. |
+| `WIKIJS_LOCALE`                             | `de`                                               | The locale a page is looked up and created in.     |
+| `WIKIJS_REQUEST_TIMEOUT_SECONDS`            | `15.0`                                             | Per-request timeout against Wiki.js.               |
 | `HTTP_PORT`                                 | `8080`                                             | The hook receiver and the API.                     |
 | `HOOK_SECRET_FILE`                          | —                                                  | The HMAC secret the harness signs deliveries with. |
 | `API_KEY_FILE`                              | —                                                  | The key the API takes, at least 32 characters; the bridge holds it too. |
@@ -346,7 +366,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 The generator is pure and tested apart: the declaration and settings in `tests/rendering/` go in, and the three rendered files must equal `tests/rendering/expected/`. After a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review.
 
-Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the gateway and the bridge send it; the ledger rows land in a real TimescaleDB container; the harness, Alertmanager and Discord are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the gateway's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the gateway refuses, resumes a paused job it runs, hides paused jobs from a plain list), the other two so the alert and the message are asserted as they would arrive — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts.
+Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the gateway and the bridge send it; the ledger rows land in a real TimescaleDB container; the harness, Alertmanager, Discord and Wiki.js are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the gateway's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the gateway refuses, resumes a paused job it runs, hides paused jobs from a plain list), the other three so the alert, the message and the page are asserted as they would arrive — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts.
 
 ```bash
 uv sync --extra dev
