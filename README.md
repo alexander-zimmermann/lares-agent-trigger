@@ -69,6 +69,7 @@ A tool server is the bridge under one machine-client key; `tools` is both the br
 | `read`    | any use case                                                                       |
 | `write`   | schedule use cases only, and none while the Jobs API gives a cron job no tool list of its own (see [The cron jobs](#the-cron-jobs)) |
 | `request` | the chat only: what a person asks for in conversation — a write request approved elsewhere, a run started now |
+| `memory`  | use cases with `memory: true` only: their own memory, read and appended through the bridge. A surface the harness shares — all event runs, all cron jobs — carries it only when every enabled use case on it keeps a memory |
 
 A tool sits on one server only: the loader refuses a declaration where an entry of one server matches an entry of another, so `get_*` on the read server and `get_write_request` on the gate's request server cannot stand side by side — the read server then lists its `get_` tools by name.
 
@@ -100,7 +101,7 @@ What each surface may hold follows how Hermes resolves its toolsets:
 | ------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `discord`    | `hermes-discord` and the chat's servers                           | without its composite the chat would lose memory and skills; the settings disable `discord`, which any explicit Discord list switches on |
 | `api_server` | the event use cases' servers                                      | an event run reads, nothing else                                                            |
-| `cron`       | `hermes-cron` and every read server in use                        | what every managed cron job sees, the Jobs API taking no list per job; never a writing server |
+| `cron`       | `hermes-cron`, every read server in use and the schedule use cases' memory servers | what every managed cron job sees, the Jobs API taking no list per job; never a writing server |
 
 A list that would name no server is `no_mcp`: Hermes reads a list without a server name as "every server".
 
@@ -118,7 +119,7 @@ The harness runs the schedules; its own cron ledger, incidents and overdue gauge
 
 The pod rolls when the rendering changes, so startup is the only moment the set changes. The harness rolls on the same commit, so a reconcile the gateway does not answer is tried again every `RECONCILE_RETRY_SECONDS` until one goes through. One it answers with a refusal — a schedule it cannot parse, say — is logged as an error and counted as `refused`, and not tried again: the declaration changes only with a new commit, which rolls the pod. A job set rendered from another declaration than the mounted use-case file stops the pod at startup.
 
-The Jobs API creates a job from its name, schedule, prompt, skills and delivery, and takes no tool list and no model per job. Every managed job therefore sees the cron surface — every read server in use — and runs on the harness's default model. The loader refuses an enabled schedule use case that would need more: one naming a writing server, or pinning a model. Such a use case stays dormant until the harness can carry it.
+The Jobs API creates a job from its name, schedule, prompt, skills and delivery, and takes no tool list and no model per job. Every managed job therefore sees the cron surface — every read server in use and the memory servers the schedule use cases name — and runs on the harness's default model. The loader refuses an enabled schedule use case that would need more: one naming a writing server, or pinning a model. Such a use case stays dormant until the harness can carry it. A memory server on the cron surface reaches every job, so the loader also refuses an enabled schedule use case without `memory: true` beside one that names it.
 
 ## Starting a use case from chat
 

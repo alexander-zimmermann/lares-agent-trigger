@@ -45,8 +45,9 @@ EventSource = Literal["episode", "alert", "pull_request", "ets_export", "new_dev
 CONSUMED_EVENT_SOURCES: frozenset[EventSource] = frozenset({"episode"})
 
 # Where a tool server may be granted: `read` anywhere, `write` only to the schedule
-# use cases that name it, `request` (a request a person approves) only to the chat.
-ToolAccess = Literal["read", "write", "request"]
+# use cases that name it, `request` (a request a person approves) only to the chat,
+# `memory` (a use case's own memory) only to the use cases that keep one.
+ToolAccess = Literal["read", "write", "request", "memory"]
 
 
 class _Strict(BaseModel):
@@ -294,6 +295,7 @@ def load_use_case_file(path: Path) -> UseCaseFile:
     chats = [use_case.name for use_case in by_name.values() if use_case.is_chat]
     if len(chats) > 1:
         raise ValueError(f"{path}: only one enabled message use case, not {', '.join(chats)}")
+    _check_shared_memory(path, by_name, servers)
     return UseCaseFile(use_cases=by_name, tool_servers=servers, ledger_hook=parsed.ledger_hook)
 
 
@@ -344,6 +346,39 @@ def _check_grants(path: Path, use_case: UseCase, servers: Mapping[str, ToolServe
                 f"{path}: use case {use_case.name}: tools: {name} places requests and is "
                 "granted to the chat only"
             )
+        if server.access == "memory" and not use_case.memory:
+            raise ValueError(
+                f"{path}: use case {use_case.name}: tools: {name} holds a use case's memory, "
+                f"and {use_case.name} keeps none"
+            )
+
+
+def _check_shared_memory(
+    path: Path, use_cases: Mapping[str, UseCase], servers: Mapping[str, ToolServer]
+) -> None:
+    """Refuse a memory server on a surface a use case without a memory shares.
+
+    The harness hands a surface's servers to every run on it: one list for
+    all event runs, and one for all cron jobs, the Jobs API giving a job no
+    list of its own. A memory server one of them names reaches them all, so
+    every enabled use case on that surface has to keep a memory.
+    """
+    enabled = [use_case for use_case in use_cases.values() if use_case.is_enabled]
+    surfaces = (
+        ("event run", [use_case for use_case in enabled if use_case.event_trigger is not None]),
+        ("cron job", [use_case for use_case in enabled if use_case.is_schedule]),
+    )
+    for run, sharing in surfaces:
+        for holder in sharing:
+            for name in holder.tools:
+                if servers[name].access != "memory":
+                    continue
+                for other in sharing:
+                    if not other.memory:
+                        raise ValueError(
+                            f"{path}: use case {other.name} keeps no memory, and every {run} "
+                            f"sees {name}, which {holder.name} holds"
+                        )
 
 
 def _check_cron_job(path: Path, use_case: UseCase) -> None:
