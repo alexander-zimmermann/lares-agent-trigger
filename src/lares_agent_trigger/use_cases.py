@@ -14,10 +14,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    ValidationError,
+    model_validator,
+)
 
 from .events import EventKind
 
@@ -190,13 +198,14 @@ class UseCase(_Strict):
         return self.is_enabled and isinstance(self.trigger, ScheduleTrigger)
 
 
-class ToolServer(_Strict):
-    """A tool server the harness reaches: one bridge client, its key and its allowlist.
+class BridgeServer(_Strict):
+    """A tool server on the bridge: one machine client, its key and its allowlist.
 
     `tools` (names or fnmatch globs) is both the bridge's allowlist for the
     client, the hard ceiling, and the harness's include list on top of it.
     """
 
+    kind: Literal["bridge"] = "bridge"
     name: str = Field(min_length=1)
     url: str = Field(min_length=1)
     # The bridge's machine client the key maps to, and where the harness holds the key.
@@ -205,6 +214,54 @@ class ToolServer(_Strict):
     timeout_seconds: int = Field(gt=0)
     access: ToolAccess
     tools: tuple[str, ...] = Field(min_length=1)
+
+
+class GitHubServer(_Strict):
+    """The official GitHub MCP server, which the harness spawns as a process of its own.
+
+    It signs in as a GitHub App that may only read, minting and renewing its
+    own installation tokens from the App's key, and runs read-only with the
+    `toolsets` named here; `tools` is the harness's include list on top. A
+    GitHub write is a delivery of the trigger, never a tool, so the server
+    only reads.
+    """
+
+    kind: Literal["github"]
+    name: str = Field(min_length=1)
+    # The server binary and the App's key, as paths inside the harness container.
+    command: str = Field(min_length=1)
+    app_id: int = Field(gt=0)
+    installation_id: int = Field(gt=0)
+    private_key_file: str = Field(min_length=1)
+    toolsets: tuple[str, ...] = Field(min_length=1)
+    timeout_seconds: int = Field(gt=0)
+    access: ToolAccess
+    tools: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _only_reads(self) -> GitHubServer:
+        if self.access != "read":
+            raise ValueError(
+                f"tool server {self.name}: the GitHub server only reads; a GitHub write is "
+                "a delivery of the trigger"
+            )
+        return self
+
+
+ToolServer = BridgeServer | GitHubServer
+
+
+def _server_kind(value: Any) -> str:
+    # A bridge entry may leave its kind out.
+    if isinstance(value, Mapping):
+        return str(value.get("kind", "bridge"))
+    return str(value.kind)
+
+
+_DeclaredServer = Annotated[
+    Annotated[BridgeServer, Tag("bridge")] | Annotated[GitHubServer, Tag("github")],
+    Discriminator(_server_kind),
+]
 
 
 class LedgerHook(_Strict):
@@ -217,7 +274,7 @@ class LedgerHook(_Strict):
 
 class _File(_Strict):
     ledger_hook: LedgerHook
-    tool_servers: list[ToolServer] = Field(min_length=1)
+    tool_servers: list[_DeclaredServer] = Field(min_length=1)
     use_cases: list[UseCase] = Field(min_length=1)
 
 
@@ -273,12 +330,14 @@ def load_use_case_file(path: Path) -> UseCaseFile:
     for server in parsed.tool_servers:
         if server.name in servers:
             raise ValueError(f"{path}: tool server {server.name} is declared twice")
+        servers[server.name] = server
+        if not isinstance(server, BridgeServer):
+            continue
         if server.client in clients:
             raise ValueError(
                 f"{path}: tool server {server.name}: client {server.client} is already "
                 f"the client of {clients[server.client]}"
             )
-        servers[server.name] = server
         clients[server.client] = server.name
     _check_one_server_per_tool(path, servers)
 
@@ -300,14 +359,16 @@ def load_use_case_file(path: Path) -> UseCaseFile:
 
 
 def _check_one_server_per_tool(path: Path, servers: Mapping[str, ToolServer]) -> None:
-    """Refuse a tool two servers grant, so each tool keeps the access of its one server.
+    """Refuse a tool two bridge servers grant, so each tool keeps the access of its one server.
 
     An entry of one server, read as a name, must match no entry of another;
     for globs that catches the overlaps a declaration can show (`get_*` over
-    `get_write_request`), not every pair two globs could share.
+    `get_write_request`), not every pair two globs could share. Only the
+    bridge's servers share tools; GitHub's are GitHub's own.
     """
-    for server in servers.values():
-        for other in servers.values():
+    bridge = [server for server in servers.values() if isinstance(server, BridgeServer)]
+    for server in bridge:
+        for other in bridge:
             if other is server:
                 continue
             for pattern in server.tools:

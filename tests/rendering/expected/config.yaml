@@ -21,12 +21,14 @@ platform_toolsets:
     - hermes-discord
     - lares
     - lares-control
+    - github
   api_server:
     - lares
   cron:
     - hermes-cron
     - lares
     - lares-memory
+    - github
 hooks:
   outbound:
     - name: lares-agent-trigger
@@ -68,3 +70,23 @@ mcp_servers:
       include:
         - get_memory
         - append_memory
+  github:
+    command: /opt/github-mcp/github-mcp-server
+    args:
+      - stdio
+      - --read-only
+      - --toolsets=repos,issues,pull_requests
+    env:
+      GITHUB_APP_ID: '1234567'
+      GITHUB_APP_INSTALLATION_ID: '89012345'
+      GITHUB_APP_PRIVATE_KEY_PATH: /etc/github-reader/private-key
+    timeout: 60
+    tools:
+      include:
+        - get_*
+        - list_*
+        - search_*
+        - issue_read
+        - pull_request_read
+      resources: false
+      prompts: false

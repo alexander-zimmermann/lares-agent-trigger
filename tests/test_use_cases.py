@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from lares_agent_trigger.use_cases import ScheduleTrigger, load_use_case_file, load_use_cases
+from lares_agent_trigger.use_cases import (
+    BridgeServer,
+    GitHubServer,
+    ScheduleTrigger,
+    load_use_case_file,
+    load_use_cases,
+)
 
 VALID = """
 ledger_hook:
@@ -45,6 +51,17 @@ tool_servers:
     timeout_seconds: 60
     access: write
     tools: [update_wiki_page]
+
+  - name: github
+    kind: github
+    command: /opt/github-mcp/github-mcp-server
+    app_id: 1234567
+    installation_id: 89012345
+    private_key_file: /etc/github-reader/private-key
+    toolsets: [repos, issues, pull_requests]
+    timeout_seconds: 60
+    access: read
+    tools: [get_*, list_*, search_*, issue_read, pull_request_read]
 
 use_cases:
   - name: explain-episode
@@ -88,7 +105,7 @@ use_cases:
     trigger:
       kind: message
     skill: lares-answer
-    tools: [lares, lares-control]
+    tools: [lares, lares-control, github]
     output: [discord]
     budget:
       tool_calls: 40
@@ -215,13 +232,20 @@ def test_every_field_of_a_tool_server_and_the_ledger_hook(tmp_path: Path) -> Non
     declared = load_use_case_file(_write(tmp_path, VALID))
 
     lares = declared.tool_servers["lares"]
+    assert isinstance(lares, BridgeServer)
     assert lares.url == "http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp"
     assert lares.client == "lares-agent"
     assert lares.key_env == "LARES_MCP_KEY"
     assert lares.timeout_seconds == 60
     assert lares.access == "read"
     assert lares.tools == ("list_*", "get_episode", "query_*")
-    assert list(declared.tool_servers) == ["lares", "lares-control", "lares-memory", "lares-wiki"]
+    assert list(declared.tool_servers) == [
+        "lares",
+        "lares-control",
+        "lares-memory",
+        "lares-wiki",
+        "github",
+    ]
 
     assert declared.ledger_hook.trigger_url == (
         "http://lares-agent-trigger.agents.svc.cluster.local:8080"
@@ -231,16 +255,18 @@ def test_every_field_of_a_tool_server_and_the_ledger_hook(tmp_path: Path) -> Non
 
 
 def test_an_enabled_use_case_names_only_declared_tool_servers(tmp_path: Path) -> None:
-    broken = VALID.replace("    tools: [lares]\n", "    tools: [lares, github]\n", 1)
+    broken = VALID.replace("    tools: [lares]\n", "    tools: [lares, cluster]\n", 1)
 
-    with pytest.raises(ValueError, match="explain-episode: tools: no tool server named github"):
+    with pytest.raises(ValueError, match="explain-episode: tools: no tool server named cluster"):
         load_use_cases(_write(tmp_path, broken))
 
 
 def test_a_dormant_use_case_may_name_a_tool_server_still_to_be_built(tmp_path: Path) -> None:
-    waiting = VALID.replace("    tools: [lares, lares-memory]\n", "    tools: [lares, github]\n", 1)
+    waiting = VALID.replace(
+        "    tools: [lares, lares-memory]\n", "    tools: [lares, cluster]\n", 1
+    )
 
-    assert load_use_cases(_write(tmp_path, waiting))["propose-faults"].tools == ("lares", "github")
+    assert load_use_cases(_write(tmp_path, waiting))["propose-faults"].tools == ("lares", "cluster")
 
 
 def test_a_writing_server_is_granted_to_schedule_use_cases_only(tmp_path: Path) -> None:
@@ -407,6 +433,64 @@ def test_one_tool_named_by_two_servers_is_refused(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="also grants get_episode"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_every_field_of_the_github_server(tmp_path: Path) -> None:
+    """The official server, signing in as a read-only App: no bridge client."""
+    github = load_use_case_file(_write(tmp_path, VALID)).tool_servers["github"]
+
+    assert isinstance(github, GitHubServer)
+    assert github.command == "/opt/github-mcp/github-mcp-server"
+    assert github.app_id == 1234567
+    assert github.installation_id == 89012345
+    assert github.private_key_file == "/etc/github-reader/private-key"
+    assert github.toolsets == ("repos", "issues", "pull_requests")
+    assert github.timeout_seconds == 60
+    assert github.access == "read"
+    assert github.tools == ("get_*", "list_*", "search_*", "issue_read", "pull_request_read")
+    assert load_use_cases(_write(tmp_path, VALID))["messenger"].tools == (
+        "lares",
+        "lares-control",
+        "github",
+    )
+
+
+def test_the_github_server_only_reads(tmp_path: Path) -> None:
+    """A GitHub write is a delivery of the trigger, never a tool the model holds."""
+    broken = VALID.replace(
+        "    access: read\n    tools: [get_*, list_*",
+        "    access: write\n    tools: [get_*, list_*",
+        1,
+    )
+
+    with pytest.raises(ValueError, match="tool server github: the GitHub server only reads"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_the_github_server_takes_no_bridge_client(tmp_path: Path) -> None:
+    broken = VALID.replace(
+        "    installation_id: 89012345\n",
+        "    installation_id: 89012345\n    client: lares-github\n",
+        1,
+    )
+
+    with pytest.raises(ValueError, match="client"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_the_one_server_rule_holds_among_the_bridge_servers_only(tmp_path: Path) -> None:
+    """GitHub's `get_*` cannot reach the bridge's `get_write_request`: different servers."""
+    declared = load_use_case_file(_write(tmp_path, VALID))
+
+    assert "get_*" in declared.tool_servers["github"].tools
+    assert "get_write_request" in declared.tool_servers["lares-control"].tools
+
+
+def test_an_unknown_kind_of_tool_server_is_refused(tmp_path: Path) -> None:
+    broken = VALID.replace("    kind: github\n", "    kind: gitlab\n", 1)
+
+    with pytest.raises(ValueError, match="gitlab"):
         load_use_cases(_write(tmp_path, broken))
 
 

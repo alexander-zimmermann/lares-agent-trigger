@@ -1,6 +1,6 @@
-# Every surface once: a chat with a request server, an event, a schedule that
-# reads and keeps its memory through the cron surface, and a dormant schedule
-# naming a writing server nothing else uses.
+# Every surface once: a chat with a request server and GitHub's reads, an
+# event, a schedule that reads and keeps its memory through the cron surface,
+# and a dormant schedule naming a writing server nothing else uses.
 
 ledger_hook:
   trigger_url: http://lares-agent-trigger.agents.svc.cluster.local:8080
@@ -39,12 +39,23 @@ tool_servers:
     access: write
     tools: [update_wiki_page]
 
+  - name: github
+    kind: github
+    command: /opt/github-mcp/github-mcp-server
+    app_id: 1234567
+    installation_id: 89012345
+    private_key_file: /etc/github-reader/private-key
+    toolsets: [repos, issues, pull_requests]
+    timeout_seconds: 60
+    access: read
+    tools: [get_*, list_*, search_*, issue_read, pull_request_read]
+
 use_cases:
   - name: messenger
     sentence: Answers a message from the phone.
     trigger:
       kind: message
-    tools: [lares, lares-control]
+    tools: [lares, lares-control, github]
     output: [discord]
     budget: {tool_calls: 40, minutes: 10, runs_per_day: 200}
     language: de
