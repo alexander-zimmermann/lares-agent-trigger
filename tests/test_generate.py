@@ -69,13 +69,13 @@ def test_the_rendering_matches_the_expected_files(tmp_path: Path) -> None:
 def test_each_surface_sees_only_the_servers_its_use_cases_may_hold(tmp_path: Path) -> None:
     toolsets = _config(tmp_path)["platform_toolsets"]
 
-    # The chat keeps the harness's own Discord tools and gains the read and request servers.
-    assert toolsets["discord"] == ["hermes-discord", "lares", "lares-control"]
+    # The chat keeps the harness's own Discord tools and gains the read, request and GitHub servers.
+    assert toolsets["discord"] == ["hermes-discord", "lares", "lares-control", "github"]
     # An event run reads, nothing else.
     assert toolsets["api_server"] == ["lares"]
     # Every managed cron job sees this, the Jobs API taking no list per job:
     # every read server in use, and the memory the schedule use cases keep.
-    assert toolsets["cron"] == ["hermes-cron", "lares", "lares-memory"]
+    assert toolsets["cron"] == ["hermes-cron", "lares", "lares-memory", "github"]
 
 
 def test_every_tool_server_entry_carries_its_key_and_include_list(tmp_path: Path) -> None:
@@ -94,6 +94,27 @@ def test_every_tool_server_entry_carries_its_key_and_include_list(tmp_path: Path
                 "correlate_events",
                 "search_wiki",
             ]
+        },
+    }
+
+
+def test_the_github_server_signs_in_as_its_app_and_only_reads(tmp_path: Path) -> None:
+    """It mints and renews its own tokens from the App's key; the flags keep it read-only."""
+    github = _config(tmp_path)["mcp_servers"]["github"]
+
+    assert github == {
+        "command": "/opt/github-mcp/github-mcp-server",
+        "args": ["stdio", "--read-only", "--toolsets=repos,issues,pull_requests"],
+        "env": {
+            "GITHUB_APP_ID": "1234567",
+            "GITHUB_APP_INSTALLATION_ID": "89012345",
+            "GITHUB_APP_PRIVATE_KEY_PATH": "/etc/github-reader/private-key",
+        },
+        "timeout": 60,
+        "tools": {
+            "include": ["get_*", "list_*", "search_*", "issue_read", "pull_request_read"],
+            "resources": False,
+            "prompts": False,
         },
     }
 
@@ -151,6 +172,7 @@ def test_each_client_of_a_server_in_use_gets_its_allowlist(tmp_path: Path) -> No
         "lares-control": ["request_knx_write", "get_write_request"],
         "lares-memory": ["get_memory", "append_memory"],
     }
+    # GitHub's server is no bridge client: the token and the server bound it.
 
 
 def test_a_dormant_use_case_renders_nothing(tmp_path: Path) -> None:
@@ -170,12 +192,12 @@ def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> Non
 
     toolsets = _config(tmp_path, only_chat)["platform_toolsets"]
     assert toolsets["api_server"] == ["no_mcp"]
-    # The chat's read server stays readable for a job made by hand; its request server does not.
-    assert toolsets["cron"] == ["hermes-cron", "lares"]
+    # The chat's read servers stay readable for a job made by hand; its request server does not.
+    assert toolsets["cron"] == ["hermes-cron", "lares", "github"]
     assert _jobs(tmp_path, only_chat) == []
 
     only_control = only_chat.replace(
-        "    tools: [lares, lares-control]\n", "    tools: [lares-control]\n"
+        "    tools: [lares, lares-control, github]\n", "    tools: [lares-control]\n"
     )
     assert _config(tmp_path, only_control)["platform_toolsets"]["cron"] == ["hermes-cron", "no_mcp"]
 

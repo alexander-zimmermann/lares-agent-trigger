@@ -5,6 +5,8 @@ Pure: the declaration and the hand-written harness settings in, three texts out.
 - The harness configuration: the settings copied whole, comments and all, then
   the part this module owns — what each surface may hold, the tool server
   entries with their include lists, and the hook that reports every turn.
+  The GitHub server is an entry the harness starts itself, signed in as a
+  read-only GitHub App and started with `--read-only`.
 - The cron job set: one managed job per enabled schedule use case.
 - The bridge's allowlists: one entry per machine client of a server in use.
 
@@ -41,6 +43,8 @@ from .hermes import language_name
 from .hooks import MODEL_CALL, TURN_ENDED
 from .receiver import HOOK_PATH
 from .use_cases import (
+    BridgeServer,
+    GitHubServer,
     ScheduleTrigger,
     ToolAccess,
     ToolServer,
@@ -110,7 +114,9 @@ def render(declared: UseCaseFile, settings: str) -> Rendering:
         "# The cron jobs the harness runs, one per enabled schedule use case.\n"
         f"{_dump(dump_cron_jobs(jobs))}"
     )
-    allowlists = {server.client: list(server.tools) for server in in_use}
+    allowlists = {
+        server.client: list(server.tools) for server in in_use if isinstance(server, BridgeServer)
+    }
     client_tools = (
         f"{GENERATED_LINE}\n"
         "# The tools each machine client of the bridge may see and call.\n"
@@ -185,13 +191,40 @@ def _hooks(declared: UseCaseFile) -> dict[str, Any]:
 
 def _mcp_servers(in_use: Sequence[ToolServer]) -> dict[str, Any]:
     return {
-        server.name: {
-            "url": server.url,
-            "headers": {"Authorization": f"Bearer ${{env:{server.key_env}}}"},
-            "timeout": server.timeout_seconds,
-            "tools": {"include": list(server.tools)},
-        }
+        server.name: _bridge_entry(server)
+        if isinstance(server, BridgeServer)
+        else _github_entry(server)
         for server in in_use
+    }
+
+
+def _bridge_entry(server: BridgeServer) -> dict[str, Any]:
+    return {
+        "url": server.url,
+        "headers": {"Authorization": f"Bearer ${{env:{server.key_env}}}"},
+        "timeout": server.timeout_seconds,
+        "tools": {"include": list(server.tools)},
+    }
+
+
+def _github_entry(server: GitHubServer) -> dict[str, Any]:
+    return {
+        "command": server.command,
+        "args": ["stdio", "--read-only", f"--toolsets={','.join(server.toolsets)}"],
+        # The server mints and renews the App's installation tokens itself.
+        "env": {
+            "GITHUB_APP_ID": str(server.app_id),
+            "GITHUB_APP_INSTALLATION_ID": str(server.installation_id),
+            "GITHUB_APP_PRIVATE_KEY_PATH": server.private_key_file,
+        },
+        "timeout": server.timeout_seconds,
+        "tools": {
+            "include": list(server.tools),
+            # Its prompts walk the model towards writes it does not hold; its
+            # resources repeat what the read tools return.
+            "resources": False,
+            "prompts": False,
+        },
     }
 
 

@@ -5,4 +5,13 @@
     "github>alexander-zimmermann/lares//.renovate/sidecarPython.json5",
     "github>alexander-zimmermann/lares//.renovate/sidecarCoreDep.json5",
   ],
+  "customManagers": [
+    {
+      // The GitHub server test runs the server lares deploys, in a shell image
+      "customType": "regex",
+      "managerFilePatterns": ["/^tests/test_github_server\\.py$/"],
+      "matchStrings": ["_IMAGE = \"(?<depName>[^\":]+):(?<currentValue>[^\"]+)\""],
+      "datasourceTemplate": "docker",
+    },
+  ],
 }
