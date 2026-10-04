@@ -11,6 +11,7 @@ import hmac
 import itertools
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -536,3 +537,51 @@ class FakeJobs:
         job.update({"enabled": True, "state": "scheduled", "manual_run_at": "2026-10-02T14:20:05"})
         self.changes.append(("RUN", job_id))
         return httpx.Response(200, json={"job": job})
+
+
+# The house wiki as the wiki_page delivery reaches it.
+WIKI_URL = "http://wiki-js.test"
+WIKI_TOKEN = "eyJhbGciOiJSUzI1NiJ9.write.token"
+
+
+def wiki_listed(*pages: dict[str, Any]) -> httpx.Response:
+    """`pages.list` as Wiki.js answers it."""
+    return httpx.Response(200, json={"data": {"pages": {"list": list(pages)}}})
+
+
+def wiki_answer(
+    listed: httpx.Response, action: str, path: str, page_id: int, *, refused: str | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Wiki.js answering the lookup with `listed` and the write as Wiki.js 2.5 does.
+
+    A write answers with the raw page row `createPage`/`updatePage` return: it
+    has `localeCode`, never `locale`, so selecting a field the row lacks fails
+    the answer after the write went through.
+    """
+    row = {"id": page_id, "path": path, "title": "Wartungsplan", "localeCode": "de"}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        query = json.loads(request.content)["query"]
+        if "list(" in query:
+            return listed
+        if refused is not None:
+            status = {"succeeded": False, "slug": "PageUpdateForbidden", "message": refused}
+            result = {"responseResult": status, "page": None}
+            return httpx.Response(200, json={"data": {"pages": {action: result}}})
+        selection = re.search(r"page \{([^}]*)\}", query)
+        assert selection is not None
+        fields = selection.group(1).split()
+        status = {"succeeded": True, "slug": "ok", "message": "ok"}
+        missing = [field for field in fields if field not in row]
+        if missing:
+            errors = [
+                {"message": f"Cannot return null for non-nullable field Page.{field}."}
+                for field in missing
+            ]
+            result = {"responseResult": status, "page": None}
+            return httpx.Response(200, json={"errors": errors, "data": {"pages": {action: result}}})
+        page = {field: row[field] for field in fields}
+        result = {"responseResult": status, "page": page}
+        return httpx.Response(200, json={"data": {"pages": {action: result}}})
+
+    return answer

@@ -10,7 +10,6 @@ lookup, `pages.create` or `pages.update` for the write, a refusal in
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -26,16 +25,22 @@ from lares_agent_trigger.metrics import Metrics
 from lares_agent_trigger.use_cases import load_use_cases
 
 from .conftest import USE_CASES
-from .fakes import COMPLETED, fake_alertmanager, fake_hermes, sample
+from .fakes import (
+    COMPLETED,
+    WIKI_TOKEN,
+    WIKI_URL,
+    fake_alertmanager,
+    fake_hermes,
+    sample,
+    wiki_answer,
+    wiki_listed,
+)
 
 Publish = Callable[..., Awaitable[None]]
 Rows = Callable[[], list[dict[str, Any]]]
 Consumer = tuple[EpisodeConsumer, Metrics]
 
 pytestmark = pytest.mark.respx(assert_all_called=False)
-
-WIKI_URL = "http://wiki-js.test"
-WIKI_TOKEN = "eyJhbGciOiJSUzI1NiJ9.write.token"
 
 PAGE = (
     "Wartungsplan auf den Stand vom Oktober gebracht.\n"
@@ -68,48 +73,6 @@ def settings(settings: Settings, tmp_path: Path) -> Settings:
     )
 
 
-def _listed(*pages: dict[str, Any]) -> httpx.Response:
-    return httpx.Response(200, json={"data": {"pages": {"list": list(pages)}}})
-
-
-def _wiki(
-    listed: httpx.Response, action: str, path: str, page_id: int, *, refused: str | None = None
-) -> Callable[[httpx.Request], httpx.Response]:
-    """Wiki.js answering the lookup with `listed` and the write as Wiki.js 2.5 does.
-
-    A write answers with the raw page row `createPage`/`updatePage` return: it
-    has `localeCode`, never `locale`, so selecting a field the row lacks fails
-    the answer after the write went through.
-    """
-    row = {"id": page_id, "path": path, "title": "Wartungsplan", "localeCode": "de"}
-
-    def answer(request: httpx.Request) -> httpx.Response:
-        query = json.loads(request.content)["query"]
-        if "list(" in query:
-            return listed
-        if refused is not None:
-            status = {"succeeded": False, "slug": "PageUpdateForbidden", "message": refused}
-            result = {"responseResult": status, "page": None}
-            return httpx.Response(200, json={"data": {"pages": {action: result}}})
-        selection = re.search(r"page \{([^}]*)\}", query)
-        assert selection is not None
-        fields = selection.group(1).split()
-        status = {"succeeded": True, "slug": "ok", "message": "ok"}
-        missing = [field for field in fields if field not in row]
-        if missing:
-            errors = [
-                {"message": f"Cannot return null for non-nullable field Page.{field}."}
-                for field in missing
-            ]
-            result = {"responseResult": status, "page": None}
-            return httpx.Response(200, json={"errors": errors, "data": {"pages": {action: result}}})
-        page = {field: row[field] for field in fields}
-        result = {"responseResult": status, "page": page}
-        return httpx.Response(200, json={"data": {"pages": {action: result}}})
-
-    return answer
-
-
 def _bodies(route: Any) -> list[dict[str, Any]]:
     return [json.loads(call.request.content) for call in route.calls]
 
@@ -119,7 +82,7 @@ async def test_a_page_block_becomes_a_new_page(
 ) -> None:
     fake_hermes(respx_mock, states=[{**COMPLETED, "output": PAGE}])
     wiki = respx_mock.post(f"{WIKI_URL}/graphql").mock(
-        side_effect=_wiki(_listed(), "create", "haus/wartungsplan", 31)
+        side_effect=wiki_answer(wiki_listed(), "create", "haus/wartungsplan", 31)
     )
     episode_consumer, metrics = consumer
 
@@ -169,8 +132,8 @@ async def test_a_page_that_exists_keeps_what_the_block_does_not_name(
         "tags": ["haus", "wartung"],
     }
     wiki = respx_mock.post(f"{WIKI_URL}/graphql").mock(
-        side_effect=_wiki(
-            _listed({**existing, "id": 1, "path": "home"}, existing),
+        side_effect=wiki_answer(
+            wiki_listed({**existing, "id": 1, "path": "home"}, existing),
             "update",
             "haus/wartungsplan",
             31,
@@ -250,8 +213,8 @@ async def test_a_page_the_wiki_refuses_fails_the_run_with_its_reason(
     fake_hermes(respx_mock, states=[{**COMPLETED, "output": PAGE}])
     fake_alertmanager(respx_mock)
     respx_mock.post(f"{WIKI_URL}/graphql").mock(
-        side_effect=_wiki(
-            _listed(), "create", "haus/wartungsplan", 0, refused="You are not authorized."
+        side_effect=wiki_answer(
+            wiki_listed(), "create", "haus/wartungsplan", 0, refused="You are not authorized."
         )
     )
     episode_consumer, _ = consumer
@@ -302,7 +265,7 @@ async def test_a_page_without_a_description_keeps_none(
         "tags": [],
     }
     wiki = respx_mock.post(f"{WIKI_URL}/graphql").mock(
-        side_effect=_wiki(_listed(draft), "update", "haus/wartungsplan", 31)
+        side_effect=wiki_answer(wiki_listed(draft), "update", "haus/wartungsplan", 31)
     )
     episode_consumer, _ = consumer
 

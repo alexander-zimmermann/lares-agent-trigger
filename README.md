@@ -196,7 +196,7 @@ The message is acknowledged once the row is closed, which is why the consumer's 
 
 ## Delivery
 
-The model never delivers. On an API run the harness posts nothing itself; once a run has completed, the trigger carries its text to every target the use case declares under `output`, in that order:
+The model never delivers. On an API run the harness posts nothing itself, and a cron job delivers locally; once an event run or a cron run of a schedule use case has completed, the trigger carries its text to every target the use case declares under `output`, in that order:
 
 | Target    | What it does                                                                                                                         | `output_ref`                    |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
@@ -207,7 +207,7 @@ The model never delivers. On an API run the harness posts nothing itself; once a
 
 Discord takes 2000 characters a message. A text that fits goes as it is; a longer one goes as the cause and its proof lines (the `-# ` lines the skill writes), then the rest in a second message. A part still too long is cut on a line and ends in `… (run <id>)`: the row holds the whole text.
 
-The mail's subject names what was measured and where — `[Explain] <fault sentence up to its dash> · <channel>` — and its body is the explanation with its proof lines as a plain list, a footer with model, tokens, cost (left out when the run cost nothing, as on a subscription) and duration, and the link to the episode on the dashboard:
+The mail of an episode's explanation names what was measured and where — `[Explain] <fault sentence up to its dash> · <channel>` — and its body is the explanation with its proof lines as a plain list, a footer with model, tokens, cost (left out when the run cost nothing, as on a subscription) and duration, and the link to the episode on the dashboard:
 
 ```
 Subject: [Explain] Ein Gerät zieht ununterbrochen länger Strom, als seine je Gerät erlaubte Laufzeit zulässt · 2/1/197
@@ -221,6 +221,8 @@ Die Waschmaschine hängt seit 14:20 im Spülgang.
 gpt-5.5 (openai-codex) · 4200 + 310 Tokens · 0.0210 USD · 11 s
 https://grafana.zimmermann.sh/d/knx-episodes?var-fault=appliance_runtime
 ```
+
+A cron run has no episode: its mail is `[<use case>] <the answer's first line>`, with the same body and footer and no link.
 
 The fault sentence comes from the engine's own `faults.yaml`, mounted unchanged; an event whose fault the list no longer holds is named by the fault's name.
 
@@ -241,7 +243,7 @@ The block is checked before the wiki is called: exactly `path` and `title`, both
 
 A target that refuses does not stop the next one from trying. The run then closes `failed` with each refusal's raw text as the error, keeps its text and the refs of everything that was created — the first message of a split post included — and raises `AgentRunFailed` like any failed run. The model is not asked again: running it twice would not change what Discord or the relay make of the answer. A run the harness reports completed but without any output fails before delivery, as `unknown`.
 
-Only targets an enabled event use case declares are built, and a declared target without its settings, or one this trigger does not deliver (`alert`, the GitHub targets), stops the pod at startup.
+Only targets an enabled event or schedule use case declares are built, and a declared target without its settings, or one this trigger does not deliver (`alert`, the GitHub targets), stops the pod at startup.
 
 ## When a run fails
 
@@ -297,6 +299,8 @@ The harness starts two kinds of run on its own: a turn in Discord, and a cron jo
 The gateway mints cron job ids itself, so a managed job carries its use case in its name: `lares:propose-faults`. A job without that prefix, or one naming a use case the file does not enable as a schedule, is left alone.
 
 The row holds what the turn's calls added up to: the tokens the model read (cache included) and wrote, the tools it asked for, the time from the first call's start to the last call's end, the model and model source of the last call — a fallback shows up there — and the last call's reply as the answer. Nothing is read off the session record, whose counters run over a whole conversation. A flat subscription bills nothing per call, so `cost` stays empty rather than guessed. A turn whose calls came in before a restart and whose end came after still gets its row, without the tally.
+
+A chat turn is answered in its conversation and delivered nowhere. A completed cron run is delivered like an event run, to every target its use case declares beyond `stored`: its row is written `running` with the answer, the hook is answered, and the deliveries close the row — so a slow target never holds the harness's delivery, and a redelivered turn end, finding its row, delivers nothing twice. A target that refuses closes the row as failed with each refusal under its target, keeps the refs of what was created and raises `AgentRunFailed` (`<use case> could not deliver cron run <job id>:<execution id> to <targets>`); a completed run without an answer, a restart having lost its calls, fails the same way. Whatever breaks while closing the row is logged and alerted (`<use case> could not close cron run …`) and leaves it `running`; a cron row a stopped pod left `running` is closed at the next start as `trigger_restarted` and reported, like a requested run. A use case whose output is only `stored` is a row and nothing more.
 
 `tool_trace` records which tools a run asked for, never what they returned:
 

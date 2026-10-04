@@ -35,6 +35,8 @@ SubjectKind = Literal["episode", "alert_group", "chat", "none"]
 TriggerKind = Literal["event", "schedule", "message", "manual"]
 # How a row ends that a run reached the end of.
 ClosedStatus = Literal["completed", "failed"]
+# A turn the harness ran is written closed, or running while its answer is delivered.
+TurnStatus = Literal["running", "completed", "failed"]
 
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[DictRow]]
 
@@ -293,13 +295,16 @@ class Ledger:
         subject_key: str,
         session_id: str,
         harness_run_id: str,
-        status: ClosedStatus,
+        status: TurnStatus,
         language: str,
         text: str | None,
         error: str | None,
         usage: Usage,
     ) -> int | None:
-        """Write the closed row of a turn the harness ran on its own; None when it exists."""
+        """Write the row of a turn the harness ran on its own; None when it exists.
+
+        A running row is closed by `finish` once its answer is delivered.
+        """
         async with self._require_pool.connection() as conn:
             rows = await (
                 await conn.execute(
@@ -309,7 +314,8 @@ class Ledger:
                          harness_run_id, status, language, error, finished_at,
                          tldr, text, model_source, model, tokens_in, tokens_out, cost,
                          duration, tool_trace)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(),
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            CASE WHEN %s = 'running' THEN NULL ELSE now() END,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (use_case, subject_kind, subject_key) DO NOTHING
                     RETURNING id
@@ -324,24 +330,27 @@ class Ledger:
                         status,
                         language,
                         error,
+                        status,
                         *_output_columns(text, usage),
                     ),
                 )
             ).fetchall()
         return int(rows[0]["id"]) if rows else None
 
-    async def close_abandoned_requests(self, error: str) -> list[AbandonedRow]:
-        """Close as failed every requested run still open; the rows closed.
+    async def close_abandoned(self, error: str) -> list[AbandonedRow]:
+        """Close as failed every requested run and cron run still open; the rows closed.
 
-        A run a person asked for is started by no event, so no redelivery ever
-        finds its row again. Chat rows are written closed and never match.
+        A run a person asked for is started by no event, and a cron run's row
+        stays open only while its answer is delivered, so no redelivery ever
+        finds either row again. Chat rows are written closed and never match.
         """
         async with self._require_pool.connection() as conn:
             rows = await (
                 await conn.execute(
                     """
                     UPDATE agent_runs SET status = 'failed', finished_at = now(), error = %s
-                    WHERE trigger = 'message' AND status IN ('queued', 'running')
+                    WHERE (trigger = 'message' OR subject_kind = 'none')
+                      AND status IN ('queued', 'running')
                     RETURNING id, use_case, subject_key, attempt
                     """,
                     (error,),

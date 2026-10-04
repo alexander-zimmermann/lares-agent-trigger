@@ -239,7 +239,7 @@ async def test_a_schedule_use_case_runs_its_job_now_and_its_row_says_so(
         "use_case": "propose-faults",
         "job_id": job_id,
         "status": "requested",
-        "output": ["github_pr"],
+        "output": ["stored"],
     }
     assert jobs.changes == [("RUN", job_id)]
 

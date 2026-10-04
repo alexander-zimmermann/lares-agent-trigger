@@ -16,6 +16,13 @@ started itself and whose row it writes on the event path, so its tally is kept
 for that path to collect by session id (:meth:`TurnRuns.calls_of`). The rest is
 left alone.
 
+A chat turn is answered in its conversation. A cron run's answer is carried to
+the targets its use case declares, as an event run's is: its row is written
+running, the hook is answered, and the deliveries close the row — so a slow
+target never holds the harness's delivery, a redelivered turn end delivers
+nothing twice, and a row a stopped pod left running is closed by the next one.
+A target that refuses closes the row as failed and raises AgentRunFailed.
+
 The tallies live in memory. A turn whose calls came in before a restart and
 whose end came after gets its row without them, never with a guess.
 """
@@ -29,9 +36,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .alerts import Alertmanager
+from .deliveries import Deliveries, RunOutput
+from .failures import describe
 from .hermes import HermesClient
 from .hooks import ModelCall, TurnEnded
-from .ledger import CallTrace, ClosedStatus, Ledger, SubjectKind, TriggerKind, Usage
+from .ledger import CallTrace, ClosedStatus, Ledger, SubjectKind, TriggerKind, TurnStatus, Usage
 from .metrics import Metrics
 from .use_cases import UseCase, chat_use_case, scheduled_use_case
 
@@ -112,7 +122,7 @@ class _Owner:
 
 
 class TurnRuns:
-    """The hook path, wired to the three things it talks to."""
+    """The hook path, wired to the things it talks to."""
 
     def __init__(
         self,
@@ -120,11 +130,17 @@ class TurnRuns:
         ledger: Ledger,
         hermes: HermesClient,
         metrics: Metrics,
+        deliveries: Deliveries,
+        alertmanager: Alertmanager,
     ) -> None:
         self._use_cases = use_cases
         self._ledger = ledger
         self._hermes = hermes
         self._metrics = metrics
+        self._deliveries = deliveries
+        self._alertmanager = alertmanager
+        # Cron runs whose answer is still on its way to its targets.
+        self._delivering: set[asyncio.Task[None]] = set()
         self._tallies: dict[str, _Tally] = {}
         # Ended API-server turns, by session id, until the event path collects them.
         self._finished: dict[str, _Tally] = {}
@@ -146,6 +162,11 @@ class TurnRuns:
         memory: a restart before that turn ends leaves its row on `schedule`.
         """
         self._requested[job_id] = time.monotonic()
+
+    async def drain(self) -> None:
+        """Wait until every cron run's answer has reached its targets."""
+        while self._delivering:
+            await asyncio.gather(*self._delivering, return_exceptions=True)
 
     async def calls_of(self, session_id: str, *, wait_seconds: float) -> tuple[CallTrace, ...]:
         """The model calls of the API run held by this session, waiting a moment for its end.
@@ -182,7 +203,8 @@ class TurnRuns:
 
         # Kept until the row is written: a delivery refused for a retry needs it again.
         tally = self._tallies.get(turn.turn_id)
-        status: ClosedStatus = "completed" if turn.completed else "failed"
+        delivered = owner.use_case.is_schedule and turn.completed and _carried(owner.use_case)
+        status: TurnStatus = "running" if delivered else "completed" if turn.completed else "failed"
         usage = tally.usage() if tally is not None else Usage(model=turn.model)
         run_id = await self._ledger.record_turn(
             use_case=owner.use_case.name,
@@ -202,8 +224,75 @@ class TurnRuns:
             self._requested.pop(turn.cron_run.job_id, None)
         if run_id is None:
             return "duplicate"
-        self._metrics.recorded_runs.labels(use_case=owner.use_case.name, status=status).inc()
+        if not delivered:
+            self._metrics.recorded_runs.labels(use_case=owner.use_case.name, status=status).inc()
+            return "recorded"
+        answer = tally.answer if tally is not None else None
+        task = asyncio.create_task(self._deliver(owner, run_id, answer, usage))
+        self._delivering.add(task)
+        task.add_done_callback(self._delivering.discard)
         return "recorded"
+
+    async def _deliver(self, owner: _Owner, run_id: int, answer: str | None, usage: Usage) -> None:
+        """Carry a cron run's answer to its targets and close its row on what they made of it.
+
+        Whatever breaks on the way is logged and alerted; the row then stays
+        running for the next pod to close.
+        """
+        use_case = owner.use_case
+        subject = f"cron run {owner.subject_key}"
+        try:
+            if not answer:
+                self._metrics.failures.labels(use_case.name, "unknown").inc()
+                await self._close_failed(
+                    use_case,
+                    run_id,
+                    summary=f"{use_case.name} could not deliver {subject}: no answer",
+                    error="the run ended without an answer to deliver",
+                )
+                return
+            delivered = await self._deliveries.deliver(
+                use_case.output,
+                RunOutput(
+                    run_id=run_id, use_case=use_case.name, occasion=None, text=answer, usage=usage
+                ),
+            )
+            if not delivered.refusals:
+                await self._ledger.finish(run_id, status="completed", output_ref=delivered.refs)
+                self._count_closed(use_case, "completed")
+                return
+            self._metrics.failures.labels(use_case.name, "delivery_failed").inc()
+            await self._close_failed(
+                use_case,
+                run_id,
+                summary=f"{use_case.name} could not deliver {subject} to {delivered.refused}",
+                error=delivered.error,
+                output_ref=delivered.refs,
+            )
+        except Exception as exc:
+            logger.exception("%s: closing %s (row %d) broke", use_case.name, subject, run_id)
+            await self._alertmanager.run_failed(
+                use_case=use_case.name,
+                summary=f"{use_case.name} could not close {subject}",
+                error=f"{type(exc).__name__}: {describe(exc)}",
+            )
+
+    async def _close_failed(
+        self,
+        use_case: UseCase,
+        run_id: int,
+        *,
+        summary: str,
+        error: str,
+        output_ref: tuple[str, ...] = (),
+    ) -> None:
+        """Close the row as failed and raise AgentRunFailed with the raw error."""
+        await self._ledger.finish(run_id, status="failed", error=error, output_ref=output_ref)
+        self._count_closed(use_case, "failed")
+        await self._alertmanager.run_failed(use_case=use_case.name, summary=summary, error=error)
+
+    def _count_closed(self, use_case: UseCase, status: ClosedStatus) -> None:
+        self._metrics.recorded_runs.labels(use_case=use_case.name, status=status).inc()
 
     async def _owner(self, turn: TurnEnded) -> _Owner | None:
         if turn.platform == _CHAT_PLATFORM:
@@ -260,6 +349,11 @@ class TurnRuns:
         # A request whose run never came: the job's next turn is its schedule's again.
         for job_id in [key for key, asked in self._requested.items() if asked < cutoff]:
             del self._requested[job_id]
+
+
+def _carried(use_case: UseCase) -> bool:
+    """True when the use case declares a target beyond the row itself."""
+    return any(target != "stored" for target in use_case.output)
 
 
 def _plus(total: int | None, part: int | None) -> int | None:

@@ -124,7 +124,7 @@ use_cases:
       cron: "0 3 * * 0"
     skill: lares-propose
     tools: [lares]
-    output: [github_pr]
+    output: [stored]
     budget:
       tool_calls: 80
       minutes: 20
@@ -140,7 +140,7 @@ use_cases:
       cron: "0 8 * * 1"
     skill: lares-restore-probe
     tools: [lares]
-    output: [github_issue]
+    output: [stored]
     budget:
       tool_calls: 30
       minutes: 10
@@ -525,7 +525,7 @@ async def service(
     alertmanager = Alertmanager(settings, metrics)
     use_cases = load_use_cases(settings.use_cases_file)
     deliveries = build_deliveries(settings, use_cases, metrics)
-    turns = TurnRuns(use_cases, ledger, hermes, metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, metrics, deliveries, alertmanager)
     runs = EventRuns(
         use_cases,
         ledger,
@@ -554,6 +554,7 @@ async def service(
         yield Service(episode_consumer, client, metrics, schedules, runs, hermes, turns)
     finally:
         await runs.aclose()
+        await turns.drain()
         await client.aclose()
         await episode_consumer.close()
         await hermes.aclose()

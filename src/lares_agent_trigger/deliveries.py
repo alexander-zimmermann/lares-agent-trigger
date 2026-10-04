@@ -1,10 +1,11 @@
 """Delivery: the trigger carries a completed run's output to the targets its use case declares.
 
-The model never delivers — on an API run the harness posts nothing itself. The
-registry below holds one delivery per output target. `stored` is the ledger
-row, which the event path writes before any other target sees the text; the
-others post the text somewhere a person reads it and name what they created,
-so the row can record it in `output_ref`. A target that refuses fails the run:
+The model never delivers — on an API run the harness posts nothing itself, and
+a cron job delivers locally. The registry below holds one delivery per output
+target; an event run and a cron run of a schedule use case reach the same
+targets. `stored` is the ledger row, written before any other target sees the
+text; the others post the text somewhere a person reads it and name what they
+created, so the row can record it in `output_ref`. A target that refuses fails the run:
 the others are still tried, the stored text stays, and the refusal's raw text
 becomes the row's error.
 
@@ -23,9 +24,9 @@ and ends with the page itself —
 A block that does not hold is a refusal like any other, and the wiki is never
 called.
 
-Only the targets an enabled use case declares are built, and a declared target
-without its settings — or without a delivery at all — stops the pod at
-startup, the same rule as a use-case file that does not validate.
+Only the targets an enabled event or schedule use case declares are built, and
+a declared target without its settings — or without a delivery at all — stops
+the pod at startup, the same rule as a use-case file that does not validate.
 """
 
 from __future__ import annotations
@@ -81,8 +82,8 @@ class RunOutput:
 
     run_id: int
     use_case: str
-    # The event or the request the run was started for.
-    occasion: Occasion
+    # The event or the request the run was started for; a cron run has none.
+    occasion: Occasion | None
     text: str
     usage: Usage
 
@@ -258,21 +259,29 @@ class MailDelivery:
         return (f"mail:{str(message['Message-ID']).strip('<>')}",)
 
     def _compose(self, output: RunOutput) -> EmailMessage:
-        episode = output.occasion
-        sentence = self._sentences.get(episode.fault)
-        # An episode can outlive its fault's entry; the fault's name still says what it was.
-        what = first_clause(sentence) if sentence else episode.fault
+        """An episode's mail names what was measured where and links its dashboard row;
+        a cron run's names its use case and the answer's first line."""
+        body = _as_mail(output.text.strip())
+        content = f"{body}\n\n-- \n{_footer(output.usage)}\n"
+        occasion = output.occasion
+        if occasion is None:
+            subject = f"[{output.use_case}] {body.splitlines()[0]}"
+        else:
+            sentence = self._sentences.get(occasion.fault)
+            # An episode can outlive its fault's entry; the fault's name still says what it was.
+            what = first_clause(sentence) if sentence else occasion.fault
+            subject = f"[Explain] {what} · {occasion.subject}"
+            link = self._settings.dashboard_episode_url.format(
+                episode_id=occasion.episode_id, fault=occasion.fault
+            )
+            content += f"{link}\n"
         message = EmailMessage()
-        message["Subject"] = f"[Explain] {what} · {episode.subject}"
+        message["Subject"] = subject
         message["From"] = self._settings.mail_from
         message["To"] = self._settings.mail_to
         message["Date"] = formatdate(localtime=True)
         message["Message-ID"] = make_msgid(domain=self._domain)
-        link = self._settings.dashboard_episode_url.format(
-            episode_id=episode.episode_id, fault=episode.fault
-        )
-        body = _as_mail(output.text.strip())
-        message.set_content(f"{body}\n\n-- \n{_footer(output.usage)}\n{link}\n")
+        message.set_content(content)
         return message
 
     def _send(self, message: EmailMessage) -> None:
@@ -535,14 +544,15 @@ _REGISTRY: dict[OutputTarget, Callable[[Settings], Delivery]] = {
 def build_deliveries(
     settings: Settings, use_cases: Mapping[str, UseCase], metrics: Metrics
 ) -> Deliveries:
-    """The deliveries the enabled event use cases declare; anything missing is a ``ValueError``.
+    """The deliveries the enabled event and schedule use cases declare; anything missing is a
+    ``ValueError``.
 
-    Only event use cases count: the trigger closes their rows, while a chat or
-    cron run is answered by the harness in its own conversation.
+    A chat is answered by the harness in its own conversation and declares
+    nothing the trigger carries.
     """
     declared: dict[OutputTarget, list[str]] = {}
     for use_case in use_cases.values():
-        if use_case.event_trigger is None:
+        if use_case.event_trigger is None and not use_case.is_schedule:
             continue
         for target in use_case.output:
             declared.setdefault(target, []).append(use_case.name)

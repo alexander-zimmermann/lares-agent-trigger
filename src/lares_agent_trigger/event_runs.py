@@ -123,12 +123,13 @@ class EventRuns:
         return Requested(run_id, "queued")
 
     async def close_abandoned(self) -> None:
-        """Close and report the requested runs a stopped pod left open.
+        """Close and report the requested runs and cron runs a stopped pod left open.
 
-        Called before the API takes requests, so none of them is still going.
+        Called before the API and the hook receiver take requests, so none of
+        them is still going.
         """
-        error = "the trigger restarted before the requested run closed its row"
-        for row in await self.ledger.close_abandoned_requests(error):
+        error = "the trigger restarted before the run closed its row"
+        for row in await self.ledger.close_abandoned(error):
             self.metrics.failures.labels(row.use_case, "trigger_restarted").inc()
             self.metrics.runs.labels(use_case=row.use_case, status="failed").inc()
             summary = _failed(row.use_case, row.subject_key, row.attempt, "trigger_restarted")

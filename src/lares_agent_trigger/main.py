@@ -63,7 +63,7 @@ async def _amain() -> int:
     ledger = Ledger(settings)
     hermes = HermesClient(settings)
     alertmanager = Alertmanager(settings, metrics)
-    turns = TurnRuns(use_cases, ledger, hermes, metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, metrics, deliveries, alertmanager)
     runs = EventRuns(
         use_cases,
         ledger,
@@ -130,6 +130,7 @@ async def _amain() -> int:
             with contextlib.suppress(asyncio.CancelledError):
                 await reconciling
         await runs.aclose()
+        await turns.drain()
         await consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()
