@@ -81,7 +81,7 @@ class Settings(NatsSettings):
     wikijs_url: str = ""
     wikijs_token: str = Field(default="", repr=False)
     wikijs_token_file: Path | None = None
-    wikijs_locale: str = "de"
+    wikijs_locale: str = "en"
     wikijs_request_timeout_seconds: float = 15.0
     # GitHub: the write App the pull requests, issues and comments are opened
     # as, on the repositories of one owner. Its key never leaves this pod.

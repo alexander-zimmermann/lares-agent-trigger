@@ -81,7 +81,7 @@ def _wiki(
     has `localeCode`, never `locale`, so selecting a field the row lacks fails
     the answer after the write went through.
     """
-    row = {"id": page_id, "path": path, "title": "Wartungsplan", "localeCode": "de"}
+    row = {"id": page_id, "path": path, "title": "Wartungsplan", "localeCode": "en"}
 
     def answer(request: httpx.Request) -> httpx.Response:
         query = json.loads(request.content)["query"]
@@ -131,16 +131,16 @@ async def test_a_page_block_becomes_a_new_page(
     # The row keeps the whole output; its first line is the sentence.
     assert row["text"] == PAGE
     assert row["tldr"] == "Wartungsplan auf den Stand vom Oktober gebracht."
-    assert row["output_ref"] == ["wiki:de/haus/wartungsplan"]
+    assert row["output_ref"] == ["wiki:en/haus/wartungsplan"]
     assert all(
         call.request.headers["Authorization"] == f"Bearer {WIKI_TOKEN}" for call in wiki.calls
     )
     listed, created = _bodies(wiki)
-    assert listed["variables"] == {"locale": "de"}
+    assert listed["variables"] == {"locale": "en"}
     assert "create(" in created["query"]
     assert created["variables"] == {
         "content": CONTENT,
-        "locale": "de",
+        "locale": "en",
         "path": "haus/wartungsplan",
         "title": "Wartungsplan",
     }
@@ -163,7 +163,7 @@ async def test_a_page_that_exists_keeps_what_the_block_does_not_name(
     existing = {
         "id": 31,
         "path": "haus/wartungsplan",
-        "locale": "de",
+        "locale": "en",
         "description": "Was wann fällig ist",
         "isPublished": True,
         "tags": ["haus", "wartung"],
@@ -183,7 +183,7 @@ async def test_a_page_that_exists_keeps_what_the_block_does_not_name(
 
     (row,) = rows()
     assert row["status"] == "completed"
-    assert row["output_ref"] == ["wiki:de/haus/wartungsplan"]
+    assert row["output_ref"] == ["wiki:en/haus/wartungsplan"]
     _, updated = _bodies(wiki)
     assert "update(" in updated["query"]
     # Wiki.js resets what an update leaves out: the flag would unpublish the page.
@@ -296,7 +296,7 @@ async def test_a_page_without_a_description_keeps_none(
     draft = {
         "id": 31,
         "path": "haus/wartungsplan",
-        "locale": "de",
+        "locale": "en",
         "description": None,
         "isPublished": False,
         "tags": [],

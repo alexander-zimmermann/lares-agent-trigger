@@ -412,7 +412,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `DASHBOARD_EPISODE_URL`                     | —                                                  | The episode on the dashboard; `{episode_id}` and `{fault}` are filled in. |
 | `WIKIJS_URL`                                | —                                                  | Wiki.js base URL; needed by the `wiki_page` output. |
 | `WIKIJS_TOKEN_FILE`                         | —                                                  | A Wiki.js API key whose group has `read:pages` and `write:pages`. |
-| `WIKIJS_LOCALE`                             | `de`                                               | The locale a page is looked up and created in.     |
+| `WIKIJS_LOCALE`                             | `en`                                               | The locale a page is looked up and created in.     |
 | `WIKIJS_REQUEST_TIMEOUT_SECONDS`            | `15.0`                                             | Per-request timeout against Wiki.js.               |
 | `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` | —                                               | The write App and its installation; needed by the GitHub outputs. |
 | `GITHUB_APP_PRIVATE_KEY_FILE`               | —                                                  | The App's private key (PEM). Half an App stops the pod. |
