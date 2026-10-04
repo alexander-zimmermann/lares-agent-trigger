@@ -81,7 +81,7 @@ class Settings(NatsSettings):
     wikijs_url: str = ""
     wikijs_token: str = Field(default="", repr=False)
     wikijs_token_file: Path | None = None
-    wikijs_locale: str = "de"
+    wikijs_locale: str = "en"
     wikijs_request_timeout_seconds: float = 15.0
 
     # The receiver the harness's outbound hook posts every finished chat and

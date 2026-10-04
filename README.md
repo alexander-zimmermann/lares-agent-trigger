@@ -350,7 +350,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `DASHBOARD_EPISODE_URL`                     | —                                                  | The episode on the dashboard; `{episode_id}` and `{fault}` are filled in. |
 | `WIKIJS_URL`                                | —                                                  | Wiki.js base URL; needed by the `wiki_page` output. |
 | `WIKIJS_TOKEN_FILE`                         | —                                                  | A Wiki.js API key whose group has `read:pages` and `write:pages`. |
-| `WIKIJS_LOCALE`                             | `de`                                               | The locale a page is looked up and created in.     |
+| `WIKIJS_LOCALE`                             | `en`                                               | The locale a page is looked up and created in.     |
 | `WIKIJS_REQUEST_TIMEOUT_SECONDS`            | `15.0`                                             | Per-request timeout against Wiki.js.               |
 | `HTTP_PORT`                                 | `8080`                                             | The hook receiver and the API.                     |
 | `HOOK_SECRET_FILE`                          | —                                                  | The HMAC secret the harness signs deliveries with. |
