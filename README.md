@@ -144,12 +144,12 @@ The Jobs API creates a job from its name, schedule, prompt, skills and delivery,
 
 The trigger's own API sits on the receiver's port. The bridge forwards its `start_run` tool here; the tool sits on a tool server of its own with `access: request`, so the chat holds it and no event or cron run can start further runs. Every request carries the key both pods share as `Authorization: Bearer <key>`.
 
-`POST /api/runs` with `{"use_case": …, "subject": …}`:
+`POST /api/runs` with `{"use_case": …, "subject": …}` or, for a schedule, `{"use_case": …, "focus": …}`:
 
 | Use case                    | What happens                                                                                                  | Answer |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------- | ------ |
 | an event use case           | runs on the episode `subject` names, through the Runs API, with the filter skipped and everything else as on an event: the claim, the daily cap, the retry, the delivery | `202` with `run_id`, `subject_key` and the `output` targets, once the row is claimed |
-| a schedule use case         | its managed job runs now (`POST /api/jobs/{id}/run`); it takes no subject. Its rows of the day count against its cap, and a job a person paused is not run: the gateway's run-now would resume it for good | `202` with `job_id`; `429`, `409` |
+| a schedule use case         | its managed job runs now (`POST /api/jobs/{id}/run`); it takes no subject. `focus`, what the person asked it to look at (at most 500 characters), goes into that one run's prompt, never into the job's; an event use case takes none. Its rows of the day count against its cap, and a job a person paused is not run: the gateway's run-now would resume it for good | `202` with `job_id`; `429`, `409`; `400` when the gateway blocks the focus |
 | the chat, a dormant use case, one not declared | nothing                                                                    | `400`, `409`, `404` |
 
 A run on an episode records `trigger = message` and the subject key `<episode id>:message:<when it was asked, UTC>`, so every request is a run of its own — the skill then says what got worse since the last one. A request while a run asked for on the same episode is still queued or running is that run, answered `409` with its id: the model sending its call twice, or a person asking before the answer came. The day's spent runs answer `429` with the `capped` row's id. The run's input is the episode as the engine recorded it (`episode_id`, `fault`, `subject`, `severity`, `requested_at`), read from `episodes`; an episode the table does not hold answers `404`.

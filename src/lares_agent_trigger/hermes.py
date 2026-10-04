@@ -256,9 +256,13 @@ class HermesClient:
             if exc.status_code != 404:
                 raise
 
-    async def run_job(self, job_id: str) -> None:
-        """Have the gateway run a job on its next tick, outside its schedule."""
-        await self._send("POST", f"/api/jobs/{job_id}/run")
+    async def run_job(self, job_id: str, prompt: str | None = None) -> None:
+        """Have the gateway run a job on its next tick, outside its schedule.
+
+        `prompt` is added to the job's own prompt for that one run; the job keeps its own.
+        """
+        body = {"prompt": prompt} if prompt is not None else None
+        await self._send("POST", f"/api/jobs/{job_id}/run", json=body)
 
     async def _send(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         """One request to the API server; a refusal or a body that is no object raises."""

@@ -386,12 +386,13 @@ class FakeJobs:
     prompt, skills and deliver and nothing else; a PATCH takes only its
     whitelist and refuses a body without one of them; a name over 200
     characters, a prompt over 5000 or a schedule that is no cron expression
-    is a 400; a run resumes a paused job; a list hides paused jobs unless
+    is a 400; a run resumes a paused job and takes an optional `prompt` for
+    that one run, kept as `manual_run_prompt`; a list hides paused jobs unless
     `include_disabled` is asked for; an id that is not 12 hex is a 400, a
     missing job a 404. Every create, update, delete and run is kept in
     `changes` as (method, job id), so a test sees what was touched. The
-    gateway's scan of a prompt for injections is not kept: the prompts here
-    are the generator's own.
+    gateway's scan of a prompt for injections is one phrase here, `blocked`,
+    which a prompt holding it is refused for with the gateway's wording.
     """
 
     _CREATE_FIELDS = ("name", "schedule", "prompt", "skills", "deliver")
@@ -405,6 +406,8 @@ class FakeJobs:
         self.changes: list[tuple[str, str]] = []
         # How many lists answer 503 before the gateway is up.
         self.unavailable = 0
+        # A phrase the gateway's scan blocks in a prompt.
+        self.blocked: str | None = None
         self._ids = (f"{n:012x}" for n in itertools.count(0xB0B000000001))
         base = f"{HERMES_URL}/api/jobs"
         one = rf"^{HERMES_URL}/api/jobs/(?P<job_id>[^/]+)$"
@@ -452,13 +455,16 @@ class FakeJobs:
     def _schedule(expr: str) -> dict[str, Any]:
         return {"kind": "cron", "expr": expr, "display": expr}
 
-    @staticmethod
-    def _invalid(fields: dict[str, Any]) -> httpx.Response | None:
+    def _invalid(self, fields: dict[str, Any]) -> httpx.Response | None:
         """The gateway's 400 for a name, prompt or schedule it does not take."""
         if len(fields.get("name") or "") > 200:
             return httpx.Response(400, json={"error": "Name must be ≤ 200 characters"})
         if len(fields.get("prompt") or "") > 5000:
             return httpx.Response(400, json={"error": "Prompt must be ≤ 5000 characters"})
+        if self.blocked is not None and self.blocked in (fields.get("prompt") or ""):
+            return httpx.Response(
+                400, json={"error": "Blocked: prompt matches threat pattern 'prompt_injection'."}
+            )
         schedule = fields.get("schedule")
         if schedule is not None:
             parts = str(schedule).split()
@@ -529,10 +535,21 @@ class FakeJobs:
         self.changes.append(("DELETE", job_id))
         return httpx.Response(200, json={"ok": True})
 
-    def _run(self, _request: httpx.Request, job_id: str) -> httpx.Response:
+    def _run(self, request: httpx.Request, job_id: str) -> httpx.Response:
         if refused := self._found(job_id):
             return refused
+        body = json.loads(request.content) if request.content else None
+        prompt = body.get("prompt") if isinstance(body, dict) else None
+        if prompt is not None and (refused := self._invalid({"prompt": str(prompt)})):
+            return refused
         job = self.jobs[job_id]
-        job.update({"enabled": True, "state": "scheduled", "manual_run_at": "2026-10-02T14:20:05"})
+        job.update(
+            {
+                "enabled": True,
+                "state": "scheduled",
+                "manual_run_at": "2026-10-02T14:20:05",
+                "manual_run_prompt": str(prompt) if prompt else None,
+            }
+        )
         self.changes.append(("RUN", job_id))
         return httpx.Response(200, json={"job": job})
