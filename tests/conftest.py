@@ -29,7 +29,7 @@ from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import SMTP, Envelope, Session
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from nats.js.api import AckPolicy, ConsumerConfig
+from nats.js.api import AckPolicy, ConsumerConfig, StorageType
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
 from testcontainers.postgres import PostgresContainer
@@ -482,12 +482,12 @@ def settings(
 
 @pytest_asyncio.fixture
 async def stream(nats_url: str) -> AsyncIterator[Any]:
-    """A fresh EPISODE stream with the durable consumer the service binds to."""
+    """A fresh in-memory EPISODE stream with the durable consumer the service binds to."""
     connection = await nats.connect(servers=[nats_url])
     js = connection.jetstream()
     with contextlib.suppress(Exception):
         await js.delete_stream("EPISODE")
-    await js.add_stream(name="EPISODE", subjects=["episode.>"])
+    await js.add_stream(name="EPISODE", subjects=["episode.>"], storage=StorageType.MEMORY)
     await js.add_consumer(
         "EPISODE",
         ConsumerConfig(durable_name="agent-trigger", ack_policy=AckPolicy.EXPLICIT, ack_wait=60),
