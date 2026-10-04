@@ -8,6 +8,7 @@ and raises AgentRunFailed; the model is never asked again for it.
 
 from __future__ import annotations
 
+import asyncio
 import email
 import json
 from collections.abc import Awaitable, Callable
@@ -35,13 +36,46 @@ from .conftest import (
     USE_CASES,
     Relay,
 )
-from .fakes import COMPLETED, EXPLANATION, SESSION, fake_alertmanager, fake_hermes, sample
+from .fakes import (
+    COMPLETED,
+    CRON_SESSION,
+    CRON_TASK,
+    EXPLANATION,
+    SESSION,
+    fake_alertmanager,
+    fake_hermes,
+    fake_job,
+    model_call,
+    sample,
+    sign,
+    turn_ended,
+)
 
 Publish = Callable[..., Awaitable[None]]
 Rows = Callable[[], list[dict[str, Any]]]
 Consumer = tuple[EpisodeConsumer, Metrics]
 
 pytestmark = pytest.mark.respx(assert_all_called=False)
+
+
+@pytest.fixture
+def schedule_output() -> str:
+    """What propose-faults declares; a test of a cron run's delivery names its own."""
+    return "[stored]"
+
+
+@pytest.fixture
+def settings(settings: Settings, tmp_path: Path, schedule_output: str) -> Settings:
+    declared = tmp_path / "schedule-use-cases.yaml"
+    declared.write_text(
+        USE_CASES.replace(
+            "skill: lares-propose\n    tools: [lares]\n    output: [stored]",
+            f"skill: lares-propose\n    tools: [lares]\n    output: {schedule_output}",
+        ),
+        encoding="utf-8",
+    )
+    return settings.model_copy(update={"use_cases_file": declared})
+
 
 SUBJECT = (
     "[Explain] Ein Gerät zieht ununterbrochen länger Strom, als seine je Gerät erlaubte"
@@ -403,22 +437,55 @@ async def test_a_relay_that_refuses_fails_the_run(
     )
 
 
+@pytest.mark.parametrize("schedule_output", ["[stored, mail]"])
+async def test_a_cron_run_without_an_episode_mails_under_its_use_case(
+    receiver: tuple[httpx.AsyncClient, Metrics],
+    rows: Rows,
+    relay: Relay,
+    respx_mock: respx.MockRouter,
+) -> None:
+    fake_job(respx_mock, name="lares:propose-faults")
+    client, _ = receiver
+    answer = "Drei Vorschläge diese Woche.\n\nDetails im Ledger."
+
+    for body in (
+        model_call(1, session_id=CRON_SESSION, platform="cron", task_id=CRON_TASK, content=answer),
+        turn_ended(session_id=CRON_SESSION, platform="cron", task_id=CRON_TASK),
+    ):
+        assert (await client.post("/hooks/hermes", content=body, headers=sign(body))).is_success
+    for _ in range(500):
+        if rows() and rows()[0]["status"] != "running":
+            break
+        await asyncio.sleep(0.01)
+
+    (row,) = rows()
+    assert row["status"] == "completed", row["error"]
+    mail = _mail(relay)
+    # No episode to name: the use case and the sentence the run opens with.
+    assert mail["Subject"] == "[propose-faults] Drei Vorschläge diese Woche."
+    text = mail.get_content()
+    assert text.startswith(answer)
+    assert "gpt-6-sol (openai-codex)" in text
+    assert "grafana" not in text
+    assert [ref.split(":")[0] for ref in row["output_ref"]] == ["mail"]
+
+
 def test_a_declared_target_without_its_settings_refuses_to_start(settings: Settings) -> None:
     use_cases = load_use_cases(settings.use_cases_file)
     unconfigured = settings.model_copy(update={"discord_bot_token": ""})
 
     with pytest.raises(ValueError, match="DISCORD_BOT_TOKEN"):
-        build_deliveries(unconfigured, use_cases, Metrics())
+        build_deliveries(unconfigured, use_cases, Metrics(), None)
 
 
 def test_a_declared_target_this_trigger_cannot_deliver_refuses_to_start(
     settings: Settings, tmp_path: Path
 ) -> None:
-    declared = tmp_path / "pull-request.yaml"
+    declared = tmp_path / "alert.yaml"
     declared.write_text(
-        USE_CASES.replace("output: [stored, discord, mail]", "output: [stored, github_pr]"),
+        USE_CASES.replace("output: [stored, discord, mail]", "output: [stored, alert]"),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="github_pr"):
-        build_deliveries(settings, load_use_cases(declared), Metrics())
+    with pytest.raises(ValueError, match="declares output alert"):
+        build_deliveries(settings, load_use_cases(declared), Metrics(), None)

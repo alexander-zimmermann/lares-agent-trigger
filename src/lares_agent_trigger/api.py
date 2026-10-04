@@ -20,6 +20,15 @@ the episode id as `subject`:
 - the chat, a dormant use case, one that does not exist, or an episode the
   engine never recorded is refused with the reason, so the chat can say it.
 
+With `output` instead, the run is fed by hand: the text is taken as what a
+run of that use case wrote, written into a row of its own (`trigger =
+manual`, no subject), and delivered to every target the use case declares,
+exactly as a run's text would be — a dormant use case included, since no
+model is asked. The answer comes once it is delivered: 200 with the run's id,
+its status and what it created, `failed` with the reason when a target
+refused. The bridge's `start_run` never sends it; it is how a delivery is
+tried live before a skill writes for it.
+
 `POST /api/memory` with `use_case` and `text` appends the note to the use
 case's memory, if it declares one, cut to its bound (`memory.py`).
 
@@ -41,10 +50,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from .closing import Closer
+from .deliveries import RunOutput
 from .event_runs import EventRuns
 from .events import EpisodeRequest
 from .hermes import HermesError
-from .ledger import Ledger
+from .ledger import Ledger, Usage
 from .memory import LIMIT_BYTES
 from .metrics import Metrics
 from .schedules import MissingJobError, PausedJobError, Schedules
@@ -76,6 +87,7 @@ class TriggerApi:
         runs: EventRuns,
         schedules: Schedules,
         ledger: Ledger,
+        closer: Closer,
         key: str,
         metrics: Metrics,
     ) -> None:
@@ -83,6 +95,7 @@ class TriggerApi:
         self._runs = runs
         self._schedules = schedules
         self._ledger = ledger
+        self._closer = closer
         self._key = key
         self._metrics = metrics
 
@@ -129,6 +142,8 @@ class TriggerApi:
 
     async def _start_run(self, body: dict[str, Any]) -> _Answer:
         use_case = self._use_case(body)
+        if "output" in body:
+            return await self._hand_fed(use_case, body)
         subject = body.get("subject")
         subject = str(subject).strip() if subject is not None else ""
         if not use_case.is_enabled:
@@ -197,6 +212,55 @@ class TriggerApi:
             "status": "queued",
             "output": list(use_case.output),
         }
+
+    async def _hand_fed(self, use_case: UseCase, body: dict[str, Any]) -> _Answer:
+        """Deliver a text as if a run of the use case had written it; no model is asked."""
+        if use_case.is_chat:
+            raise _RefusedError(400, f"{use_case.name} is the chat itself: write to it instead")
+        if body.get("subject") is not None:
+            raise _RefusedError(400, "a hand-fed run takes no subject")
+        output = body["output"]
+        if not isinstance(output, str) or not output.strip():
+            raise _RefusedError(400, "output: the text a run would have written")
+        unserved = [target for target in use_case.output if not self._closer.serves(target)]
+        if unserved:
+            raise _RefusedError(
+                409,
+                f"{use_case.name} declares {', '.join(unserved)}, which this trigger is not set up"
+                " to deliver",
+            )
+        run_id = await self._ledger.record_turn(
+            use_case=use_case.name,
+            trigger="manual",
+            subject_kind="none",
+            subject_key=f"manual:{datetime.now(UTC):%Y%m%dT%H%M%S.%fZ}",
+            session_id=None,
+            harness_run_id=None,
+            status="running",
+            language=use_case.language,
+            text=output,
+            error=None,
+            usage=Usage(),
+        )
+        if run_id is None:
+            raise _RefusedError(409, f"a hand-fed run of {use_case.name} was taken a moment ago")
+        status, delivered = await self._closer.deliver(
+            use_case,
+            RunOutput(
+                run_id=run_id, use_case=use_case.name, occasion=None, text=output, usage=Usage()
+            ),
+            what=f"run {run_id}",
+        )
+        self._metrics.runs.labels(use_case=use_case.name, status=status).inc()
+        answer: dict[str, Any] = {
+            "use_case": use_case.name,
+            "run_id": run_id,
+            "status": status,
+            "output_ref": list(delivered.refs),
+        }
+        if delivered.refusals:
+            answer["error"] = delivered.error
+        return 200, answer
 
     async def _append_memory(self, body: dict[str, Any]) -> _Answer:
         use_case = self._use_case(body)

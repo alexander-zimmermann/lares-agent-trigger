@@ -19,14 +19,17 @@ from nats_bridge_core import tracing, watchdog_ok
 from . import generate
 from .alerts import Alertmanager
 from .api import TriggerApi
+from .closing import Closer
 from .config import Settings
 from .consumer import EpisodeConsumer
 from .cron_jobs import load_cron_jobs
 from .deliveries import build_deliveries
 from .event_runs import EventRuns
+from .github import github_app
 from .hermes import HermesClient
 from .ledger import Ledger
 from .metrics import Metrics
+from .read_back import ReadBack
 from .receiver import ReceiverServer, create_app
 from .schedules import Schedules
 from .turn_runs import TurnRuns
@@ -49,7 +52,8 @@ async def _amain() -> int:
     try:
         use_cases = load_use_cases(settings.use_cases_file)
         cron_jobs = load_cron_jobs(settings.cron_jobs_file, use_cases)
-        deliveries = build_deliveries(settings, use_cases, metrics)
+        github = github_app(settings)
+        deliveries = build_deliveries(settings, use_cases, metrics, github)
     except ValueError as exc:
         logger.error("refusing to start: %s", exc)
         return 1
@@ -63,13 +67,13 @@ async def _amain() -> int:
     ledger = Ledger(settings)
     hermes = HermesClient(settings)
     alertmanager = Alertmanager(settings, metrics)
-    turns = TurnRuns(use_cases, ledger, hermes, metrics)
+    closer = Closer(ledger, deliveries, alertmanager, metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, closer, metrics)
     runs = EventRuns(
         use_cases,
         ledger,
         hermes,
-        alertmanager,
-        deliveries,
+        closer,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
         traces=turns,
@@ -79,7 +83,7 @@ async def _amain() -> int:
         cron_jobs, hermes, turns, metrics, retry_seconds=settings.reconcile_retry_seconds
     )
     consumer = EpisodeConsumer(settings, runs, metrics)
-    api = TriggerApi(use_cases, runs, schedules, ledger, settings.api_key, metrics)
+    api = TriggerApi(use_cases, runs, schedules, ledger, closer, settings.api_key, metrics)
     receiver = ReceiverServer(
         create_app(turns, settings.hook_secret, api, metrics), settings.http_port
     )
@@ -100,6 +104,7 @@ async def _amain() -> int:
 
     receiving: asyncio.Task[None] | None = None
     reconciling: asyncio.Task[None] | None = None
+    reading: asyncio.Task[None] | None = None
     try:
         await ledger.open()
         await consumer.connect()
@@ -109,6 +114,11 @@ async def _amain() -> int:
         await runs.close_abandoned()
         # Only once the ledger is open: a delivery before that could not be written.
         receiving = asyncio.create_task(receiver.serve())
+        if github is not None:
+            read_back = ReadBack(
+                ledger, github, metrics, interval_seconds=settings.read_back_interval_seconds
+            )
+            reading = asyncio.create_task(read_back.keep_reading())
         logger.info("trigger is up")
         while not stop.is_set():
             await consumer.run_once()
@@ -125,15 +135,19 @@ async def _amain() -> int:
             receiver.should_exit = True
             with contextlib.suppress(Exception):
                 await receiving
-        if reconciling is not None:
-            reconciling.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reconciling
+        for task in (reconciling, reading):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await runs.aclose()
+        await turns.aclose()
         await consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()
         await deliveries.aclose()
+        if github is not None:
+            await github.aclose()
         await ledger.close()
         http_server.close()
         with contextlib.suppress(Exception):

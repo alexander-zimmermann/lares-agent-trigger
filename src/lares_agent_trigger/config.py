@@ -83,6 +83,17 @@ class Settings(NatsSettings):
     wikijs_token_file: Path | None = None
     wikijs_locale: str = "de"
     wikijs_request_timeout_seconds: float = 15.0
+    # GitHub: the write App the pull requests, issues and comments are opened
+    # as, on the repositories of one owner. Its key never leaves this pod.
+    github_app_id: str = ""
+    github_app_installation_id: int | None = None
+    github_app_private_key: str = Field(default="", repr=False)
+    github_app_private_key_file: Path | None = None
+    github_owner: str = "alexander-zimmermann"
+    github_api_url: str = "https://api.github.com"
+    github_request_timeout_seconds: float = 30.0
+    # How often the open pull requests in the ledger are looked up on GitHub.
+    read_back_interval_seconds: float = 86400.0
 
     # The receiver the harness's outbound hook posts every finished chat and
     # cron turn to, and the HMAC secret both sides share.
@@ -109,6 +120,10 @@ class Settings(NatsSettings):
             self.discord_bot_token = self.discord_bot_token_file.read_text(encoding="utf-8").strip()
         if self.wikijs_token_file:
             self.wikijs_token = self.wikijs_token_file.read_text(encoding="utf-8").strip()
+        if self.github_app_private_key_file:
+            self.github_app_private_key = self.github_app_private_key_file.read_text(
+                encoding="utf-8"
+            ).strip()
         if self.hook_secret_file:
             self.hook_secret = self.hook_secret_file.read_text(encoding="utf-8").strip()
         if self.api_key_file:

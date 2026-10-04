@@ -16,6 +16,12 @@ started itself and whose row it writes on the event path, so its tally is kept
 for that path to collect by session id (:meth:`TurnRuns.calls_of`). The rest is
 left alone.
 
+A chat turn is answered by the harness in its conversation. A cron turn of a
+use case that delivers somewhere — a pull request, a page — is delivered here,
+after the hook has been answered: its row is written `running` with the text,
+and the delivery closes it as an event run's would, with AgentRunFailed when a
+target refuses.
+
 The tallies live in memory. A turn whose calls came in before a restart and
 whose end came after gets its row without them, never with a guess.
 """
@@ -29,6 +35,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .closing import Closer
+from .deliveries import RunOutput
 from .hermes import HermesClient
 from .hooks import ModelCall, TurnEnded
 from .ledger import CallTrace, ClosedStatus, Ledger, SubjectKind, TriggerKind, Usage
@@ -45,6 +53,8 @@ _CHAT_PLATFORM = "discord"
 _CRON_PLATFORM = "cron"
 _API_PLATFORM = "api_server"
 _TALLIED_PLATFORMS = (_CHAT_PLATFORM, _CRON_PLATFORM, _API_PLATFORM)
+# Why a cron run whose calls came in before a restart has nothing to deliver.
+_LOST = "the turn's answer came in before the trigger restarted and was lost with it"
 # A tally nobody closed in this long belongs to a turn whose end was lost.
 _TALLY_LIFETIME_SECONDS = 3600.0
 
@@ -119,12 +129,16 @@ class TurnRuns:
         use_cases: dict[str, UseCase],
         ledger: Ledger,
         hermes: HermesClient,
+        closer: Closer,
         metrics: Metrics,
     ) -> None:
         self._use_cases = use_cases
         self._ledger = ledger
         self._hermes = hermes
+        self._closer = closer
         self._metrics = metrics
+        # The deliveries of cron runs still going, held so they are neither collected nor lost.
+        self._delivering: set[asyncio.Task[None]] = set()
         self._tallies: dict[str, _Tally] = {}
         # Ended API-server turns, by session id, until the event path collects them.
         self._finished: dict[str, _Tally] = {}
@@ -137,6 +151,12 @@ class TurnRuns:
         if isinstance(hook, ModelCall):
             return self._count(hook)
         return await self._record(hook)
+
+    async def aclose(self) -> None:
+        """Stop the deliveries still going; the next pod closes their rows."""
+        for task in self._delivering:
+            task.cancel()
+        await asyncio.gather(*self._delivering, return_exceptions=True)
 
     def expect_requested(self, job_id: str) -> None:
         """Note that a person asked this job to run now: its next cron turn is theirs.
@@ -184,6 +204,10 @@ class TurnRuns:
         tally = self._tallies.get(turn.turn_id)
         status: ClosedStatus = "completed" if turn.completed else "failed"
         usage = tally.usage() if tally is not None else Usage(model=turn.model)
+        text = tally.answer if tally is not None and turn.completed else None
+        # A cron run's text goes where its use case delivers; the row stays
+        # open until it has. A chat is answered in its own conversation.
+        delivers = turn.cron_run is not None and turn.completed and owner.use_case.delivers
         run_id = await self._ledger.record_turn(
             use_case=owner.use_case.name,
             trigger=owner.trigger,
@@ -191,9 +215,9 @@ class TurnRuns:
             subject_key=owner.subject_key,
             session_id=turn.session_id,
             harness_run_id=turn.turn_id,
-            status=status,
+            status="running" if delivers else status,
             language=owner.use_case.language,
-            text=tally.answer if tally is not None and turn.completed else None,
+            text=text,
             error=None if turn.completed else turn.exit_reason,
             usage=usage,
         )
@@ -202,8 +226,56 @@ class TurnRuns:
             self._requested.pop(turn.cron_run.job_id, None)
         if run_id is None:
             return "duplicate"
+        if delivers:
+            if text is not None and text.strip():
+                delivery = self._deliver(
+                    owner.use_case,
+                    RunOutput(
+                        run_id=run_id,
+                        use_case=owner.use_case.name,
+                        occasion=None,
+                        text=text,
+                        usage=usage,
+                    ),
+                )
+            else:
+                # The calls carry the answer; a turn whose calls a restart lost has none here.
+                delivery = self._fail(
+                    owner.use_case,
+                    run_id,
+                    "the harness completed the run without output" if tally is not None else _LOST,
+                )
+            task = asyncio.create_task(delivery)
+            self._delivering.add(task)
+            task.add_done_callback(self._delivering.discard)
+            return "recorded"
         self._metrics.recorded_runs.labels(use_case=owner.use_case.name, status=status).inc()
         return "recorded"
+
+    async def _deliver(self, use_case: UseCase, output: RunOutput) -> None:
+        """Deliver a cron run's text and close its row; nobody waits to hear that it broke."""
+        try:
+            status, _ = await self._closer.deliver(use_case, output, what=f"run {output.run_id}")
+        except Exception:
+            logger.exception(
+                "%s run %d stopped before its row was closed", use_case.name, output.run_id
+            )
+            return
+        self._metrics.recorded_runs.labels(use_case=use_case.name, status=status).inc()
+
+    async def _fail(self, use_case: UseCase, run_id: int, error: str) -> None:
+        """Close a cron run that has no text to deliver, and report it."""
+        try:
+            await self._closer.fail(
+                use_case.name,
+                run_id,
+                summary=f"{use_case.name} failed on run {run_id}: {error}",
+                error=error,
+            )
+        except Exception:
+            logger.exception("%s run %d stopped before its row was closed", use_case.name, run_id)
+            return
+        self._metrics.recorded_runs.labels(use_case=use_case.name, status="failed").inc()
 
     async def _owner(self, turn: TurnEnded) -> _Owner | None:
         if turn.platform == _CHAT_PLATFORM:
