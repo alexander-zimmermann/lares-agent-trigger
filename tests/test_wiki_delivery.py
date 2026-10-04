@@ -286,7 +286,7 @@ def test_a_wiki_target_without_its_settings_refuses_to_start(settings: Settings)
     unconfigured = settings.model_copy(update={"wikijs_token": ""})
 
     with pytest.raises(ValueError, match="WIKIJS_TOKEN"):
-        build_deliveries(unconfigured, load_use_cases(settings.use_cases_file), Metrics())
+        build_deliveries(unconfigured, load_use_cases(settings.use_cases_file), Metrics(), None)
 
 
 async def test_a_page_without_a_description_keeps_none(

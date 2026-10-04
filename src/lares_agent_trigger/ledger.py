@@ -35,6 +35,8 @@ SubjectKind = Literal["episode", "alert_group", "chat", "none"]
 TriggerKind = Literal["event", "schedule", "message", "manual"]
 # How a row ends that a run reached the end of.
 ClosedStatus = Literal["completed", "failed"]
+# Where an output with a state stands: a pull request is open, merged or closed.
+OutputState = Literal["open", "merged", "closed"]
 
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[DictRow]]
 
@@ -86,12 +88,24 @@ class Episode:
 
 @dataclass(frozen=True)
 class AbandonedRow:
-    """A requested run's row a stopped pod left open, as it was closed."""
+    """A row no event will come back for that a stopped pod left open, as it was closed."""
 
     id: int
     use_case: str
+    subject_kind: SubjectKind
     subject_key: str
     attempt: int
+
+
+@dataclass(frozen=True)
+class OpenOutput:
+    """One output the ledger holds as `open`: its row, its position and its ref."""
+
+    run_id: int
+    use_case: str
+    # 1-based, as Postgres counts array positions.
+    position: int
+    ref: str
 
 
 @dataclass(frozen=True)
@@ -194,8 +208,9 @@ class Ledger:
         """How many runs this use case has already spent today.
 
         Capped rows do not count — an event refused for the day must not push
-        the next one further away. A row just claimed is excluded by id, so
-        the count is of runs that came before it.
+        the next one further away — and neither do hand-fed ones, which asked
+        no model. A row just claimed is excluded by id, so the count is of
+        runs that came before it.
         """
         # Postgres does the day arithmetic, so a pod on UTC and a psql session
         # agree on where the house's day starts.
@@ -206,6 +221,7 @@ class Ledger:
                     SELECT count(*) AS runs FROM agent_runs
                     WHERE use_case = %s
                       AND status <> 'capped'
+                      AND trigger <> 'manual'
                       AND id IS DISTINCT FROM %s
                       AND created_at >= date_trunc('day', now() AT TIME ZONE %s) AT TIME ZONE %s
                     """,
@@ -266,13 +282,14 @@ class Ledger:
         status: ClosedStatus,
         error: str | None = None,
         output_ref: Sequence[str] = (),
+        output_state: Sequence[OutputState | None] = (),
     ) -> None:
         """Close the row, with one `output_ref` entry per thing a delivery created.
 
-        A message or a mail has no state to follow, so its `output_state`
-        position is NULL.
+        `output_state` stands beside the refs, position for position: a pull
+        request starts `open`; a message or a mail has no state to follow,
+        and its position is NULL.
         """
-        refs = list(output_ref)
         async with self._require_pool.connection() as conn:
             await conn.execute(
                 """
@@ -281,7 +298,7 @@ class Ledger:
                     output_ref = %s::text[], output_state = %s::text[]
                 WHERE id = %s
                 """,
-                (status, error, refs, [None] * len(refs), run_id),
+                (status, error, list(output_ref), list(output_state), run_id),
             )
 
     async def record_turn(
@@ -291,15 +308,20 @@ class Ledger:
         trigger: TriggerKind,
         subject_kind: SubjectKind,
         subject_key: str,
-        session_id: str,
-        harness_run_id: str,
-        status: ClosedStatus,
+        session_id: str | None,
+        harness_run_id: str | None,
+        status: ClosedStatus | Literal["running"],
         language: str,
         text: str | None,
         error: str | None,
         usage: Usage,
     ) -> int | None:
-        """Write the closed row of a turn the harness ran on its own; None when it exists."""
+        """Write the row of a run that is already over; None when its key exists.
+
+        A turn the harness ran on its own, or a hand-fed run. The row is
+        closed, unless it is `running` because its text still has to be
+        delivered, which then closes it.
+        """
         async with self._require_pool.connection() as conn:
             rows = await (
                 await conn.execute(
@@ -309,7 +331,8 @@ class Ledger:
                          harness_run_id, status, language, error, finished_at,
                          tldr, text, model_source, model, tokens_in, tokens_out, cost,
                          duration, tool_trace)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(),
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            CASE WHEN %s::text = 'running' THEN NULL ELSE now() END,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (use_case, subject_kind, subject_key) DO NOTHING
                     RETURNING id
@@ -324,25 +347,28 @@ class Ledger:
                         status,
                         language,
                         error,
+                        status,
                         *_output_columns(text, usage),
                     ),
                 )
             ).fetchall()
         return int(rows[0]["id"]) if rows else None
 
-    async def close_abandoned_requests(self, error: str) -> list[AbandonedRow]:
-        """Close as failed every requested run still open; the rows closed.
+    async def close_abandoned(self, error: str) -> list[AbandonedRow]:
+        """Close as failed every row still open that no event comes back for; the rows closed.
 
-        A run a person asked for is started by no event, so no redelivery ever
-        finds its row again. Chat rows are written closed and never match.
+        A run a person asked for, a cron run and a hand-fed run are started by
+        no event, so no redelivery ever finds their rows again; the last two
+        are open only while their text is being delivered. Chat rows are
+        written closed and never match.
         """
         async with self._require_pool.connection() as conn:
             rows = await (
                 await conn.execute(
                     """
                     UPDATE agent_runs SET status = 'failed', finished_at = now(), error = %s
-                    WHERE trigger = 'message' AND status IN ('queued', 'running')
-                    RETURNING id, use_case, subject_key, attempt
+                    WHERE trigger <> 'event' AND status IN ('queued', 'running')
+                    RETURNING id, use_case, subject_kind, subject_key, attempt
                     """,
                     (error,),
                 )
@@ -351,11 +377,45 @@ class Ledger:
             AbandonedRow(
                 id=int(row["id"]),
                 use_case=str(row["use_case"]),
+                subject_kind=row["subject_kind"],
                 subject_key=str(row["subject_key"]),
                 attempt=int(row["attempt"]),
             )
             for row in rows
         ]
+
+    async def open_outputs(self) -> list[OpenOutput]:
+        """Every output whose state the ledger holds as `open`, oldest row first."""
+        async with self._require_pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    """
+                    SELECT r.id, r.use_case, o.position, o.ref
+                    FROM agent_runs r,
+                         unnest(r.output_ref, r.output_state)
+                             WITH ORDINALITY AS o(ref, state, position)
+                    WHERE o.state = 'open'
+                    ORDER BY r.id, o.position
+                    """
+                )
+            ).fetchall()
+        return [
+            OpenOutput(
+                run_id=int(row["id"]),
+                use_case=str(row["use_case"]),
+                position=int(row["position"]),
+                ref=str(row["ref"]),
+            )
+            for row in rows
+        ]
+
+    async def set_output_state(self, run_id: int, position: int, state: OutputState) -> None:
+        """Set the state of one output, by its row and its position."""
+        async with self._require_pool.connection() as conn:
+            await conn.execute(
+                "UPDATE agent_runs SET output_state[%s] = %s WHERE id = %s",
+                (position, state, run_id),
+            )
 
     async def open_request(self, use_case: str, episode_id: int) -> int | None:
         """The run a person asked for on this episode that is still queued or running."""

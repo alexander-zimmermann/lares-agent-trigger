@@ -27,6 +27,8 @@ import pytest_asyncio
 import respx
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import SMTP, Envelope, Session
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from nats.js.api import AckPolicy, ConsumerConfig
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
@@ -34,11 +36,13 @@ from testcontainers.postgres import PostgresContainer
 
 from lares_agent_trigger.alerts import Alertmanager
 from lares_agent_trigger.api import TriggerApi
+from lares_agent_trigger.closing import Closer
 from lares_agent_trigger.config import Settings
 from lares_agent_trigger.consumer import EpisodeConsumer
 from lares_agent_trigger.cron_jobs import load_cron_jobs
 from lares_agent_trigger.deliveries import build_deliveries
 from lares_agent_trigger.event_runs import EventRuns
+from lares_agent_trigger.github import github_app
 from lares_agent_trigger.hermes import HermesClient
 from lares_agent_trigger.ledger import Ledger
 from lares_agent_trigger.metrics import Metrics
@@ -68,6 +72,10 @@ MAIL_FROM = "Lares <admin@zimmermann.sh>"
 ACCEPTED_SENDER = "admin@zimmermann.sh"
 MAIL_TO = "admin@zimmermann.sh"
 DASHBOARD_EPISODE_URL = "https://grafana.test/d/knx-episodes?var-fault={fault}"
+
+# The lares-agent App's installation, as `fake_github` knows it.
+GITHUB_APP_ID = "1234567"
+GITHUB_INSTALLATION_ID = 89012345
 
 USE_CASES = """
 ledger_hook:
@@ -124,7 +132,7 @@ use_cases:
       cron: "0 3 * * 0"
     skill: lares-propose
     tools: [lares]
-    output: [github_pr]
+    output: [stored]
     budget:
       tool_calls: 80
       minutes: 20
@@ -140,7 +148,7 @@ use_cases:
       cron: "0 8 * * 1"
     skill: lares-restore-probe
     tools: [lares]
-    output: [github_issue]
+    output: [stored]
     budget:
       tool_calls: 30
       minutes: 10
@@ -391,6 +399,23 @@ def relay(relay_server: tuple[Relay, int]) -> Relay:
     return server
 
 
+@pytest.fixture(scope="session")
+def app_key() -> rsa.RSAPrivateKey:
+    """The App's private key; GitHub holds its public half."""
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture
+def github(respx_mock: respx.MockRouter, app_key: rsa.RSAPrivateKey) -> Any:
+    """GitHub as `fake_github.FakeGitHub` keeps it, the App's public key registered."""
+    from .fake_github import FakeGitHub
+
+    public = app_key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return FakeGitHub(respx_mock, public.decode("ascii"))
+
+
 @pytest.fixture
 def discord(respx_mock: respx.MockRouter) -> Any:
     """Discord's create-message endpoint on the home channel, as `fakes.fake_discord` keeps it."""
@@ -404,6 +429,7 @@ def settings(
     postgres: PostgresContainer,
     nats_url: str,
     relay_server: tuple[Relay, int],
+    app_key: rsa.RSAPrivateKey,
     tmp_path: Path,
 ) -> Settings:
     use_cases_file = tmp_path / "use-cases.yaml"
@@ -444,6 +470,13 @@ def settings(
         mail_to=MAIL_TO,
         faults_file=faults_file,
         dashboard_episode_url=DASHBOARD_EPISODE_URL,
+        github_app_id=GITHUB_APP_ID,
+        github_app_installation_id=GITHUB_INSTALLATION_ID,
+        github_app_private_key=app_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ).decode("ascii"),
     )
 
 
@@ -524,14 +557,15 @@ async def service(
     hermes = HermesClient(settings)
     alertmanager = Alertmanager(settings, metrics)
     use_cases = load_use_cases(settings.use_cases_file)
-    deliveries = build_deliveries(settings, use_cases, metrics)
-    turns = TurnRuns(use_cases, ledger, hermes, metrics)
+    github = github_app(settings)
+    deliveries = build_deliveries(settings, use_cases, metrics, github)
+    closer = Closer(ledger, deliveries, alertmanager, metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, closer, metrics)
     runs = EventRuns(
         use_cases,
         ledger,
         hermes,
-        alertmanager,
-        deliveries,
+        closer,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
         traces=turns,
@@ -546,7 +580,7 @@ async def service(
     )
     episode_consumer = EpisodeConsumer(settings, runs, metrics)
     await episode_consumer.connect()
-    api = TriggerApi(use_cases, runs, schedules, ledger, settings.api_key, metrics)
+    api = TriggerApi(use_cases, runs, schedules, ledger, closer, settings.api_key, metrics)
     app = create_app(turns, settings.hook_secret, api, metrics)
     # In-process: the ASGI app behind a real HTTP client, no port and no server.
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://trigger")
@@ -554,11 +588,14 @@ async def service(
         yield Service(episode_consumer, client, metrics, schedules, runs, hermes, turns)
     finally:
         await runs.aclose()
+        await turns.aclose()
         await client.aclose()
         await episode_consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()
         await deliveries.aclose()
+        if github is not None:
+            await github.aclose()
         await ledger.close()
 
 

@@ -239,7 +239,7 @@ async def test_a_schedule_use_case_runs_its_job_now_and_its_row_says_so(
         "use_case": "propose-faults",
         "job_id": job_id,
         "status": "requested",
-        "output": ["github_pr"],
+        "output": ["stored"],
     }
     assert jobs.changes == [("RUN", job_id)]
 
@@ -425,3 +425,42 @@ async def test_a_request_a_stopped_pod_left_open_is_closed_and_reported(
         )
         == 1.0
     )
+
+
+async def test_a_cron_run_a_stopped_pod_left_delivering_is_closed_and_reported(
+    service: Service, rows: Rows, execute: Execute, respx_mock: respx.MockRouter
+) -> None:
+    """Its hook was answered before the delivery, so nothing ever comes back for it."""
+    alerts = fake_alertmanager(respx_mock)
+    execute(
+        "INSERT INTO agent_runs (use_case, trigger, subject_kind, subject_key, status, language)"
+        " VALUES ('propose-faults', 'schedule', 'none', 'a1b2c3d4e5f6:9e8d7c6b5a49', 'running',"
+        " 'en')"
+    )
+
+    await service.runs.close_abandoned()
+
+    (row,) = rows()
+    assert row["status"] == "failed"
+    (alert,) = json.loads(alerts.calls.last.request.content)
+    assert alert["annotations"]["summary"] == (
+        f"propose-faults failed on run {row['id']} after 1 attempt (trigger_restarted)"
+    )
+
+
+async def test_a_hand_fed_run_spends_none_of_the_days_runs(
+    api: Api, rows: Rows, respx_mock: respx.MockRouter
+) -> None:
+    jobs = FakeJobs(respx_mock)
+    job_id = jobs.add("lares:propose-faults")
+    client, _ = api
+
+    fed = await client.post(
+        RUNS, json={"use_case": "propose-faults", "output": "Nothing this week."}, headers=KEY
+    )
+    # One run a day, and the hand-fed one asked no model.
+    started = await client.post(RUNS, json={"use_case": "propose-faults"}, headers=KEY)
+
+    assert fed.json()["status"] == "completed"
+    assert started.status_code == 202, started.text
+    assert jobs.changes == [("RUN", job_id)]

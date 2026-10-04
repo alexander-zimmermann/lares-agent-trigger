@@ -98,6 +98,13 @@ class Metrics:
             ["action"],  # created | updated | deleted
             registry=self.registry,
         )
+        # The daily read-back of the pull requests the ledger holds as open.
+        self.read_backs = Counter(
+            "agent_trigger_read_backs_total",
+            "Open pull requests looked up on GitHub, by use case and the state they were found in.",
+            ["use_case", "state"],  # open | merged | closed | failed
+            registry=self.registry,
+        )
         self.run_duration = Histogram(
             "agent_trigger_run_duration_seconds",
             "Wall-clock time from starting a harness run to its terminal state.",

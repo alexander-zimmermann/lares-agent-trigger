@@ -193,6 +193,11 @@ class UseCase(_Strict):
         return self.is_enabled and isinstance(self.trigger, MessageTrigger)
 
     @property
+    def delivers(self) -> bool:
+        """True when its output goes somewhere besides its own row."""
+        return any(target != "stored" for target in self.output)
+
+    @property
     def is_schedule(self) -> bool:
         """True for an enabled use case the harness's cron starts."""
         return self.is_enabled and isinstance(self.trigger, ScheduleTrigger)
