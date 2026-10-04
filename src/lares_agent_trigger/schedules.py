@@ -22,7 +22,8 @@ again: the declaration it refused changes only with a new commit, which rolls
 the pod anyway.
 
 A job a person paused is not run now either: the gateway's run-now resumes a
-paused job for good.
+paused job for good. What a person asked a run now to look at goes into that
+one run's prompt, never into the job's.
 """
 
 from __future__ import annotations
@@ -49,6 +50,10 @@ class MissingJobError(LookupError):
 
 class PausedJobError(RuntimeError):
     """The job of a schedule use case is paused in the harness, and running it would resume it."""
+
+
+class FocusRefusedError(ValueError):
+    """The harness refused what a person asked the run to look at; the message says why."""
 
 
 class Schedules:
@@ -92,10 +97,11 @@ class Schedules:
             self._metrics.reconciles.labels(outcome="done").inc()
             return
 
-    async def run_now(self, use_case: UseCase) -> str:
+    async def run_now(self, use_case: UseCase, focus: str | None = None) -> str:
         """Have the harness run this use case's job now; the job's id.
 
-        Its next cron turn is then recorded as started by a person.
+        `focus`, what the person asked for, goes into that run's prompt. Its
+        next cron turn is then recorded as started by a person.
         """
         name = job_name(use_case)
         job = next((job for job in await self._hermes.list_jobs() if job.name == name), None)
@@ -103,7 +109,13 @@ class Schedules:
             raise MissingJobError(f"the harness holds no job {name} yet")
         if not job.enabled:
             raise PausedJobError(f"{name} is paused in the harness; resume it there to run it")
-        await self._hermes.run_job(job.id)
+        prompt = f"The owner asked for this run: {focus}" if focus is not None else None
+        try:
+            await self._hermes.run_job(job.id, prompt)
+        except HermesError as exc:
+            if prompt is not None and _refusal(exc):
+                raise FocusRefusedError(f"the harness refused the focus: {exc}") from exc
+            raise
         self._turns.expect_requested(job.id)
         logger.info("asked the harness to run %s (%s) now", name, job.id)
         return job.id

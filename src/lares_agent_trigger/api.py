@@ -16,7 +16,9 @@ the episode id as `subject`:
   goes where the use case delivers;
 - a schedule use case has its managed job run now (202 with the job's id), and
   its next cron turn is recorded as started by a person; 429 when the day's
-  runs are spent, 409 when a person paused the job;
+  runs are spent, 409 when a person paused the job. `focus`, what the person
+  asked it to look at in their own words, goes into that one run's prompt;
+  an episode use case takes none;
 - the chat, a dormant use case, one that does not exist, or an episode the
   engine never recorded is refused with the reason, so the chat can say it.
 
@@ -58,13 +60,16 @@ from .hermes import HermesError
 from .ledger import Ledger, Usage
 from .memory import LIMIT_BYTES
 from .metrics import Metrics
-from .schedules import MissingJobError, PausedJobError, Schedules
+from .schedules import FocusRefusedError, MissingJobError, PausedJobError, Schedules
 from .use_cases import UseCase
 
 logger = logging.getLogger(__name__)
 
 RUNS_PATH = "/api/runs"
 MEMORY_PATH = "/api/memory"
+
+# A request in chat, not an assignment; the gateway takes 5000 for a whole prompt.
+FOCUS_LIMIT = 500
 
 _Answer = tuple[int, dict[str, Any]]
 
@@ -146,22 +151,27 @@ class TriggerApi:
             return await self._hand_fed(use_case, body)
         subject = body.get("subject")
         subject = str(subject).strip() if subject is not None else ""
+        focus = _focus(body)
         if not use_case.is_enabled:
             raise _RefusedError(409, f"{use_case.name} is dormant: {use_case.dormant}")
         if use_case.is_chat:
             raise _RefusedError(400, f"{use_case.name} is the chat itself: write to it instead")
         if use_case.event_trigger is not None:
+            if focus is not None:
+                raise _RefusedError(400, f"{use_case.name} runs on an episode and takes no focus")
             return await self._start_on_episode(use_case, subject)
         if subject:
             raise _RefusedError(400, f"{use_case.name} runs on its schedule and takes no subject")
         if await self._ledger.runs_today(use_case.name) >= use_case.budget.runs_per_day:
             raise _RefusedError(429, _spent(use_case))
         try:
-            job_id = await self._schedules.run_now(use_case)
+            job_id = await self._schedules.run_now(use_case, focus)
         except MissingJobError as exc:
             raise _RefusedError(503, str(exc)) from exc
         except PausedJobError as exc:
             raise _RefusedError(409, str(exc)) from exc
+        except FocusRefusedError as exc:
+            raise _RefusedError(400, str(exc)) from exc
         return 202, {
             "use_case": use_case.name,
             "job_id": job_id,
@@ -277,6 +287,19 @@ class TriggerApi:
             )
         held = await self._ledger.append_memory(use_case.name, note)
         return 200, {"use_case": use_case.name, "bytes": held}
+
+
+def _focus(body: dict[str, Any]) -> str | None:
+    """What the person asked a schedule run to look at; None when they named nothing."""
+    focus = body.get("focus")
+    if focus is None:
+        return None
+    if not isinstance(focus, str):
+        raise _RefusedError(400, "focus: what the owner asked for, as text")
+    focus = focus.strip()
+    if len(focus) > FOCUS_LIMIT:
+        raise _RefusedError(400, f"focus: {len(focus)} characters, more than {FOCUS_LIMIT}")
+    return focus or None
 
 
 def _spent(use_case: UseCase) -> str:
