@@ -23,8 +23,8 @@ from typing import Literal, Protocol
 
 import httpx
 
-from .alerts import Alertmanager
-from .deliveries import Deliveries, RunOutput
+from .closing import Closer
+from .deliveries import RunOutput
 from .events import EpisodeEvent, EpisodeRequest, Occasion
 from .failures import TRANSIENT, FailureClass, classify_error, classify_exception, describe
 from .hermes import HermesClient, HermesError, RunOutcome, instructions_for
@@ -69,8 +69,7 @@ class EventRuns:
     use_cases: dict[str, UseCase]
     ledger: Ledger
     hermes: HermesClient
-    alertmanager: Alertmanager
-    deliveries: Deliveries
+    closer: Closer
     metrics: Metrics
     retry_delay_seconds: float
     traces: CallTraces
@@ -123,17 +122,22 @@ class EventRuns:
         return Requested(run_id, "queued")
 
     async def close_abandoned(self) -> None:
-        """Close and report the requested runs a stopped pod left open.
+        """Close and report the rows a stopped pod left open that no event comes back for.
 
-        Called before the API takes requests, so none of them is still going.
+        A requested run, and a cron or hand-fed run whose text was still being
+        delivered. Called before the API and the hook take requests, so none
+        of them is still going.
         """
-        error = "the trigger restarted before the requested run closed its row"
-        for row in await self.ledger.close_abandoned_requests(error):
+        error = "the trigger restarted before the run closed its row"
+        for row in await self.ledger.close_abandoned(error):
             self.metrics.failures.labels(row.use_case, "trigger_restarted").inc()
             self.metrics.runs.labels(use_case=row.use_case, status="failed").inc()
-            summary = _failed(row.use_case, row.subject_key, row.attempt, "trigger_restarted")
+            what = (
+                f"episode {row.subject_key}" if row.subject_kind == "episode" else f"run {row.id}"
+            )
+            summary = _failed(row.use_case, what, row.attempt, "trigger_restarted")
             logger.error("%s: %s", summary, error)
-            await self.alertmanager.run_failed(use_case=row.use_case, summary=summary, error=error)
+            await self.closer.report(row.use_case, summary=summary, error=error)
 
     async def aclose(self) -> None:
         """Stop the requested runs still going; the next pod closes their rows."""
@@ -283,28 +287,14 @@ class EventRuns:
         self, use_case: UseCase, occasion: Occasion, run_id: int, text: str, usage: Usage
     ) -> None:
         """Carry the stored text to every declared target and close the row with what they made."""
-        delivered = await self.deliveries.deliver(
-            use_case.output,
+        status, _ = await self.closer.deliver(
+            use_case,
             RunOutput(
                 run_id=run_id, use_case=use_case.name, occasion=occasion, text=text, usage=usage
             ),
+            what=f"episode {occasion.subject_key}",
         )
-        if not delivered.refusals:
-            await self.ledger.finish(run_id, status="completed", output_ref=delivered.refs)
-            self._count(use_case, "completed", usage)
-            return
-        self.metrics.failures.labels(use_case.name, "delivery_failed").inc()
-        await self._close_failed(
-            use_case,
-            run_id,
-            summary=(
-                f"{use_case.name} could not deliver episode {occasion.subject_key}"
-                f" to {delivered.refused}"
-            ),
-            error=delivered.error,
-            usage=usage,
-            output_ref=delivered.refs,
-        )
+        self._count(use_case, status, usage)
 
     async def _report(
         self,
@@ -328,28 +318,15 @@ class EventRuns:
         )
         if failure.usage is not None:
             await self.ledger.record(run_id, text=None, usage=failure.usage)
-        await self._close_failed(
-            use_case,
+        await self.closer.fail(
+            use_case.name,
             run_id,
-            summary=_failed(use_case.name, occasion.subject_key, attempt, failure.failure_class),
+            summary=_failed(
+                use_case.name, f"episode {occasion.subject_key}", attempt, failure.failure_class
+            ),
             error=failure.error,
-            usage=failure.usage,
         )
-
-    async def _close_failed(
-        self,
-        use_case: UseCase,
-        run_id: int,
-        *,
-        summary: str,
-        error: str,
-        usage: Usage | None,
-        output_ref: tuple[str, ...] = (),
-    ) -> None:
-        """Close the row as failed and raise AgentRunFailed with the raw error."""
-        await self.ledger.finish(run_id, status="failed", error=error, output_ref=output_ref)
-        self._count(use_case, "failed", usage)
-        await self.alertmanager.run_failed(use_case=use_case.name, summary=summary, error=error)
+        self._count(use_case, "failed", failure.usage)
 
     def _count(self, use_case: UseCase, status: str, usage: Usage | None) -> None:
         self.metrics.runs.labels(use_case=use_case.name, status=status).inc()
@@ -357,10 +334,10 @@ class EventRuns:
             self.metrics.run_duration.labels(use_case=use_case.name).observe(usage.duration_seconds)
 
 
-def _failed(use_case: str, subject_key: str, attempt: int, failure_class: FailureClass) -> str:
-    """The summary of AgentRunFailed for a run on an episode."""
+def _failed(use_case: str, what: str, attempt: int, failure_class: FailureClass) -> str:
+    """The summary of AgentRunFailed; `what` is `episode <key>` or `run <id>`."""
     attempts = f"{attempt} attempt{'s' if attempt > 1 else ''}"
-    return f"{use_case} failed on episode {subject_key} after {attempts} ({failure_class})"
+    return f"{use_case} failed on {what} after {attempts} ({failure_class})"
 
 
 def ledger_key(use_case: str, subject_kind: str, subject_key: str) -> str:

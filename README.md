@@ -2,7 +2,7 @@
 
 The service that decides when the house explains itself.
 
-It reads the episode events [lares-diagnostics-engine](https://github.com/alexander-zimmermann/lares-diagnostics-engine) publishes on NATS, decides against a declared use-case file whether an event deserves an answer, starts a run on the [Hermes](https://github.com/NousResearch/hermes-agent) harness, waits for it, writes the result into one row of the agent ledger, and delivers it where the use case says: a Discord message, a mail, a wiki page.
+It reads the episode events [lares-diagnostics-engine](https://github.com/alexander-zimmermann/lares-diagnostics-engine) publishes on NATS, decides against a declared use-case file whether an event deserves an answer, starts a run on the [Hermes](https://github.com/NousResearch/hermes-agent) harness, waits for it, writes the result into one row of the agent ledger, and delivers it where the use case says: a Discord message, a mail, a wiki page, a pull request, an issue or a comment on GitHub.
 
 Besides the chat and the harness's own cron, this is the only thing that starts an agent run — and the only writer of `agent_runs` and `agent_memory`. The runs it does not start still get their row: the harness reports every finished chat turn and cron execution to the trigger's hook receiver. The cron jobs themselves it keeps in line with the declaration, and a person in chat can have it start a use case now.
 
@@ -156,6 +156,15 @@ A run on an episode records `trigger = message` and the subject key `<episode id
 
 A job run now has no execution id yet, so the trigger notes the request in memory, and the job's first cron turn to end after it is written with `trigger = message` — a scheduled turn already under way when the request came takes it instead, and the requested one says `schedule`. A pod that restarts in between leaves that row on `schedule`. A requested run on an episode that a stopped pod left open is closed at the next start as `trigger_restarted` and reported like any failed run: nothing redelivers a request.
 
+`POST /api/runs` with `{"use_case": …, "output": …}` instead feeds a run by hand: the text is taken as what a run of that use case wrote, kept in a row of its own (`trigger = manual`, subject kind `none`, key `manual:<UTC>`), and delivered to every target the use case declares exactly as a run's text would be — a dormant use case's included, since no model is asked. It is how a delivery is tried live before a skill writes for it, and the bridge's `start_run` never sends it. The answer comes once the text is delivered:
+
+```json
+{"use_case": "propose-faults", "run_id": 42, "status": "completed",
+ "output_ref": ["https://github.com/alexander-zimmermann/lares/pull/2250"]}
+```
+
+`failed` with an `error` when a target refused, and `AgentRunFailed` raised as for any run. A hand-fed run takes no subject, spends none of the day's runs, and is refused `409` when the use case declares a target this trigger is not set up to deliver.
+
 `POST /api/memory` with `{"use_case": …, "text": …}` appends the note to the use case's row in `agent_memory`, if the use case declares `memory: true`. The row is then cut from the front to 8192 bytes, whole lines at a time: the oldest notes go first, the newest stays whole. A note larger than that alone is refused.
 
 Every refusal is `{"error": "<reason>"}`, so the chat can say why; `503` when the ledger or the harness did not answer.
@@ -204,6 +213,9 @@ The model never delivers. On an API run the harness posts nothing itself; once a
 | `discord` | Posts to the home channel through the bot's REST API, with the token the harness chats with. No mention in the text can ping anyone. | `discord:<channel>/<message>`, one per message |
 | `mail`    | Sends a plaintext mail through the cluster's relay, from its one accepted sender to the owner.                                        | `mail:<Message-ID>`             |
 | `wiki_page` | Writes the page the run's page block names into Wiki.js, under the key whose group may write pages: creates it, or replaces content and title of the page at that path. | `wiki:<locale>/<path>`          |
+| `github_pr` | Opens each `~~~github_pr` block as a pull request, as the write App: a fresh branch off the default branch, the diff applied in one commit, the label `agent/proposal` and the block's labels. | the pull request's URL, state `open` |
+| `github_issue` | Opens each `~~~github_issue` block as an issue with the block's labels.                                                          | the issue's URL                 |
+| `github_comment` | Posts each `~~~github_comment` block as a comment on the issue or pull request it names.                                      | the comment's URL               |
 
 Discord takes 2000 characters a message. A text that fits goes as it is; a longer one goes as the cause and its proof lines (the `-# ` lines the skill writes), then the rest in a second message. A part still too long is cut on a line and ends in `… (run <id>)`: the row holds the whole text.
 
@@ -239,9 +251,57 @@ title: Wartungsplan
 
 The block is checked before the wiki is called: exactly `path` and `title`, both non-empty, and a page after it. One that does not hold is a refusal like any other, with the reason as the row's error. The path is looked up in `WIKIJS_LOCALE`; a new page is created published and without tags, an existing one keeps its description, tags and publish flag, because Wiki.js resets whatever an update leaves out; a publish window set in the editor is not in the page list and is cleared. Every update leaves the previous revision in the page's history.
 
+### GitHub
+
+The model never holds a GitHub write: it names what it wants opened in one fenced block per pull request, issue or comment at the end of its text, and the trigger opens it as the write App ([ADR 0005 in lares](https://github.com/alexander-zimmermann/lares/blob/main/docs/adr/0005-github-reads-through-the-official-server-writes-as-deliveries.md)). A block opens with `~~~` and its target and closes with a line `~~~` of its own, so the backtick fences a body quotes never end it:
+
+````
+Two proposals for the laundry room.
+
+~~~github_pr
+repository: lares
+path: kubernetes/applications/lares-diagnostics-engine/base/config/faults.yaml
+title: Let the dryer run five hours before appliance_runtime fires
+labels: [topic/smart-home]
+body: |
+  Five of six judged dryer episodes in eight weeks were `nonsense`: eco runs take 4.2 to 4.6 h.
+
+  ```diff
+  -        max_run_hours: 4
+  +        max_run_hours: 5
+  ```
+diff: |
+  --- a/kubernetes/applications/lares-diagnostics-engine/base/config/faults.yaml
+  +++ b/kubernetes/applications/lares-diagnostics-engine/base/config/faults.yaml
+  @@ -191,2 +191,2 @@
+         KG.Hauswirtschaftsraum.K3-L1.Trockner:
+  -        max_run_hours: 4
+  +        max_run_hours: 5
+~~~
+````
+
+| Target           | Fields                                                                   |
+| ---------------- | ------------------------------------------------------------------------ |
+| `github_pr`      | `repository`, `path`, `title`, `body`, `diff`, `labels` (may be left out) |
+| `github_issue`   | `repository`, `title`, `body`, `labels` (may be left out)                 |
+| `github_comment` | `repository`, `number` (the issue or pull request), `body`                |
+
+`repository` is a bare name under `GITHUB_OWNER`; the App's installation decides which it may write to. A title is one line. Every block is checked before anything leaves — for any target of the run, a wiki page or a message included — and one that does not hold refuses its target and keeps every other one from being written to:
+
+- its fields, as above; a path inside the repository, without `./` or `../`;
+- every label against the repository — GitHub would create an unknown one on the fly, and the next label sync in lares would delete it again;
+- for a pull request, its diff against the file on the default branch's head: every hunk's context and removed lines must stand there exactly as written, at the line its header names or, when the model miscounted, at the one place they fit after the previous hunk — never at one of several. Header line counts are not checked, the lines are, so a hunk that only adds lines needs a context line to show where they go, unless the file is empty. One diff touches one file, the one `path` names; a new file starts from `/dev/null`. A diff that changes nothing is refused too;
+- for a comment, that the issue or pull request exists.
+
+A run has at most three blocks for one target. The blocks are cut out of the text the other targets carry: a wiki page, a message or a mail never shows them. One with nothing for a target this time says so in a single block, `none: <why>`; a text without any block for a declared target fails the run, so a model that forgot the format is never silence. A pull request's branch is `agent/<use case>/run-<run id>-<n>`, its commit message the title, and its body, like an issue's or a comment's, ends with the use case, the run and the model, so it leads back to its row. A write that breaks halfway keeps what it opened in the row: a pull request whose labels failed is still named there.
+
 A target that refuses does not stop the next one from trying. The run then closes `failed` with each refusal's raw text as the error, keeps its text and the refs of everything that was created — the first message of a split post included — and raises `AgentRunFailed` like any failed run. The model is not asked again: running it twice would not change what Discord or the relay make of the answer. A run the harness reports completed but without any output fails before delivery, as `unknown`.
 
-Only targets an enabled event use case declares are built, and a declared target without its settings, or one this trigger does not deliver (`alert`, the GitHub targets), stops the pod at startup.
+The targets the enabled event and schedule use cases declare are built, and one of them without its settings, or one this trigger does not deliver (`alert`), stops the pod at startup. Every other target is built when its settings are there, for a hand-fed run of a dormant use case.
+
+## The read-back
+
+A pull request starts `open` in its row. Once a day — at startup, then every `READ_BACK_INTERVAL_SECONDS` — the trigger asks GitHub about every output the ledger holds as `open` and writes `merged` or `closed` into its position of `output_state`, so the merged share of Propose is a count over the ledger. A pull request GitHub does not answer for stays `open`, is counted as `failed` and asked about again the next day; a round that breaks altogether is logged and waits for the next.
 
 ## When a run fails
 
@@ -278,7 +338,7 @@ A run still failed after that closes its row with `status = failed`, `attempt` a
 
 There is no `endsAt`, so Alertmanager resolves it after its resolve timeout. An Alertmanager that does not take the post is logged and counted, never retried into a redelivery loop.
 
-A row that a dead pod left `queued` or `running` is not started again when its event is redelivered — the harness may still be working on it — but closed as `trigger_restarted` and reported the same way.
+A row that a dead pod left `queued` or `running` is not started again when its event is redelivered — the harness may still be working on it — but closed as `trigger_restarted` and reported the same way. A row no event comes back for — a run asked for in chat, a cron or hand-fed run whose text was still being delivered — is closed so at the next start.
 
 ## Chat and cron runs
 
@@ -293,6 +353,8 @@ The harness starts two kinds of run on its own: a turn in Discord, and a cron jo
 | `cron`        | the enabled `schedule` use case its job is named after          | trigger `schedule` (`message` when the chat asked it to run now), subject kind `none`, key `<job id>:<execution id>` |
 | `api_server`  | —                                                               | none: the event run it belongs to takes its calls (see below)           |
 | anything else | —                                                               | none                                                                    |
+
+A cron run whose use case delivers somewhere other than `stored` — a pull request, a page, a mail — is delivered by the trigger, as an event run is: the hook is answered first, the row is written `running` with the turn's answer as its text, and the delivery closes it, `failed` with `AgentRunFailed` when a target refuses. A turn that completed without an answer fails the same way. A chat turn is answered by the harness in its own conversation and delivered nowhere.
 
 The gateway mints cron job ids itself, so a managed job carries its use case in its name: `lares:propose-faults`. A job without that prefix, or one naming a use case the file does not enable as a schedule, is left alone.
 
@@ -352,6 +414,12 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `WIKIJS_TOKEN_FILE`                         | —                                                  | A Wiki.js API key whose group has `read:pages` and `write:pages`. |
 | `WIKIJS_LOCALE`                             | `de`                                               | The locale a page is looked up and created in.     |
 | `WIKIJS_REQUEST_TIMEOUT_SECONDS`            | `15.0`                                             | Per-request timeout against Wiki.js.               |
+| `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` | —                                               | The write App and its installation; needed by the GitHub outputs. |
+| `GITHUB_APP_PRIVATE_KEY_FILE`               | —                                                  | The App's private key (PEM). Half an App stops the pod. |
+| `GITHUB_OWNER`                              | `alexander-zimmermann`                             | Whose repositories a block's `repository` names.   |
+| `GITHUB_API_URL`                            | `https://api.github.com`                           | GitHub's REST API.                                 |
+| `GITHUB_REQUEST_TIMEOUT_SECONDS`            | `30.0`                                             | Per-request timeout against GitHub.                |
+| `READ_BACK_INTERVAL_SECONDS`                | `86400.0`                                          | How often the open pull requests are looked up.    |
 | `HTTP_PORT`                                 | `8080`                                             | The hook receiver and the API.                     |
 | `HOOK_SECRET_FILE`                          | —                                                  | The HMAC secret the harness signs deliveries with. |
 | `API_KEY_FILE`                              | —                                                  | The key the API takes, at least 32 characters; the bridge holds it too. |
@@ -378,6 +446,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_reconciles_total`        | `outcome`          | Reconciles of the cron jobs: `done`, `failed` (not answered, tried again) or `refused`. |
 | `agent_trigger_cron_jobs_total`         | `action`           | Managed jobs the reconcile `created`, `updated` or `deleted`. |
 | `agent_trigger_api_requests_total`      | `route`, `code`    | Requests to the API (`runs`, `memory`), by the status code they were answered. |
+| `agent_trigger_read_backs_total`        | `use_case`, `state` | Open pull requests looked up by the read-back: `open`, `merged`, `closed`, or `failed` when GitHub did not answer for one. |
 
 `/healthz` is NATS- and ledger-gated. A harness outage is deliberately not part of it: that is a failed run with its own alert, never a restart loop.
 
@@ -385,7 +454,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 The generator is pure and tested apart: the declaration and settings in `tests/rendering/` go in, and the three rendered files must equal `tests/rendering/expected/`. After a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review. The rendered GitHub entry is also run as the harness would run it: the real server binary, copied out of its image, starts in a container with a key file in place, answers MCP over stdio with the network off, and offers read tools only; without the key it never starts.
 
-Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the gateway and the bridge send it; the ledger rows land in a real TimescaleDB container; the harness, Alertmanager, Discord and Wiki.js are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the gateway's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the gateway refuses, resumes a paused job it runs, hides paused jobs from a plain list), the other three so the alert, the message and the page are asserted as they would arrive — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts.
+Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the gateway and the bridge send it; the ledger rows land in a real TimescaleDB container; the harness, Alertmanager, Discord, Wiki.js and GitHub are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the gateway's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the gateway refuses, resumes a paused job it runs, hides paused jobs from a plain list), the others so the alert, the message, the page and the pull request are asserted as they would arrive; GitHub keeps its own rules on the App's JWT and tokens, refs, contents writes, pull requests and labels — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts, and so has the diff a pull request carries against the file it changes.
 
 ```bash
 uv sync --extra dev
