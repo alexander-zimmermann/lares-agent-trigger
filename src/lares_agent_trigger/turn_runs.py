@@ -24,6 +24,9 @@ target refuses.
 
 The tallies live in memory. A turn whose calls came in before a restart and
 whose end came after gets its row without them, never with a guess.
+
+Every call is priced at the row's write by the declared step of its profile's
+source that served it (`pricing.py`), and the row's cost is their sum.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from .hermes import HermesClient
 from .hooks import ModelCall, TurnEnded
 from .ledger import CallTrace, ClosedStatus, Ledger, SubjectKind, TriggerKind, Usage
 from .metrics import Metrics
+from .pricing import Pricing
 from .use_cases import UseCase, chat_use_case, scheduled_use_case
 
 logger = logging.getLogger(__name__)
@@ -95,6 +99,9 @@ class _Tally:
                 tokens_out=call.tokens_out,
                 seconds=round(call.ended_at - call.started_at, 1),
                 tools=call.tools,
+                model_source=call.model_source,
+                model=call.model,
+                tokens_cached=call.tokens_cached,
             )
         )
 
@@ -122,7 +129,7 @@ class _Owner:
 
 
 class TurnRuns:
-    """The hook path, wired to the three things it talks to."""
+    """The hook path, wired to the things it talks to and the prices it charges."""
 
     def __init__(
         self,
@@ -130,12 +137,14 @@ class TurnRuns:
         ledger: Ledger,
         hermes: HermesClient,
         closer: Closer,
+        pricing: Pricing,
         metrics: Metrics,
     ) -> None:
         self._use_cases = use_cases
         self._ledger = ledger
         self._hermes = hermes
         self._closer = closer
+        self._pricing = pricing
         self._metrics = metrics
         # The deliveries of cron runs still going, held so they are neither collected nor lost.
         self._delivering: set[asyncio.Task[None]] = set()
@@ -204,6 +213,7 @@ class TurnRuns:
         tally = self._tallies.get(turn.turn_id)
         status: ClosedStatus = "completed" if turn.completed else "failed"
         usage = tally.usage() if tally is not None else Usage(model=turn.model)
+        usage = self._pricing.price(turn.profile, usage)
         text = tally.answer if tally is not None and turn.completed else None
         # A cron run's text goes where its use case delivers; the row stays
         # open until it has. A chat is answered in its own conversation.
@@ -226,6 +236,7 @@ class TurnRuns:
             self._requested.pop(turn.cron_run.job_id, None)
         if run_id is None:
             return "duplicate"
+        self._pricing.count(owner.use_case.name, turn.profile, usage, answered=turn.completed)
         if delivers:
             if text is not None and text.strip():
                 delivery = self._deliver(

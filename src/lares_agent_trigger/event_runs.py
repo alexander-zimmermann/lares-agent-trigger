@@ -30,6 +30,8 @@ from .failures import TRANSIENT, FailureClass, classify_error, classify_exceptio
 from .hermes import HermesClient, HermesError, RunOutcome, instructions_for
 from .ledger import CallTrace, Ledger, TriggerKind, Usage
 from .metrics import Metrics
+from .persons import DEFAULT_PROFILE
+from .pricing import Pricing
 from .use_cases import UseCase
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,7 @@ class EventRuns:
     ledger: Ledger
     hermes: HermesClient
     closer: Closer
+    pricing: Pricing
     metrics: Metrics
     retry_delay_seconds: float
     traces: CallTraces
@@ -215,6 +218,11 @@ class EventRuns:
                 return
             self.metrics.failures.labels(use_case.name, failure.failure_class).inc()
             if attempt < _ATTEMPTS and failure.failure_class in TRANSIENT:
+                # The row keeps the last attempt; what this one spent is counted here.
+                if failure.usage is not None:
+                    self.pricing.count(
+                        use_case.name, DEFAULT_PROFILE, failure.usage, answered=False
+                    )
                 logger.warning(
                     "%s %s attempt %d failed (%s), retrying in %.0f s: %s",
                     use_case.name,
@@ -277,11 +285,18 @@ class EventRuns:
         return None
 
     async def _with_calls(self, outcome: RunOutcome) -> RunOutcome:
-        """The outcome with the model calls its turn reported through the hook, if they came."""
-        if outcome.session_id is None:
-            return outcome
-        calls = await self.traces.calls_of(outcome.session_id, wait_seconds=self.trace_wait_seconds)
-        return replace(outcome, usage=replace(outcome.usage, calls=calls))
+        """The outcome with the model calls its turn reported through the hook, priced.
+
+        The trigger starts every run on the gateway's own API server, so it
+        runs on the default profile. Without its calls a run has no cost.
+        """
+        calls: tuple[CallTrace, ...] = ()
+        if outcome.session_id is not None:
+            calls = await self.traces.calls_of(
+                outcome.session_id, wait_seconds=self.trace_wait_seconds
+            )
+        usage = self.pricing.price(DEFAULT_PROFILE, replace(outcome.usage, calls=calls))
+        return replace(outcome, usage=usage)
 
     async def _deliver(
         self, use_case: UseCase, occasion: Occasion, run_id: int, text: str, usage: Usage
@@ -294,7 +309,7 @@ class EventRuns:
             ),
             what=f"episode {occasion.subject_key}",
         )
-        self._count(use_case, status, usage)
+        self._count(use_case, status, usage, answered=True)
 
     async def _report(
         self,
@@ -326,11 +341,16 @@ class EventRuns:
             ),
             error=failure.error,
         )
-        self._count(use_case, "failed", failure.usage)
+        self._count(use_case, "failed", failure.usage, answered=False)
 
-    def _count(self, use_case: UseCase, status: str, usage: Usage | None) -> None:
+    def _count(
+        self, use_case: UseCase, status: str, usage: Usage | None, *, answered: bool
+    ) -> None:
         self.metrics.runs.labels(use_case=use_case.name, status=status).inc()
-        if usage is not None and usage.duration_seconds is not None:
+        if usage is None:
+            return
+        self.pricing.count(use_case.name, DEFAULT_PROFILE, usage, answered=answered)
+        if usage.duration_seconds is not None:
             self.metrics.run_duration.labels(use_case=use_case.name).observe(usage.duration_seconds)
 
 

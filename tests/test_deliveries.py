@@ -12,6 +12,7 @@ import asyncio
 import email
 import json
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from email.message import EmailMessage
 from email.policy import default as default_policy
 from pathlib import Path
@@ -30,7 +31,6 @@ from lares_agent_trigger.use_cases import load_use_cases
 from .conftest import (
     DISCORD_CHANNEL,
     DISCORD_TOKEN,
-    HERMES_URL,
     MAIL_FROM,
     MAIL_TO,
     USE_CASES,
@@ -41,7 +41,6 @@ from .fakes import (
     CRON_SESSION,
     CRON_TASK,
     EXPLANATION,
-    SESSION,
     fake_alertmanager,
     fake_hermes,
     fake_job,
@@ -54,6 +53,9 @@ from .fakes import (
 Publish = Callable[..., Awaitable[None]]
 Rows = Callable[[], list[dict[str, Any]]]
 Consumer = tuple[EpisodeConsumer, Metrics]
+Receiver = tuple[httpx.AsyncClient, Metrics]
+
+HOOK = "/hooks/hermes"
 
 pytestmark = pytest.mark.respx(assert_all_called=False)
 
@@ -138,8 +140,9 @@ async def test_an_explanation_reaches_the_row_discord_and_mail(
     # The proof lines read as a list in a mail; `-# ` is Discord's markup.
     assert text.startswith(EXPLANATION.replace("\n-# ", "\n• "))
     assert "-# " not in text
-    # The run's model and cost, which only the trigger knows, and the dashboard.
-    assert "gpt-6-sol (openai-codex) · 4200 + 310 Tokens · 0.0210 USD · 11 s" in text
+    # The run's model, which only the trigger knows, and the dashboard. Its
+    # cost comes from its calls, which this run's hook never sent.
+    assert "gpt-6-sol (openai-codex) · 4200 + 310 Tokens · 11 s" in text
     assert "https://grafana.test/d/knx-episodes?var-fault=appliance_runtime" in text
 
     # One entry per delivery, in declaration order; `stored` is the row itself.
@@ -214,26 +217,69 @@ async def test_proof_lines_too_long_for_one_message_point_to_the_run(
     assert row["status"] == "completed"
 
 
-async def test_a_run_on_the_subscription_names_no_cost(
+async def _run_with_calls(
+    receiver: Receiver,
+    consumer: Consumer,
+    publish: Publish,
+    respx_mock: respx.MockRouter,
+    *,
+    fallback: bool,
+) -> None:
+    """One event run whose API turn reported its one call through the hook first."""
+    provider, model = ("openai-api", "gpt-6-luna") if fallback else ("openai-codex", "gpt-6-sol")
+    runtime = {"provider": provider, "model": model, "route_source": "global"}
+    fake_hermes(respx_mock, states=[{**COMPLETED, "runtime": runtime}])
+    client, _ = receiver
+    # 40k fresh input and 2k out: 0.004 + 0.001 USD on the fallback's price.
+    call = model_call(
+        1,
+        session_id="sess_1",
+        platform="api_server",
+        task_id="0f3c9d2e-run",
+        content=EXPLANATION,
+        input_tokens=40000,
+        cache_read_tokens=0,
+        output_tokens=2000,
+        provider=provider,
+        model=model,
+    )
+    end = turn_ended(session_id="sess_1", platform="api_server", task_id="0f3c9d2e-run")
+    for body in (call, end):
+        assert (await client.post(HOOK, content=body, headers=sign(body))).status_code == 200
+    episode_consumer, _ = consumer
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+
+async def test_a_run_on_the_fallback_names_its_cost(
+    receiver: Receiver,
     consumer: Consumer,
     publish: Publish,
     rows: Rows,
     relay: Relay,
     respx_mock: respx.MockRouter,
 ) -> None:
-    fake_hermes(respx_mock)
-    # The Codex subscription bills nothing per run, and the session says so.
-    flat = {**SESSION["session"], "actual_cost_usd": 0, "estimated_cost_usd": 0}
-    respx_mock.get(f"{HERMES_URL}/api/sessions/sess_1").mock(
-        return_value=httpx.Response(200, json={**SESSION, "session": flat})
-    )
-    episode_consumer, _ = consumer
-
-    await publish("appeared", 2)
-    await episode_consumer.run_once()
+    await _run_with_calls(receiver, consumer, publish, respx_mock, fallback=True)
 
     (row,) = rows()
-    assert float(row["cost"]) == 0.0
+    assert row["cost"] == Decimal("0.005")
+    text = _mail(relay).get_content()
+    assert "gpt-6-luna (openai-api) · 4200 + 310 Tokens · 0.0050 USD · 11 s" in text
+
+
+async def test_a_run_on_the_subscription_names_no_cost(
+    receiver: Receiver,
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    relay: Relay,
+    respx_mock: respx.MockRouter,
+) -> None:
+    await _run_with_calls(receiver, consumer, publish, respx_mock, fallback=False)
+
+    (row,) = rows()
+    # The Codex subscription bills nothing per call.
+    assert row["cost"] == Decimal("0")
     text = _mail(relay).get_content()
     assert "gpt-6-sol (openai-codex) · 4200 + 310 Tokens · 11 s" in text
     assert "USD" not in text

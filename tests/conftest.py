@@ -46,6 +46,8 @@ from lares_agent_trigger.github import github_app
 from lares_agent_trigger.hermes import HermesClient
 from lares_agent_trigger.ledger import Ledger
 from lares_agent_trigger.metrics import Metrics
+from lares_agent_trigger.persons import load_persons_file
+from lares_agent_trigger.pricing import Pricing
 from lares_agent_trigger.receiver import create_app
 from lares_agent_trigger.schedules import Schedules
 from lares_agent_trigger.turn_runs import TurnRuns
@@ -172,6 +174,24 @@ use_cases:
     language: de
     memory: false
     dormant: Waits for its skill.
+"""
+
+# The default profile on the owner's subscription, falling back to a capped API project.
+PERSONS = """
+default_profile:
+  model: owner-subscription
+
+model_sources:
+  - name: owner-subscription
+    provider: openai-codex
+    model: gpt-6-sol
+    account: shared-with-default
+    bound: subscription
+    fallback:
+      - provider: openai-api
+        model: gpt-6-luna
+        bound: capped
+        price: {input: 0.10, cached_input: 0.01, output: 0.50}
 """
 
 # The job set the generator renders from USE_CASES: one job per enabled schedule.
@@ -434,6 +454,8 @@ def settings(
 ) -> Settings:
     use_cases_file = tmp_path / "use-cases.yaml"
     use_cases_file.write_text(USE_CASES, encoding="utf-8")
+    persons_file = tmp_path / "persons.yaml"
+    persons_file.write_text(PERSONS, encoding="utf-8")
     cron_jobs_file = tmp_path / "cron-jobs.yaml"
     cron_jobs_file.write_text(CRON_JOBS, encoding="utf-8")
     faults_file = tmp_path / "faults.yaml"
@@ -443,6 +465,7 @@ def settings(
     return Settings(
         nats_servers=nats_url,
         use_cases_file=use_cases_file,
+        persons_file=persons_file,
         cron_jobs_file=cron_jobs_file,
         db_host=host,
         db_port=int(postgres.get_exposed_port(5432)),
@@ -560,12 +583,14 @@ async def service(
     github = github_app(settings)
     deliveries = build_deliveries(settings, use_cases, metrics, github)
     closer = Closer(ledger, deliveries, alertmanager, metrics)
-    turns = TurnRuns(use_cases, ledger, hermes, closer, metrics)
+    pricing = Pricing(load_persons_file(settings.persons_file), metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, closer, pricing, metrics)
     runs = EventRuns(
         use_cases,
         ledger,
         hermes,
         closer,
+        pricing,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
         traces=turns,

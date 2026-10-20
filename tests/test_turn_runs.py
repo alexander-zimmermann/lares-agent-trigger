@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -132,8 +133,8 @@ async def test_a_discord_turn_becomes_a_messenger_row(receiver: Receiver, rows: 
     }
     # From the first call's start to the last call's end.
     assert row["duration"].total_seconds() == pytest.approx(11.0)
-    # A flat subscription bills nothing per call; nothing is guessed in its place.
-    assert row["cost"] is None
+    # Both calls on the subscription, which bills nothing per call.
+    assert row["cost"] == Decimal("0")
     assert row["finished_at"] is not None
 
     assert _hook_events(metrics, "counted") == 2.0
@@ -175,13 +176,13 @@ async def test_a_fallback_shows_as_the_model_that_answered(receiver: Receiver, r
     await _deliver(
         client,
         model_call(1, tool_calls=1),
-        model_call(2, content=ANSWER, model="grok-4.3", provider="xai"),
+        model_call(2, content=ANSWER, model="gpt-6-luna", provider="openai-api"),
         turn_ended(),
     )
 
     (row,) = rows()
-    assert row["model"] == "grok-4.3"
-    assert row["model_source"] == "xai"
+    assert row["model"] == "gpt-6-luna"
+    assert row["model_source"] == "openai-api"
 
 
 async def test_a_call_without_usage_leaves_the_turns_tokens_unknown(
@@ -290,11 +291,13 @@ async def test_a_body_that_is_neither_hook_is_refused(receiver: Receiver, rows: 
         turn_ended().replace(b'"platform"', b'"surface"'),
         model_call(1).replace(b'"api_call_count"', b'"calls"'),
         model_call(1, tool_calls=1).replace(b'"name": "list_episodes"', b'"tool": "x"'),
+        model_call(1).replace(b'"cache_read_tokens"', b'"cached_tokens"'),
+        turn_ended().replace(b'"profile"', b'"home"'),
     )
 
-    assert statuses == [400, 400, 400, 400, 400, 400]
+    assert statuses == [400] * 8
     assert rows() == []
-    assert _hook_events(metrics, "invalid") == 6.0
+    assert _hook_events(metrics, "invalid") == 8.0
 
 
 async def test_a_run_of_the_api_server_is_left_to_the_event_path(

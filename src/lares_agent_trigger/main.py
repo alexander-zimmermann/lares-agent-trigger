@@ -29,6 +29,8 @@ from .github import github_app
 from .hermes import HermesClient
 from .ledger import Ledger
 from .metrics import Metrics
+from .persons import load_persons_file
+from .pricing import Pricing
 from .read_back import ReadBack
 from .receiver import ReceiverServer, create_app
 from .schedules import Schedules
@@ -51,6 +53,7 @@ async def _amain() -> int:
     # than not starting.
     try:
         use_cases = load_use_cases(settings.use_cases_file)
+        persons = load_persons_file(settings.persons_file)
         cron_jobs = load_cron_jobs(settings.cron_jobs_file, use_cases)
         github = github_app(settings)
         deliveries = build_deliveries(settings, use_cases, metrics, github)
@@ -68,12 +71,14 @@ async def _amain() -> int:
     hermes = HermesClient(settings)
     alertmanager = Alertmanager(settings, metrics)
     closer = Closer(ledger, deliveries, alertmanager, metrics)
-    turns = TurnRuns(use_cases, ledger, hermes, closer, metrics)
+    pricing = Pricing(persons, metrics)
+    turns = TurnRuns(use_cases, ledger, hermes, closer, pricing, metrics)
     runs = EventRuns(
         use_cases,
         ledger,
         hermes,
         closer,
+        pricing,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
         traces=turns,
