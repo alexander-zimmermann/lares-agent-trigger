@@ -1,7 +1,7 @@
 """The generator: the declarations rendered into what the harness and the bridge read.
 
 Pure: the use-case file, the person declaration and the hand-written harness
-settings in, four texts out.
+settings in, one text per rendered file out.
 
 - The harness configuration: the settings copied whole, comments and all, then
   the part this module owns — the default profile's model and its fallbacks,
@@ -13,6 +13,15 @@ settings in, four texts out.
 - The bridge's allowlists: one entry per machine client of a server in use.
 - The sampling ratio, one variable every service of the platform reads: the
   trigger, the bridge and the engine's CronJobs.
+- The default profile's `.env`: one line per key its config reads, naming the
+  key it is sealed under, as a template of the harness's SealedSecret.
+- The bridge's clients file: one entry per machine client of a server in use,
+  each key sealed under the client's name, as a template of the bridge's.
+
+Every value is sealed once, under its own key: a variable's key is its name in
+lower case and dashed. Sealed Secrets renders a key the SealedSecret lacks as
+empty without an error; lares checks every template against the sealed keys in
+pre-commit.
 
 A dormant use case renders nothing, and neither does a tool server only dormant
 use cases name or a model source no profile runs on. Every file is written
@@ -39,7 +48,7 @@ import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, override
+from typing import Any, NamedTuple, override
 
 import yaml
 
@@ -73,6 +82,25 @@ CLIENT_TOOLS_VARIABLE = "MCP_AUTH_CLIENT_TOOLS"
 # The ratio the services trace at; the trigger reads it under this name.
 SAMPLING_RATIO_VARIABLE = "TRACING_SAMPLING_RATIO"
 
+
+class SealedFile(NamedTuple):
+    """A file a SealedSecret composes from the keys it seals one by one."""
+
+    secret: str
+    namespace: str
+    file: str
+
+
+# The default profile's `.env`, from the SealedSecret the harness's keys are sealed in.
+DEFAULT_ENV = SealedFile("hermes-credentials", "agents", "default.env")
+# The bridge's machine clients and their keys.
+BRIDGE_CLIENTS = SealedFile("lares-mcp-bridge-auth-clients", "lares-mcp-bridge", "clients.json")
+
+# The default profile serves the Runs and Jobs API and the probes under this key,
+# and chats under the bot token.
+_API_SERVER_KEY = "API_SERVER_KEY"
+_DISCORD_BOT_TOKEN = "DISCORD_BOT_TOKEN"
+
 _HOOK_NAME = "lares-agent-trigger"
 _HOOK_TIMEOUT_SECONDS = 10
 _NO_TOOL_SERVER = "no_mcp"
@@ -80,12 +108,14 @@ _NO_TOOL_SERVER = "no_mcp"
 
 @dataclass(frozen=True)
 class Rendering:
-    """The four rendered files, as text."""
+    """The rendered files, as text."""
 
     hermes_config: str
     cron_jobs: str
     client_tools: str
     tracing: str
+    env_template: str
+    clients_template: str
 
 
 class _Dumper(yaml.SafeDumper):
@@ -94,6 +124,15 @@ class _Dumper(yaml.SafeDumper):
     @override
     def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
         super().increase_indent(flow, False)
+
+
+def _text(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
+    # A file inside a file stays readable: a multi-line string is a literal block.
+    style = "|" if "\n" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_Dumper.add_representer(str, _text)
 
 
 def _dump(data: Any) -> str:
@@ -105,6 +144,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
     _check_settings(settings)
     enabled = [use_case for use_case in declared.use_cases.values() if use_case.is_enabled]
     in_use = _servers_named(declared, enabled)
+    bridges = [server for server in in_use if isinstance(server, BridgeServer)]
 
     generated = {
         "platform_toolsets": _platform_toolsets(declared, enabled),
@@ -131,9 +171,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# The cron jobs the harness runs, one per enabled schedule use case.\n"
         f"{_dump(dump_cron_jobs(jobs))}"
     )
-    allowlists = {
-        server.client: list(server.tools) for server in in_use if isinstance(server, BridgeServer)
-    }
+    allowlists = {server.client: list(server.tools) for server in bridges}
     client_tools = (
         f"{GENERATED_LINE}\n"
         "# The tools each machine client of the bridge may see and call.\n"
@@ -144,8 +182,25 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# The share of new traces every service of the agent platform keeps.\n"
         f"{SAMPLING_RATIO_VARIABLE}={declared.tracing.sampling_ratio!r}\n"
     )
+    env_template = _template(
+        DEFAULT_ENV,
+        "# The default profile's .env, composed from the keys sealed one by one in\n"
+        "# sealed-secret.yaml; Hermes mounts it read-only at the home's root.\n",
+        _default_env(declared, enabled, bridges, persons),
+    )
+    clients_template = _template(
+        BRIDGE_CLIENTS,
+        "# The bridge's machine clients and their keys, composed from the keys sealed\n"
+        "# one by one in sealed-secret.yaml, each under its client's name.\n",
+        _clients_json(allowlists),
+    )
     return Rendering(
-        hermes_config=hermes_config, cron_jobs=cron_jobs, client_tools=client_tools, tracing=tracing
+        hermes_config=hermes_config,
+        cron_jobs=cron_jobs,
+        client_tools=client_tools,
+        tracing=tracing,
+        env_template=env_template,
+        clients_template=clients_template,
     )
 
 
@@ -263,6 +318,53 @@ def _github_entry(server: GitHubServer) -> dict[str, Any]:
     }
 
 
+def _sealed_key(variable: str) -> str:
+    """The key a variable's value is sealed under: its name, lower case and dashed."""
+    return variable.lower().replace("_", "-")
+
+
+def _default_env(
+    declared: UseCaseFile,
+    enabled: Sequence[UseCase],
+    bridges: Sequence[BridgeServer],
+    persons: PersonsFile,
+) -> str:
+    """Every key the default profile's config reads, once each, as a line naming its sealed key."""
+    variables = [
+        _API_SERVER_KEY,
+        *([_DISCORD_BOT_TOKEN] if any(use_case.is_chat for use_case in enabled) else []),
+        declared.ledger_hook.secret_env,
+        *(server.key_env for server in bridges),
+        *persons.default_source.key_envs,
+    ]
+    return "".join(
+        f"""{variable}='{{{{ index . "{_sealed_key(variable)}" }}}}'\n"""
+        for variable in dict.fromkeys(variables)
+    )
+
+
+def _clients_json(clients: Iterable[str]) -> str:
+    """The bridge's clients file: each client's name and the key sealed under that name."""
+    entries = ",\n".join(
+        f"""  "{client}": {{{{ index . "{client}" | toJson }}}}""" for client in clients
+    )
+    return f"{{\n{entries}\n}}\n"
+
+
+def _template(target: SealedFile, comment: str, text: str) -> str:
+    """A patch adding the file to its SealedSecret as a template of the sealed keys.
+
+    kubeseal rewrites the SealedSecret whole, so the template sits beside it.
+    """
+    patch = {
+        "apiVersion": "bitnami.com/v1alpha1",
+        "kind": "SealedSecret",
+        "metadata": {"name": target.secret, "namespace": target.namespace},
+        "spec": {"template": {"data": {target.file: text}}},
+    }
+    return f"{GENERATED_LINE}\n{comment}{_dump(patch)}"
+
+
 def _cron_job(use_case: UseCase) -> CronJob:
     trigger = use_case.trigger
     assert isinstance(trigger, ScheduleTrigger)
@@ -283,11 +385,12 @@ def _cron_job(use_case: UseCase) -> CronJob:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """`lares-agent-trigger generate`: render the declarations and write the four files."""
+    """`lares-agent-trigger generate`: render the declarations and write every file."""
     parser = argparse.ArgumentParser(
         prog="lares-agent-trigger generate",
         description="Render the use-case file and the person declaration into the harness "
-        "configuration, the cron job set, the bridge's allowlists and the sampling ratio.",
+        "configuration, the cron job set, the bridge's allowlists, the sampling ratio, and "
+        "the templates of the default profile's .env and the bridge's clients file.",
     )
     parser.add_argument("--use-cases", type=Path, required=True)
     parser.add_argument("--persons", type=Path, required=True)
@@ -296,6 +399,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--cron-jobs", type=Path, required=True)
     parser.add_argument("--client-tools", type=Path, required=True)
     parser.add_argument("--tracing", type=Path, required=True)
+    parser.add_argument("--env-template", type=Path, required=True)
+    parser.add_argument("--clients-template", type=Path, required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -318,6 +423,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         (args.cron_jobs, rendered.cron_jobs),
         (args.client_tools, rendered.client_tools),
         (args.tracing, rendered.tracing),
+        (args.env_template, rendered.env_template),
+        (args.clients_template, rendered.clients_template),
     ):
         try:
             path.write_text(text, encoding="utf-8")
