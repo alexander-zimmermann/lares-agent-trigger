@@ -16,8 +16,10 @@ is the gateway's, not ours. The run record carries `run_id`, `status`,
 `runtime` — which is where the model that actually served the run and its
 provider are, the top-level `model` being the gateway's own name. Its
 `created_at` and `updated_at` are unix seconds, and their difference is the
-run's real duration. Cost and the tool count live on the session record
-(`/api/sessions/{id}`), whose payload sits under a `session` key.
+run's real duration. The tool count lives on the session record
+(`/api/sessions/{id}`), whose payload sits under a `session` key. Its cost
+estimate is the gateway's guess and stays unread: the run's calls are priced
+from the declared sources.
 
 A cron job's id is minted by the gateway, so what the job runs is read off its
 name through the Jobs API (`/api/jobs/{id}`, wrapped under `job`). The same API
@@ -33,7 +35,6 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, replace
-from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -185,11 +186,10 @@ class HermesClient:
             await asyncio.sleep(self._settings.hermes_poll_seconds)
 
     async def _usage_with_session(self, body: dict[str, Any], elapsed: float) -> Usage:
-        """Run usage, plus the cost and tool count only the session record holds.
+        """Run usage, plus the tool count only the session record holds.
 
-        A session that cannot be read leaves those two fields unset rather than
-        failing the run: the explanation is already written, and a NULL cost is
-        honest where a guessed one would not be.
+        A session that cannot be read leaves the count unset rather than
+        failing the run: the explanation is already written.
         """
         usage = _usage(body, elapsed)
         session_id = body.get("session_id")
@@ -204,14 +204,7 @@ class HermesClient:
         session = payload.get("session") if isinstance(payload, dict) else None
         if not isinstance(session, dict):
             return usage
-        # `actual_cost_usd` is what the provider billed; `estimated_cost_usd` is
-        # the gateway's own reckoning and stands in until the bill is known.
-        cost = session.get("actual_cost_usd") or session.get("estimated_cost_usd")
-        return replace(
-            usage,
-            cost=Decimal(str(cost)) if cost is not None else None,
-            tool_count=_int_or_none(session.get("tool_call_count")),
-        )
+        return replace(usage, tool_count=_int_or_none(session.get("tool_call_count")))
 
     async def job_name(self, job_id: str) -> str | None:
         """The name of a cron job; None when the gateway holds no such job.

@@ -46,14 +46,15 @@ async def test_an_episode_appearing_at_severity_two_is_explained(
     assert row["tldr"] == "Die Waschmaschine hängt seit 14:20 im Spülgang."
     assert row["text"] == EXPLANATION
     # Who actually served the run — never the gateway's own name `hermes-agent`.
-    # The values come from the response, never from this package: no model or
-    # provider name appears anywhere in `src/`.
+    # The values come from the response, never from this package.
     assert row["model_source"] == "openai-codex"
     assert row["model"] == "gpt-6-sol"
     assert row["tokens_in"] == 4200
     assert row["tokens_out"] == 310
-    # Cost and the tool count come from the session record the run names.
-    assert float(row["cost"]) == pytest.approx(0.021)
+    # The tool count comes from the session record the run names, never its
+    # cost estimate; the cost comes from the run's calls, and this run's hook
+    # sent none (`test_costs.py`).
+    assert row["cost"] is None
     assert row["tool_trace"] == {"tool_count": 7}
     # The record's own span, not the time we happened to spend polling: a run
     # that finishes inside the POST would leave that at nearly zero.

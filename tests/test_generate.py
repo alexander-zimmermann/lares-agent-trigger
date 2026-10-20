@@ -1,4 +1,5 @@
-"""Generator tests: the use-case file and the settings in, the three rendered files out.
+"""Generator tests: the use-case file, the person declaration and the settings in,
+the three rendered files out.
 
 `rendering/` holds one declaration that touches every surface and the files it
 renders to. A deliberate change to the rendering is reviewed as a diff of
@@ -16,21 +17,32 @@ import pytest
 import yaml
 
 from lares_agent_trigger.generate import GENERATED_LINE, Rendering, main, render
+from lares_agent_trigger.persons import load_persons_file
 from lares_agent_trigger.use_cases import load_use_case_file
 
 RENDERING = Path(__file__).parent / "rendering"
 USE_CASES = RENDERING / "use-cases.yaml"
+PERSONS = RENDERING / "persons.yaml"
 SETTINGS = RENDERING / "settings.yaml"
 EXPECTED = RENDERING / "expected"
 
 
-def _render(tmp_path: Path, use_cases: str | None = None, settings: str | None = None) -> Rendering:
+def _render(
+    tmp_path: Path,
+    use_cases: str | None = None,
+    settings: str | None = None,
+    persons: str | None = None,
+) -> Rendering:
     path = USE_CASES
     if use_cases is not None:
         path = tmp_path / "use-cases.yaml"
         path.write_text(use_cases, encoding="utf-8")
+    persons_path = PERSONS
+    if persons is not None:
+        persons_path = tmp_path / "persons.yaml"
+        persons_path.write_text(persons, encoding="utf-8")
     text = settings if settings is not None else SETTINGS.read_text(encoding="utf-8")
-    return render(load_use_case_file(path), text)
+    return render(load_use_case_file(path), load_persons_file(persons_path), text)
 
 
 def _config(tmp_path: Path, use_cases: str | None = None) -> dict[str, Any]:
@@ -64,6 +76,23 @@ def test_the_rendering_matches_the_expected_files(tmp_path: Path) -> None:
 
     for name, text in files.items():
         assert text == (EXPECTED / name).read_text(encoding="utf-8"), name
+
+
+def test_the_default_profile_runs_on_its_source_and_falls_back_in_order(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert config["model"] == {"provider": "openai-codex", "default": "gpt-6-sol"}
+    assert config["fallback_providers"] == [
+        {"provider": "openai-api", "model": "gpt-6-luna"},
+        {"provider": "openai-api", "model": "gpt-5.6-terra"},
+    ]
+
+
+def test_a_source_nobody_runs_on_renders_nothing(tmp_path: Path) -> None:
+    text = PERSONS.read_text(encoding="utf-8")
+    without = text[: text.index("  # Nobody runs on it")]
+
+    assert _render(tmp_path, persons=without) == _render(tmp_path)
 
 
 def test_each_surface_sees_only_the_servers_its_use_cases_may_hold(tmp_path: Path) -> None:
@@ -216,14 +245,25 @@ def test_the_settings_are_kept_whole_beside_the_rendered_part(tmp_path: Path) ->
 
     # Comments and all: the settings are copied, never re-serialised.
     assert settings in rendered
-    assert {key: config[key] for key in ("model", "agent")} == yaml.safe_load(settings)
+    assert {"agent": config["agent"]} == yaml.safe_load(settings)
 
 
-@pytest.mark.parametrize("key", ["platform_toolsets", "hooks", "mcp_servers"])
-def test_settings_carrying_a_rendered_key_are_refused(tmp_path: Path, key: str) -> None:
+@pytest.mark.parametrize(
+    ("key", "source"),
+    [
+        ("model", "persons.yaml"),
+        ("fallback_providers", "persons.yaml"),
+        ("platform_toolsets", "use-cases.yaml"),
+        ("hooks", "use-cases.yaml"),
+        ("mcp_servers", "use-cases.yaml"),
+    ],
+)
+def test_settings_carrying_a_rendered_key_are_refused(
+    tmp_path: Path, key: str, source: str
+) -> None:
     settings = SETTINGS.read_text(encoding="utf-8") + f"\n{key}: {{}}\n"
 
-    with pytest.raises(ValueError, match=f"`{key}` is rendered from the use-case file"):
+    with pytest.raises(ValueError, match=f"`{key}` is rendered from {source}"):
         _render(tmp_path, settings=settings)
 
 
@@ -232,11 +272,13 @@ def test_settings_that_are_not_a_mapping_are_refused(tmp_path: Path) -> None:
         _render(tmp_path, settings="- model\n")
 
 
-def _cli(tmp_path: Path, use_cases: Path = USE_CASES) -> int:
+def _cli(tmp_path: Path, use_cases: Path = USE_CASES, persons: Path = PERSONS) -> int:
     return main(
         [
             "--use-cases",
             str(use_cases),
+            "--persons",
+            str(persons),
             "--settings",
             str(SETTINGS),
             "--hermes-config",
@@ -281,4 +323,20 @@ def test_an_invalid_file_fails_with_the_field_named(
     error = capsys.readouterr().err
     assert "use-cases.yaml" in error
     assert "languge" in error
+    assert not any((tmp_path / "out").iterdir())
+
+
+def test_an_invalid_person_declaration_fails_with_the_field_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    broken = tmp_path / "persons.yaml"
+    text = PERSONS.read_text(encoding="utf-8")
+    broken.write_text(text.replace("    account: per-person\n", "    acount: per-person\n"))
+    (tmp_path / "out").mkdir()
+
+    assert _cli(tmp_path, persons=broken) == 1
+
+    error = capsys.readouterr().err
+    assert "persons.yaml" in error
+    assert "acount" in error
     assert not any((tmp_path / "out").iterdir())

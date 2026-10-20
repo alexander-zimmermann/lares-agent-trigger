@@ -1,0 +1,26 @@
+# The default profile on the owner's subscription, falling back to a capped API project.
+default_profile:
+  model: owner-subscription
+
+model_sources:
+  - name: owner-subscription
+    provider: openai-codex
+    model: gpt-6-sol
+    account: shared-with-default
+    bound: subscription
+    fallback:
+      - provider: openai-api
+        model: gpt-6-luna
+        bound: capped
+        price: {input: 0.10, cached_input: 0.01, output: 0.50}
+      - provider: openai-api
+        model: gpt-5.6-terra
+        bound: capped
+        price: {input: 0.25, cached_input: 0.025, output: 2.00}
+
+  # Nobody runs on it: it renders nothing.
+  - name: free-account
+    provider: openai-codex
+    model: gpt-6-luna
+    account: per-person
+    bound: subscription
