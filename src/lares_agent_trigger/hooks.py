@@ -2,17 +2,21 @@
 
 Hermes mirrors its lifecycle hooks as POSTs (`hooks.outbound` in its
 configuration, `agent/outbound_webhooks.py` on the other side of this
-contract). The receiver takes two of them:
+contract). The receiver takes three of them:
 
 - `post_api_request`, once per call to the model inside a turn: the tokens,
   the model and its source, when the call started and ended, how many tools
   it asked for, and what it said.
+- `post_tool_call`, once per tool the model asked for, as the tool returns:
+  its name, its call id, how long it took and how it ended. What it was asked
+  and what it returned come along and are dropped here, unread.
 - `on_session_end`, which despite its name fires once per turn — every chat
   message answered, every cron execution finished — with the turn's outcome.
 
-A turn's calls all arrive before its end, one delivery after the other.
-`session_id` is promoted to the top level of the body; everything else of the
-hook call sits under `extra`.
+A turn's calls and tools all arrive before its end, one delivery after the
+other. `session_id`, a tool's name and its arguments are promoted to the top
+level of the body; everything else of the hook call sits under `extra`, and
+`timestamp` beside it says when the hook fired.
 
 The signature is HMAC-SHA256 over the raw body with the shared secret, sent
 as `X-Hermes-Signature-256: sha256=<hex>`; the body is only parsed once it
@@ -25,11 +29,13 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from .ledger import ToolUse
 
 MODEL_CALL = "post_api_request"
+TOOL_CALL = "post_tool_call"
 TURN_ENDED = "on_session_end"
 
 _SIGNATURE_PREFIX = "sha256="
@@ -37,12 +43,16 @@ _SIGNATURE_PREFIX = "sha256="
 _ARGUMENTS_LIMIT = 300
 # A cron run's task id: `cron:<job id>:<execution id>`.
 _CRON_TASK_PREFIX = "cron"
+# How a tool that returned fine ended.
+_TOOL_OK = "ok"
 
 
 @dataclass(frozen=True, slots=True)
 class ModelCall:
     """One call to the model inside a turn."""
 
+    # Empty for a call the harness made outside a session.
+    session_id: str | None
     turn_id: str
     platform: str
     # The call's number within its turn: what tells a redelivery from the next call.
@@ -61,6 +71,26 @@ class ModelCall:
     content: str | None
     # The tools the reply asked for, in order.
     tools: tuple[ToolUse, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """One tool the model asked for, as it returned: never what it was asked or returned."""
+
+    # Empty for a tool run outside a turn.
+    turn_id: str | None
+    # The model's id for the call; what tells a redelivery from the next tool.
+    call_id: str | None
+    name: str
+    seconds: float
+    # When the tool returned: the hook fires then.
+    ended_at: float
+    # What went wrong in the harness's class (`tool_error`, `blocked`, …); None when nothing did.
+    error_type: str | None
+
+    @property
+    def started_at(self) -> float:
+        return self.ended_at - self.seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +118,8 @@ class TurnEnded:
     completed: bool
     # Why the turn stopped (`text_response(stop)`, `error(…)`, …).
     exit_reason: str | None
+    # When the hook fired, in unix seconds: the turn's end.
+    ended_at: float
 
     @property
     def turn(self) -> str:
@@ -112,8 +144,8 @@ def verify_signature(secret: str, body: bytes, header: str | None) -> bool:
     return hmac.compare_digest(expected, header.removeprefix(_SIGNATURE_PREFIX))
 
 
-def parse_hook(body: bytes) -> ModelCall | TurnEnded:
-    """Parse one verified body; anything that is neither hook is a ``ValueError``."""
+def parse_hook(body: bytes) -> ModelCall | ToolCall | TurnEnded:
+    """Parse one verified body; anything that is none of the hooks is a ``ValueError``."""
     try:
         raw = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -126,13 +158,15 @@ def parse_hook(body: bytes) -> ModelCall | TurnEnded:
 
     event = raw.get("hook_event_name")
     if event == MODEL_CALL:
-        return _model_call(extra)
+        return _model_call(raw, extra)
+    if event == TOOL_CALL:
+        return _tool_call(raw, extra)
     if event == TURN_ENDED:
         return _turn_ended(raw, extra)
-    raise ValueError(f"hook event {event!r} is neither {MODEL_CALL} nor {TURN_ENDED}")
+    raise ValueError(f"hook event {event!r} is none of {MODEL_CALL}, {TOOL_CALL}, {TURN_ENDED}")
 
 
-def _model_call(extra: dict[str, Any]) -> ModelCall:
+def _model_call(raw: dict[str, Any], extra: dict[str, Any]) -> ModelCall:
     # The gateway sends `usage: null` for a response that carried none.
     usage = extra.get("usage")
     if usage is not None and not isinstance(usage, dict):
@@ -142,6 +176,7 @@ def _model_call(extra: dict[str, Any]) -> ModelCall:
     reply = response.get("assistant_message") if isinstance(response, dict) else None
     content = reply.get("content") if isinstance(reply, dict) else None
     return ModelCall(
+        session_id=_optional_text(raw.get("session_id")),
         turn_id=_text(extra, "turn_id"),
         platform=_text(extra, "platform"),
         number=_count(extra, "api_call_count"),
@@ -177,6 +212,21 @@ def _tools(calls: Any) -> tuple[ToolUse, ...]:
     return tuple(tools)
 
 
+def _tool_call(raw: dict[str, Any], extra: dict[str, Any]) -> ToolCall:
+    # `tool_input`, `result` and `error_message` are never read.
+    status = _text(extra, "status")
+    # A tool that returned fine says `ok`; a block names no error type of its own.
+    error_type = None if status == _TOOL_OK else _optional_text(extra.get("error_type")) or status
+    return ToolCall(
+        turn_id=_optional_text(extra.get("turn_id")),
+        call_id=_optional_text(extra.get("tool_call_id")),
+        name=_text(raw, "tool_name"),
+        seconds=_count(extra, "duration_ms") / 1000,
+        ended_at=_fired_at(raw),
+        error_type=error_type,
+    )
+
+
 def _turn_ended(raw: dict[str, Any], extra: dict[str, Any]) -> TurnEnded:
     completed = extra.get("completed")
     if not isinstance(completed, bool):
@@ -190,6 +240,7 @@ def _turn_ended(raw: dict[str, Any], extra: dict[str, Any]) -> TurnEnded:
         model=_optional_text(extra.get("model")),
         completed=completed,
         exit_reason=_optional_text(extra.get("turn_exit_reason")),
+        ended_at=_fired_at(raw),
     )
 
 
@@ -213,6 +264,18 @@ def _seconds(source: dict[str, Any], field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(f"hook body misses `{field}`")
     return float(value)
+
+
+def _fired_at(raw: dict[str, Any]) -> float:
+    """The delivery's `timestamp`, ISO 8601 in UTC, as unix seconds."""
+    value = _text(raw, "timestamp")
+    try:
+        fired = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"hook body carries a `timestamp` that is no time: {value!r}") from exc
+    if fired.tzinfo is None:
+        raise ValueError(f"hook body carries a `timestamp` without a zone: {value!r}")
+    return fired.timestamp()
 
 
 def _optional_text(value: Any) -> str | None:

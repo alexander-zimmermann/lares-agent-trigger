@@ -4,11 +4,11 @@ The trigger's own API (`api.py`) shares the app and the port.
 
 The answer is what the gateway acts on. It sends a delivery at most twice,
 once more only after a connection error or a 5xx, so every answer here is
-chosen for that: 2xx for a delivery that is done with — a call counted, a row
-written, either one already held, a turn that is not ours; 4xx for one that
-can never succeed — a bad signature, a body that is neither hook; 503 for one
-that might on the second try, because the ledger or the Jobs API did not
-answer.
+chosen for that: 2xx for a delivery that is done with — a call or a tool
+counted, a row written, either one already held, a turn that is not ours; 4xx
+for one that can never succeed — a bad signature, a body that is none of the
+hooks; 503 for one that might on the second try, because the ledger or the
+Jobs API did not answer.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def create_app(turns: TurnRuns, secret: str, api: TriggerApi, metrics: Metrics) 
         try:
             hook = parse_hook(body)
         except ValueError as exc:
-            logger.warning("refused a hook delivery that is neither hook: %s", exc)
+            logger.warning("refused a hook delivery that is none of the hooks: %s", exc)
             return _answer(metrics, "invalid", 400)
         try:
             outcome = await turns.handle(hook)

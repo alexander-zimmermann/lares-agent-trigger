@@ -4,7 +4,9 @@ The consumer itself is a CRD in lares, not created here: the service binds to
 `agent-trigger` and fails loudly when it is absent, so a missing right or a
 misspelt name is a startup error rather than a silently empty queue.
 
-One message at a time, acknowledged after the row is closed. A run may take
+One message at a time, acknowledged after the row is closed. Each message
+is handled inside a span that continues the trace its headers carry: the
+engine's run that published the event. A run may take
 its whole budget twice, with the retry delay in between, so the consumer's
 ackWait must be longer than two of the longest budget declared plus that
 delay; the CRD in lares carries that number.
@@ -18,11 +20,13 @@ import nats
 from nats.aio.client import Client as NatsClient
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
+from nats_bridge_core import tracing
 
 from .config import Settings
 from .event_runs import EventRuns
 from .events import parse_episode_event
 from .metrics import Metrics
+from .spans import failed
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +84,15 @@ class EpisodeConsumer:
             return 0
 
         for message in messages:
-            try:
-                event = parse_episode_event(message.data)
-            except ValueError:
-                logger.exception("dropping a message that is not an episode event")
-                self._metrics.events.labels(kind="unknown", outcome="invalid").inc()
+            with tracing.consumer_span(message) as span:
+                try:
+                    event = parse_episode_event(message.data)
+                except ValueError:
+                    logger.exception("dropping a message that is not an episode event")
+                    self._metrics.events.labels(kind="unknown", outcome="invalid").inc()
+                    failed(span, "invalid_event")
+                    await message.ack()
+                    continue
+                await self._runs.handle(event)
                 await message.ack()
-                continue
-            await self._runs.handle(event)
-            await message.ack()
         return len(messages)

@@ -62,7 +62,7 @@ class Metrics:
         self.hook_events = Counter(
             "agent_trigger_hook_events_total",
             "Deliveries of the harness's hook, by what the receiver made of them.",
-            # counted | recorded | traced | duplicate | ignored | refused | invalid | error
+            # counted | recorded | handed_over | duplicate | ignored | refused | invalid | error
             ["outcome"],
             registry=self.registry,
         )
