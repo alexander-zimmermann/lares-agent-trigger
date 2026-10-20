@@ -73,6 +73,27 @@ class Metrics:
             "Model calls whose turn never reported its end within an hour.",
             registry=self.registry,
         )
+        # What the model calls of every run cost, by the declared source step
+        # that served them, and the calls without a cost.
+        self.cost = Counter(
+            "agent_trigger_cost_usd_total",
+            "Model spend in USD from the declared prices, by use case, model source and step.",
+            ["use_case", "source", "step"],  # primary | fallback
+            registry=self.registry,
+        )
+        self.unpriced_calls = Counter(
+            "agent_trigger_unpriced_calls_total",
+            "Model calls without a cost, by use case, who served them and why; "
+            "their row's cost stays NULL.",
+            ["use_case", "provider", "model", "reason"],  # undeclared | no_usage | no_calls
+            registry=self.registry,
+        )
+        self.answers = Counter(
+            "agent_trigger_answers_total",
+            "Answered runs, by use case, model source and the step of it that gave the answer.",
+            ["use_case", "source", "step"],  # primary | fallback | undeclared
+            registry=self.registry,
+        )
         self.recorded_runs = Counter(
             "agent_trigger_recorded_runs_total",
             "Chat and cron runs the harness ran on its own, by use case and row status.",

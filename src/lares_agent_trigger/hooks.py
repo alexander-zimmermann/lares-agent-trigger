@@ -59,9 +59,10 @@ class ModelCall:
     number: int
     model: str | None
     model_source: str | None
-    # What the model read, cached or not, and what it wrote; None when the
-    # provider reported no usage for the call.
+    # What the model read, cached or not, how much of it came from the cache,
+    # and what it wrote; None when the provider reported no usage for the call.
     tokens_in: int | None
+    tokens_cached: int | None
     tokens_out: int | None
     tool_calls: int
     started_at: float
@@ -104,6 +105,8 @@ class CronRun:
 class TurnEnded:
     """One finished turn of the harness: a chat message answered or a cron execution run."""
 
+    # The harness profile the turn ran in: `default` for the machines'.
+    profile: str
     session_id: str
     # The harness's own name for the turn: `<session>:<task>:<random>`.
     turn_id: str
@@ -180,6 +183,7 @@ def _model_call(raw: dict[str, Any], extra: dict[str, Any]) -> ModelCall:
         model=_optional_text(extra.get("model")),
         model_source=_optional_text(extra.get("provider")),
         tokens_in=_count(usage, "prompt_tokens") if usage is not None else None,
+        tokens_cached=_count(usage, "cache_read_tokens") if usage is not None else None,
         tokens_out=_count(usage, "output_tokens") if usage is not None else None,
         tool_calls=_count(extra, "assistant_tool_call_count"),
         started_at=_seconds(extra, "started_at"),
@@ -228,6 +232,7 @@ def _turn_ended(raw: dict[str, Any], extra: dict[str, Any]) -> TurnEnded:
     if not isinstance(completed, bool):
         raise ValueError("hook body misses `extra.completed`")
     return TurnEnded(
+        profile=_text(raw, "profile"),
         session_id=_text(raw, "session_id"),
         turn_id=_text(extra, "turn_id"),
         task_id=_text(extra, "task_id"),

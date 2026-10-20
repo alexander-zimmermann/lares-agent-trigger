@@ -28,8 +28,10 @@ from .deliveries import RunOutput
 from .events import EpisodeEvent, EpisodeRequest, Occasion
 from .failures import TRANSIENT, FailureClass, classify_error, classify_exception, describe
 from .hermes import HermesClient, HermesError, RunOutcome, instructions_for
-from .ledger import Ledger, TriggerKind, Usage
+from .ledger import CallTrace, Ledger, TriggerKind, Usage
 from .metrics import Metrics
+from .persons import DEFAULT_PROFILE
+from .pricing import Pricing
 from .spans import TRACER, TURN_FAILED, TurnTrace, current_trace_id, failed
 from .turn_runs import ReportedTurn
 from .use_cases import UseCase
@@ -72,6 +74,7 @@ class EventRuns:
     ledger: Ledger
     hermes: HermesClient
     closer: Closer
+    pricing: Pricing
     metrics: Metrics
     retry_delay_seconds: float
     turns: ReportedTurns
@@ -230,6 +233,11 @@ class EventRuns:
                 if attempt == _ATTEMPTS or failure.failure_class not in TRANSIENT:
                     await self._report(use_case, occasion, run_id, attempt, failure)
                     return
+                # The row keeps the last attempt; what this one spent is counted here.
+                if failure.usage is not None:
+                    self.pricing.count(
+                        use_case.name, DEFAULT_PROFILE, failure.usage, answered=False
+                    )
                 logger.warning(
                     "%s %s attempt %d failed (%s), retrying in %.0f s: %s",
                     use_case.name,
@@ -289,25 +297,29 @@ class EventRuns:
         return None
 
     async def _with_turn(self, use_case: UseCase, run_id: int, outcome: RunOutcome) -> RunOutcome:
-        """The outcome with the model calls its turn reported through the hook, if they came.
+        """The outcome with the model calls its turn reported through the hook, priced.
 
-        The turn becomes the span of the run's model and tools, under the attempt.
+        The trigger starts every run on the gateway's own API server, so it
+        runs on the default profile. Without its calls a run has no cost. The
+        turn becomes the span of the run's model and tools, under the attempt.
         """
-        if outcome.session_id is None:
-            return outcome
-        turn = await self.turns.turn_of(outcome.session_id, wait_seconds=self.turn_wait_seconds)
-        if turn is None:
-            return outcome
-        TurnTrace(
-            use_case.name, conversation_id=outcome.session_id, started_at=turn.started_at
-        ).finish(
-            run_id=run_id,
-            ended_at=turn.ended_at,
-            calls=turn.calls,
-            tools=turn.tools,
-            error_type=None if turn.completed else TURN_FAILED,
-        )
-        return replace(outcome, usage=replace(outcome.usage, calls=turn.call_traces))
+        calls: tuple[CallTrace, ...] = ()
+        turn = None
+        if outcome.session_id is not None:
+            turn = await self.turns.turn_of(outcome.session_id, wait_seconds=self.turn_wait_seconds)
+        if turn is not None:
+            TurnTrace(
+                use_case.name, conversation_id=outcome.session_id, started_at=turn.started_at
+            ).finish(
+                run_id=run_id,
+                ended_at=turn.ended_at,
+                calls=turn.calls,
+                tools=turn.tools,
+                error_type=None if turn.completed else TURN_FAILED,
+            )
+            calls = turn.call_traces
+        usage = self.pricing.price(DEFAULT_PROFILE, replace(outcome.usage, calls=calls))
+        return replace(outcome, usage=usage)
 
     async def _deliver(
         self, use_case: UseCase, occasion: Occasion, run_id: int, text: str, usage: Usage
@@ -326,7 +338,7 @@ class EventRuns:
             if status == "failed":
                 failed(span, "delivery_failed")
         logger.info("%s %s: run %d %s", use_case.name, occasion.subject_key, run_id, status)
-        self._count(use_case, status, usage)
+        self._count(use_case, status, usage, answered=True)
 
     async def _report(
         self,
@@ -358,11 +370,16 @@ class EventRuns:
             ),
             error=failure.error,
         )
-        self._count(use_case, "failed", failure.usage)
+        self._count(use_case, "failed", failure.usage, answered=False)
 
-    def _count(self, use_case: UseCase, status: str, usage: Usage | None) -> None:
+    def _count(
+        self, use_case: UseCase, status: str, usage: Usage | None, *, answered: bool
+    ) -> None:
         self.metrics.runs.labels(use_case=use_case.name, status=status).inc()
-        if usage is not None and usage.duration_seconds is not None:
+        if usage is None:
+            return
+        self.pricing.count(use_case.name, DEFAULT_PROFILE, usage, answered=answered)
+        if usage.duration_seconds is not None:
             self.metrics.run_duration.labels(use_case=use_case.name).observe(usage.duration_seconds)
 
 

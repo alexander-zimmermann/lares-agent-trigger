@@ -23,9 +23,10 @@ import pytest
 import yaml
 
 from lares_agent_trigger.generate import render
+from lares_agent_trigger.persons import load_persons_file
 from lares_agent_trigger.use_cases import load_use_case_file
 
-from .test_generate import SETTINGS, USE_CASES
+from .test_generate import PERSONS, SETTINGS, USE_CASES
 
 # The server lares deploys; Renovate bumps it.
 GITHUB_SERVER_IMAGE = "ghcr.io/github/github-mcp-server:v1.14.0"
@@ -55,7 +56,11 @@ def server_dir(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
 
 @pytest.fixture
 def entry() -> dict[str, Any]:
-    rendered = render(load_use_case_file(USE_CASES), SETTINGS.read_text(encoding="utf-8"))
+    rendered = render(
+        load_use_case_file(USE_CASES),
+        load_persons_file(PERSONS),
+        SETTINGS.read_text(encoding="utf-8"),
+    )
     config: dict[str, Any] = yaml.safe_load(rendered.hermes_config)
     github: dict[str, Any] = config["mcp_servers"]["github"]
     return github

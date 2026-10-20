@@ -53,13 +53,20 @@ class ToolUse:
 
 @dataclass(frozen=True)
 class CallTrace:
-    """One call to the model inside a run: what it read, wrote, took and asked for."""
+    """One call to the model inside a run: what it read, wrote, took, asked for and cost."""
 
     number: int
+    # What the model read, cache reads included, and what it wrote.
     tokens_in: int | None
     tokens_out: int | None
     seconds: float
     tools: tuple[ToolUse, ...]
+    # Who served the call, and how much of what it read came from the cache.
+    model_source: str | None
+    model: str | None
+    tokens_cached: int | None
+    # From the declared price of the step that served it; None when it has none.
+    cost: Decimal | None = None
 
 
 @dataclass(frozen=True)
