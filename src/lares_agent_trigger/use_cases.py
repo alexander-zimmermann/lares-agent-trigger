@@ -3,9 +3,10 @@
 The file lives in lares and is mounted here; the generator renders the harness
 configuration from the same models, which is why schema and loader sit in this
 package rather than in the generator alone. Beside the use cases it declares
-the tool servers they may name and where the harness reports every finished
-turn. A file that does not validate is refused at startup — a half-read
-catalogue would start runs nobody declared.
+the tool servers they may name, where the harness reports every finished
+turn, and the share of traces every service of the platform keeps. A file
+that does not validate is refused at startup — a half-read catalogue would
+start runs nobody declared.
 """
 
 from __future__ import annotations
@@ -277,8 +278,20 @@ class LedgerHook(_Strict):
     secret_env: str = Field(min_length=1)
 
 
+class Tracing(_Strict):
+    """How every service of the agent platform traces: one ratio for the whole platform.
+
+    A new trace is kept at this share, decided by its id, so the trigger, the
+    bridge and the engine keep the same traces; a trace that came in keeps the
+    caller's decision.
+    """
+
+    sampling_ratio: float = Field(ge=0.0, le=1.0)
+
+
 class _File(_Strict):
     ledger_hook: LedgerHook
+    tracing: Tracing
     tool_servers: list[_DeclaredServer] = Field(min_length=1)
     use_cases: list[UseCase] = Field(min_length=1)
 
@@ -290,6 +303,7 @@ class UseCaseFile:
     use_cases: dict[str, UseCase]
     tool_servers: dict[str, ToolServer]
     ledger_hook: LedgerHook
+    tracing: Tracing
 
 
 def chat_use_case(use_cases: Mapping[str, UseCase]) -> UseCase | None:
@@ -360,7 +374,12 @@ def load_use_case_file(path: Path) -> UseCaseFile:
     if len(chats) > 1:
         raise ValueError(f"{path}: only one enabled message use case, not {', '.join(chats)}")
     _check_shared_memory(path, by_name, servers)
-    return UseCaseFile(use_cases=by_name, tool_servers=servers, ledger_hook=parsed.ledger_hook)
+    return UseCaseFile(
+        use_cases=by_name,
+        tool_servers=servers,
+        ledger_hook=parsed.ledger_hook,
+        tracing=parsed.tracing,
+    )
 
 
 def _check_one_server_per_tool(path: Path, servers: Mapping[str, ToolServer]) -> None:

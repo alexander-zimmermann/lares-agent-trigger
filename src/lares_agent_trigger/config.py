@@ -102,7 +102,7 @@ class Settings(NatsSettings):
     hook_secret_file: Path | None = None
     # How long an event run waits, once over, for its model calls to arrive
     # through the hook before it is recorded without them.
-    trace_wait_seconds: float = 5.0
+    turn_wait_seconds: float = 5.0
     # The key the trigger's own API takes on the same port: the bridge holds
     # it too and forwards its start_run tool with it.
     api_key: str = Field(default="", repr=False)

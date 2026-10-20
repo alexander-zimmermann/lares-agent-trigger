@@ -1,6 +1,6 @@
 """The generator: the use-case file rendered into what the harness and the bridge read.
 
-Pure: the declaration and the hand-written harness settings in, three texts out.
+Pure: the declaration and the hand-written harness settings in, four texts out.
 
 - The harness configuration: the settings copied whole, comments and all, then
   the part this module owns — what each surface may hold, the tool server
@@ -9,6 +9,8 @@ Pure: the declaration and the hand-written harness settings in, three texts out.
   read-only GitHub App and started with `--read-only`.
 - The cron job set: one managed job per enabled schedule use case.
 - The bridge's allowlists: one entry per machine client of a server in use.
+- The sampling ratio, one variable every service of the platform reads: the
+  trigger, the bridge and the engine's CronJobs.
 
 A dormant use case renders nothing, and neither does a tool server only dormant
 use cases name. Every file is written whole and opens with the generated line;
@@ -40,7 +42,7 @@ import yaml
 
 from .cron_jobs import CronJob, dump_cron_jobs, job_name
 from .hermes import language_name
-from .hooks import MODEL_CALL, TURN_ENDED
+from .hooks import MODEL_CALL, TOOL_CALL, TURN_ENDED
 from .receiver import HOOK_PATH
 from .use_cases import (
     BridgeServer,
@@ -60,6 +62,8 @@ RENDERED_KEYS = ("platform_toolsets", "hooks", "mcp_servers")
 
 # The bridge reads its allowlists from this variable, as JSON.
 CLIENT_TOOLS_VARIABLE = "MCP_AUTH_CLIENT_TOOLS"
+# The ratio the services trace at; the trigger reads it under this name.
+SAMPLING_RATIO_VARIABLE = "TRACING_SAMPLING_RATIO"
 
 _HOOK_NAME = "lares-agent-trigger"
 _HOOK_TIMEOUT_SECONDS = 10
@@ -68,11 +72,12 @@ _NO_TOOL_SERVER = "no_mcp"
 
 @dataclass(frozen=True)
 class Rendering:
-    """The three rendered files, as text."""
+    """The four rendered files, as text."""
 
     hermes_config: str
     cron_jobs: str
     client_tools: str
+    tracing: str
 
 
 class _Dumper(yaml.SafeDumper):
@@ -122,7 +127,14 @@ def render(declared: UseCaseFile, settings: str) -> Rendering:
         "# The tools each machine client of the bridge may see and call.\n"
         f"{CLIENT_TOOLS_VARIABLE}={json.dumps(allowlists, ensure_ascii=False)}\n"
     )
-    return Rendering(hermes_config=hermes_config, cron_jobs=cron_jobs, client_tools=client_tools)
+    tracing = (
+        f"{GENERATED_LINE}\n"
+        "# The share of new traces every service of the agent platform keeps.\n"
+        f"{SAMPLING_RATIO_VARIABLE}={declared.tracing.sampling_ratio!r}\n"
+    )
+    return Rendering(
+        hermes_config=hermes_config, cron_jobs=cron_jobs, client_tools=client_tools, tracing=tracing
+    )
 
 
 def _check_settings(settings: str) -> None:
@@ -181,7 +193,7 @@ def _hooks(declared: UseCaseFile) -> dict[str, Any]:
             {
                 "name": _HOOK_NAME,
                 "url": f"{hook.trigger_url.rstrip('/')}{HOOK_PATH}",
-                "events": [MODEL_CALL, TURN_ENDED],
+                "events": [MODEL_CALL, TOOL_CALL, TURN_ENDED],
                 "secret_env": hook.secret_env,
                 "timeout": _HOOK_TIMEOUT_SECONDS,
             }
@@ -248,17 +260,18 @@ def _cron_job(use_case: UseCase) -> CronJob:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """`lares-agent-trigger generate`: render the declaration and write the three files."""
+    """`lares-agent-trigger generate`: render the declaration and write the four files."""
     parser = argparse.ArgumentParser(
         prog="lares-agent-trigger generate",
         description="Render the use-case file into the harness configuration, "
-        "the cron job set and the bridge's allowlists.",
+        "the cron job set, the bridge's allowlists and the sampling ratio.",
     )
     parser.add_argument("--use-cases", type=Path, required=True)
     parser.add_argument("--settings", type=Path, required=True)
     parser.add_argument("--hermes-config", type=Path, required=True)
     parser.add_argument("--cron-jobs", type=Path, required=True)
     parser.add_argument("--client-tools", type=Path, required=True)
+    parser.add_argument("--tracing", type=Path, required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -279,6 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         (args.hermes_config, rendered.hermes_config),
         (args.cron_jobs, rendered.cron_jobs),
         (args.client_tools, rendered.client_tools),
+        (args.tracing, rendered.tracing),
     ):
         try:
             path.write_text(text, encoding="utf-8")

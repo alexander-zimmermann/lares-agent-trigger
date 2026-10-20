@@ -19,6 +19,10 @@ provider are, the top-level `model` being the gateway's own name. Its
 run's real duration. Cost and the tool count live on the session record
 (`/api/sessions/{id}`), whose payload sits under a `session` key.
 
+Every request to the gateway is a span of the trace it is made in, and the
+polling of a run is one `await_run` span around them. A request outside every
+trace — asking whose job a cron turn was, reconciling the jobs — is none.
+
 A cron job's id is minted by the gateway, so what the job runs is read off its
 name through the Jobs API (`/api/jobs/{id}`, wrapped under `job`). The same API
 creates, updates, deletes and runs the managed jobs: a create takes the name,
@@ -31,16 +35,22 @@ expression under `expr`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
 
 import httpx
+from opentelemetry import trace
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.utils import suppress_http_instrumentation
 
 from .config import Settings
 from .cron_jobs import CronJob
 from .ledger import ClosedStatus, Usage
+from .spans import TRACER, failed
 
 # What the harness reports while a run is still going; anything else is final.
 _PENDING = ("queued", "running", "in_progress")
@@ -119,6 +129,7 @@ class HermesClient:
             headers={"Authorization": f"Bearer {settings.hermes_api_key}"},
             timeout=settings.hermes_request_timeout_seconds,
         )
+        HTTPXClientInstrumentor.instrument_client(self._client)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -144,7 +155,8 @@ class HermesClient:
         }
         if model is not None:
             body["model"] = model
-        response = await self._client.post(
+        response = await self._request(
+            "POST",
             "/v1/runs",
             json=body,
             headers={"Idempotency-Key": idempotency_key},
@@ -161,6 +173,13 @@ class HermesClient:
 
     async def await_run(self, harness_run_id: str, *, deadline_seconds: float) -> RunOutcome:
         """Poll the run until it is terminal, or until its budget of minutes is spent."""
+        with TRACER.start_as_current_span("await_run") as span:
+            outcome = await self._poll(harness_run_id, deadline_seconds)
+            if outcome.status == "failed":
+                failed(span, "run_failed")
+            return outcome
+
+    async def _poll(self, harness_run_id: str, deadline_seconds: float) -> RunOutcome:
         loop = asyncio.get_running_loop()
         started = loop.time()
         give_up_at = started + deadline_seconds
@@ -196,7 +215,7 @@ class HermesClient:
         if not session_id:
             return usage
         try:
-            response = await self._client.get(f"/api/sessions/{session_id}")
+            response = await self._request("GET", f"/api/sessions/{session_id}")
             payload = response.json() if response.status_code < 400 else {}
         except httpx.HTTPError, ValueError:
             return usage
@@ -266,7 +285,7 @@ class HermesClient:
 
     async def _send(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         """One request to the API server; a refusal or a body that is no object raises."""
-        response = await self._client.request(method, path, **kwargs)
+        response = await self._request(method, path, **kwargs)
         if response.status_code >= 400:
             raise HermesError(
                 f"{method} {path} returned {response.status_code}: {response.text}",
@@ -277,8 +296,22 @@ class HermesClient:
             raise HermesError(f"{method} {path} returned {type(payload).__name__}")
         return payload
 
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        with _inside_a_trace_only():
+            return await self._client.request(method, path, **kwargs)
+
     async def _get_run(self, harness_run_id: str) -> dict[str, Any]:
         return await self._send("GET", f"/v1/runs/{harness_run_id}")
+
+
+@contextlib.contextmanager
+def _inside_a_trace_only() -> Iterator[None]:
+    """No span for a request made outside every trace: it would be a trace of its own."""
+    if trace.get_current_span().get_span_context().is_valid:
+        yield
+        return
+    with suppress_http_instrumentation():
+        yield
 
 
 def _harness_job(record: Any, request: str) -> HarnessJob:

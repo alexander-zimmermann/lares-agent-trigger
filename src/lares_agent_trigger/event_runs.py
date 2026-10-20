@@ -28,8 +28,10 @@ from .deliveries import RunOutput
 from .events import EpisodeEvent, EpisodeRequest, Occasion
 from .failures import TRANSIENT, FailureClass, classify_error, classify_exception, describe
 from .hermes import HermesClient, HermesError, RunOutcome, instructions_for
-from .ledger import CallTrace, Ledger, TriggerKind, Usage
+from .ledger import Ledger, TriggerKind, Usage
 from .metrics import Metrics
+from .spans import TRACER, TURN_FAILED, TurnTrace, current_trace_id, failed
+from .turn_runs import ReportedTurn
 from .use_cases import UseCase
 
 logger = logging.getLogger(__name__)
@@ -56,10 +58,10 @@ class Requested:
     status: Literal["queued", "capped", "running", "duplicate"]
 
 
-class CallTraces(Protocol):
-    """Where the model calls of a run come from: the hook, by the run's session."""
+class ReportedTurns(Protocol):
+    """Where the turn of a run comes from: the hook, by the run's session."""
 
-    async def calls_of(self, session_id: str, *, wait_seconds: float) -> tuple[CallTrace, ...]: ...
+    async def turn_of(self, session_id: str, *, wait_seconds: float) -> ReportedTurn | None: ...
 
 
 @dataclass(frozen=True)
@@ -72,8 +74,8 @@ class EventRuns:
     closer: Closer
     metrics: Metrics
     retry_delay_seconds: float
-    traces: CallTraces
-    trace_wait_seconds: float
+    turns: ReportedTurns
+    turn_wait_seconds: float
     # The requested runs still going, held so they are neither collected nor lost.
     _requested: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     # One request claims at a time, so two at once cannot both find nothing open.
@@ -172,6 +174,7 @@ class EventRuns:
             subject_kind="episode",
             subject_key=occasion.subject_key,
             language=use_case.language,
+            trace_id=current_trace_id(),
         )
 
     async def _capped(self, use_case: UseCase, run_id: int) -> bool:
@@ -210,11 +213,23 @@ class EventRuns:
             # The gateway replays the run it already holds for a key, failed or
             # not, so a retry needs a key of its own.
             idempotency_key = key if attempt == 1 else f"{key}/{attempt}"
-            failure = await self._attempt(use_case, occasion, run_id, idempotency_key)
-            if failure is None:
-                return
-            self.metrics.failures.labels(use_case.name, failure.failure_class).inc()
-            if attempt < _ATTEMPTS and failure.failure_class in TRANSIENT:
+            # The attempt holds everything it writes and says, the wait for the next one not.
+            with TRACER.start_as_current_span(
+                f"run {use_case.name}",
+                attributes={
+                    "gen_ai.agent.name": use_case.name,
+                    "lares.run.id": run_id,
+                    "lares.run.attempt": attempt,
+                },
+            ) as span:
+                failure = await self._attempt(use_case, occasion, run_id, idempotency_key)
+                if failure is None:
+                    return
+                failed(span, failure.failure_class)
+                self.metrics.failures.labels(use_case.name, failure.failure_class).inc()
+                if attempt == _ATTEMPTS or failure.failure_class not in TRANSIENT:
+                    await self._report(use_case, occasion, run_id, attempt, failure)
+                    return
                 logger.warning(
                     "%s %s attempt %d failed (%s), retrying in %.0f s: %s",
                     use_case.name,
@@ -225,10 +240,7 @@ class EventRuns:
                     failure.error,
                 )
                 await self.ledger.mark_retrying(run_id, attempt=attempt + 1, error=failure.error)
-                await asyncio.sleep(self.retry_delay_seconds)
-                continue
-            await self._report(use_case, occasion, run_id, attempt, failure)
-            return
+            await asyncio.sleep(self.retry_delay_seconds)
 
     async def _attempt(
         self, use_case: UseCase, occasion: Occasion, run_id: int, idempotency_key: str
@@ -261,7 +273,7 @@ class EventRuns:
             )
         except (HermesError, httpx.HTTPError, OSError) as exc:
             return _Failure(classify_exception(exc), describe(exc))
-        outcome = await self._with_calls(outcome)
+        outcome = await self._with_turn(use_case, run_id, outcome)
 
         if outcome.status == "failed":
             error = outcome.error or "the harness failed the run without a reason"
@@ -276,24 +288,44 @@ class EventRuns:
         await self._deliver(use_case, occasion, run_id, outcome.output, outcome.usage)
         return None
 
-    async def _with_calls(self, outcome: RunOutcome) -> RunOutcome:
-        """The outcome with the model calls its turn reported through the hook, if they came."""
+    async def _with_turn(self, use_case: UseCase, run_id: int, outcome: RunOutcome) -> RunOutcome:
+        """The outcome with the model calls its turn reported through the hook, if they came.
+
+        The turn becomes the span of the run's model and tools, under the attempt.
+        """
         if outcome.session_id is None:
             return outcome
-        calls = await self.traces.calls_of(outcome.session_id, wait_seconds=self.trace_wait_seconds)
-        return replace(outcome, usage=replace(outcome.usage, calls=calls))
+        turn = await self.turns.turn_of(outcome.session_id, wait_seconds=self.turn_wait_seconds)
+        if turn is None:
+            return outcome
+        TurnTrace(
+            use_case.name, conversation_id=outcome.session_id, started_at=turn.started_at
+        ).finish(
+            run_id=run_id,
+            ended_at=turn.ended_at,
+            calls=turn.calls,
+            tools=turn.tools,
+            error_type=None if turn.completed else TURN_FAILED,
+        )
+        return replace(outcome, usage=replace(outcome.usage, calls=turn.call_traces))
 
     async def _deliver(
         self, use_case: UseCase, occasion: Occasion, run_id: int, text: str, usage: Usage
     ) -> None:
         """Carry the stored text to every declared target and close the row with what they made."""
-        status, _ = await self.closer.deliver(
-            use_case,
-            RunOutput(
-                run_id=run_id, use_case=use_case.name, occasion=occasion, text=text, usage=usage
-            ),
-            what=f"episode {occasion.subject_key}",
-        )
+        with TRACER.start_as_current_span(
+            f"deliver {use_case.name}", attributes={"lares.output": list(use_case.output)}
+        ) as span:
+            status, _ = await self.closer.deliver(
+                use_case,
+                RunOutput(
+                    run_id=run_id, use_case=use_case.name, occasion=occasion, text=text, usage=usage
+                ),
+                what=f"episode {occasion.subject_key}",
+            )
+            if status == "failed":
+                failed(span, "delivery_failed")
+        logger.info("%s %s: run %d %s", use_case.name, occasion.subject_key, run_id, status)
         self._count(use_case, status, usage)
 
     async def _report(

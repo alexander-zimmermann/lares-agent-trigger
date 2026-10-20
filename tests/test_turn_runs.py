@@ -33,6 +33,7 @@ from .fakes import (
     sample,
     sign,
     start_response,
+    tool_call,
     turn_ended,
 )
 
@@ -50,7 +51,7 @@ pytestmark = pytest.mark.respx(assert_all_called=False)
 @pytest.fixture
 def settings(settings: Settings) -> Settings:
     """Wait long enough for a hook delivery that is still on its way."""
-    return settings.model_copy(update={"trace_wait_seconds": 1.0})
+    return settings.model_copy(update={"turn_wait_seconds": 1.0})
 
 
 async def _deliver(client: httpx.AsyncClient, *bodies: bytes) -> list[int]:
@@ -284,17 +285,19 @@ async def test_a_body_that_is_neither_hook_is_refused(receiver: Receiver, rows: 
     # 4xx is final for the gateway: a body it cannot fix is never sent twice.
     statuses = await _deliver(
         client,
-        turn_ended(event="post_tool_call"),
+        turn_ended(event="pre_tool_call"),
         b"not json",
         turn_ended().replace(b'"turn_id"', b'"turn"'),
         turn_ended().replace(b'"platform"', b'"surface"'),
+        turn_ended().replace(b'"timestamp": "2026-09-30T08:15:12Z"', b'"timestamp": "today"'),
         model_call(1).replace(b'"api_call_count"', b'"calls"'),
         model_call(1, tool_calls=1).replace(b'"name": "list_episodes"', b'"tool": "x"'),
+        tool_call("call_1_0").replace(b'"duration_ms"', b'"duration"'),
     )
 
-    assert statuses == [400, 400, 400, 400, 400, 400]
+    assert statuses == [400] * 8
     assert rows() == []
-    assert _hook_events(metrics, "invalid") == 6.0
+    assert _hook_events(metrics, "invalid") == 8.0
 
 
 async def test_a_run_of_the_api_server_is_left_to_the_event_path(
@@ -309,7 +312,7 @@ async def test_a_run_of_the_api_server_is_left_to_the_event_path(
     assert statuses == [200, 200]
     assert rows() == []
     assert _hook_events(metrics, "counted") == 1.0
-    assert _hook_events(metrics, "traced") == 1.0
+    assert _hook_events(metrics, "handed_over") == 1.0
 
 
 async def test_a_cron_run_of_a_managed_job_is_a_row_of_its_use_case(
@@ -436,7 +439,7 @@ async def test_an_event_run_carries_the_calls_its_api_turn_reported(
     assert row["tool_trace"]["tool_count"] == 7
     assert [call["call"] for call in row["tool_trace"]["calls"]] == [1, 2, 3]
     assert [len(call["tools"]) for call in row["tool_trace"]["calls"]] == [4, 3, 0]
-    assert _hook_events(metrics, "traced") == 1.0
+    assert _hook_events(metrics, "handed_over") == 1.0
 
 
 async def test_an_event_run_whose_calls_never_came_is_recorded_without_them(

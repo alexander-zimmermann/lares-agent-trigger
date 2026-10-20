@@ -36,6 +36,10 @@ case's memory, if it declares one, cut to its bound (`memory.py`).
 
 Every refusal is `{"error": "<reason>"}` with a 4xx; 503 when the ledger or the
 harness did not answer, which the caller may try again.
+
+Each request is a server span that continues the caller's `traceparent`, so
+a run the bridge asks for is part of the trace of the person's tool call; the
+run goes on in that trace after the answer.
 """
 
 from __future__ import annotations
@@ -48,6 +52,8 @@ from typing import Any
 
 import httpx
 import psycopg
+from opentelemetry import propagate
+from opentelemetry.trace import SpanKind
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -61,6 +67,7 @@ from .ledger import Ledger, Usage
 from .memory import LIMIT_BYTES
 from .metrics import Metrics
 from .schedules import FocusRefusedError, MissingJobError, PausedJobError, Schedules
+from .spans import TRACER, current_trace_id, failed
 from .use_cases import UseCase
 
 logger = logging.getLogger(__name__)
@@ -114,17 +121,27 @@ class TriggerApi:
         self, route: str, handle: Callable[[dict[str, Any]], Awaitable[_Answer]]
     ) -> Callable[[Request], Awaitable[JSONResponse]]:
         async def endpoint(request: Request) -> JSONResponse:
-            try:
-                self._authorise(request)
-                status_code, body = await handle(await _object(request))
-            except _RefusedError as refused:
-                status_code, body = refused.status_code, refused.body
-            except (HermesError, httpx.HTTPError, psycopg.Error, OSError) as exc:
-                logger.exception("could not answer a request on %s", request.url.path)
-                status_code, body = (
-                    503,
-                    {"error": f"the ledger or the harness did not answer: {exc}"},
-                )
+            path = request.url.path
+            with TRACER.start_as_current_span(
+                f"POST {path}",
+                context=propagate.extract(request.headers),
+                kind=SpanKind.SERVER,
+                attributes={"http.request.method": "POST", "http.route": path},
+            ) as span:
+                try:
+                    self._authorise(request)
+                    status_code, body = await handle(await _object(request))
+                except _RefusedError as refused:
+                    status_code, body = refused.status_code, refused.body
+                except (HermesError, httpx.HTTPError, psycopg.Error, OSError) as exc:
+                    logger.exception("could not answer a request on %s", path)
+                    status_code, body = (
+                        503,
+                        {"error": f"the ledger or the harness did not answer: {exc}"},
+                    )
+                    # A server error's class is its status code.
+                    failed(span, str(status_code))
+                span.set_attribute("http.response.status_code", status_code)
             self._metrics.api_requests.labels(route=route, code=str(status_code)).inc()
             return JSONResponse(body, status_code=status_code)
 
@@ -251,6 +268,7 @@ class TriggerApi:
             text=output,
             error=None,
             usage=Usage(),
+            trace_id=current_trace_id(),
         )
         if run_id is None:
             raise _RefusedError(409, f"a hand-fed run of {use_case.name} was taken a moment ago")

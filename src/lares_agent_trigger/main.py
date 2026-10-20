@@ -32,6 +32,7 @@ from .metrics import Metrics
 from .read_back import ReadBack
 from .receiver import ReceiverServer, create_app
 from .schedules import Schedules
+from .spans import log_trace_ids
 from .turn_runs import TurnRuns
 from .use_cases import load_use_cases
 
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 async def _amain() -> int:
     settings = Settings()  # type: ignore[call-arg]
     configure_logging(settings.log_level, settings.log_format)
+    log_trace_ids()
     tracing.configure(settings, service_name="lares-agent-trigger")
     logger.info("lares-agent-trigger starting")
 
@@ -76,8 +78,8 @@ async def _amain() -> int:
         closer,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
-        traces=turns,
-        trace_wait_seconds=settings.trace_wait_seconds,
+        turns=turns,
+        turn_wait_seconds=settings.turn_wait_seconds,
     )
     schedules = Schedules(
         cron_jobs, hermes, turns, metrics, retry_seconds=settings.reconcile_retry_seconds

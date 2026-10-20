@@ -24,12 +24,14 @@ from decimal import Decimal
 from typing import Literal
 
 import psycopg
+from opentelemetry.trace import SpanKind
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from . import memory
 from .config import Settings
+from .spans import TRACER
 
 SubjectKind = Literal["episode", "alert_group", "chat", "none"]
 TriggerKind = Literal["event", "schedule", "message", "manual"]
@@ -162,23 +164,25 @@ class Ledger:
         subject_kind: SubjectKind,
         subject_key: str,
         language: str,
+        trace_id: str | None,
     ) -> int | None:
         """Insert the queued row for this subject; None when it already exists.
 
         `ON CONFLICT DO NOTHING` on the unique index is the whole dedupe: the
         first delivery gets an id, every later one gets None and is skipped.
+        `trace_id` is the run's trace when that is sampled.
         """
         async with self._require_pool.connection() as conn:
             rows = await (
                 await conn.execute(
                     """
                     INSERT INTO agent_runs
-                        (use_case, trigger, subject_kind, subject_key, status, language)
-                    VALUES (%s, %s, %s, %s, 'queued', %s)
+                        (use_case, trigger, subject_kind, subject_key, trace_id, status, language)
+                    VALUES (%s, %s, %s, %s, %s, 'queued', %s)
                     ON CONFLICT (use_case, subject_kind, subject_key) DO NOTHING
                     RETURNING id
                     """,
-                    (use_case, trigger, subject_kind, subject_key, language),
+                    (use_case, trigger, subject_kind, subject_key, trace_id, language),
                 )
             ).fetchall()
         return int(rows[0]["id"]) if rows else None
@@ -262,18 +266,27 @@ class Ledger:
         """Write what the run produced and what it cost; the row stays open.
 
         This is the `stored` output: the text is in the ledger before any other
-        target sees it.
+        target sees it. The write is a span of the run's trace.
         """
-        async with self._require_pool.connection() as conn:
-            await conn.execute(
-                """
-                UPDATE agent_runs SET
-                    tldr = %s, text = %s, model_source = %s, model = %s, tokens_in = %s,
-                    tokens_out = %s, cost = %s, duration = %s, tool_trace = %s
-                WHERE id = %s
-                """,
-                (*_output_columns(text, usage), run_id),
-            )
+        with TRACER.start_as_current_span(
+            "UPDATE agent_runs",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "db.system.name": "postgresql",
+                "db.operation.name": "UPDATE",
+                "db.collection.name": "agent_runs",
+            },
+        ):
+            async with self._require_pool.connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE agent_runs SET
+                        tldr = %s, text = %s, model_source = %s, model = %s, tokens_in = %s,
+                        tokens_out = %s, cost = %s, duration = %s, tool_trace = %s
+                    WHERE id = %s
+                    """,
+                    (*_output_columns(text, usage), run_id),
+                )
 
     async def finish(
         self,
@@ -315,12 +328,14 @@ class Ledger:
         text: str | None,
         error: str | None,
         usage: Usage,
+        trace_id: str | None,
     ) -> int | None:
         """Write the row of a run that is already over; None when its key exists.
 
         A turn the harness ran on its own, or a hand-fed run. The row is
         closed, unless it is `running` because its text still has to be
-        delivered, which then closes it.
+        delivered, which then closes it. `trace_id` is its trace when that
+        was sampled.
         """
         async with self._require_pool.connection() as conn:
             rows = await (
@@ -328,10 +343,10 @@ class Ledger:
                     """
                     INSERT INTO agent_runs
                         (use_case, trigger, subject_kind, subject_key, session_id,
-                         harness_run_id, status, language, error, finished_at,
+                         harness_run_id, trace_id, status, language, error, finished_at,
                          tldr, text, model_source, model, tokens_in, tokens_out, cost,
                          duration, tool_trace)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             CASE WHEN %s::text = 'running' THEN NULL ELSE now() END,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (use_case, subject_kind, subject_key) DO NOTHING
@@ -344,6 +359,7 @@ class Ledger:
                         subject_key,
                         session_id,
                         harness_run_id,
+                        trace_id,
                         status,
                         language,
                         error,

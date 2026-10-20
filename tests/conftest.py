@@ -2,7 +2,8 @@
 
 Everything a neighbour would see is real here — the message on JetStream, the
 durable consumer, the signed POST to the hook receiver, the rows in
-Postgres — and only the outside services are replaced: the harness, because
+Postgres, the spans as the collector would get them — and only the outside
+services are replaced: the harness, because
 a run is a model call; Alertmanager and Discord over HTTP (`fakes.py`),
 because the alert and the message are asserted as they would arrive there;
 and the mail relay by an SMTP server in this process, because the mail is
@@ -14,7 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,19 @@ from aiosmtpd.smtp import SMTP, Envelope, Session
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from nats.js.api import AckPolicy, ConsumerConfig, StorageType
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import (
+    ParentBased,
+    Sampler,
+    SamplingResult,
+    TraceIdRatioBased,
+)
+from opentelemetry.trace import Link, SpanKind
+from opentelemetry.util.types import Attributes
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
 from testcontainers.postgres import PostgresContainer
@@ -50,6 +64,59 @@ from lares_agent_trigger.receiver import create_app
 from lares_agent_trigger.schedules import Schedules
 from lares_agent_trigger.turn_runs import TurnRuns
 from lares_agent_trigger.use_cases import load_use_cases
+
+
+class _Ratio(Sampler):
+    """The sampler the service runs with, at a ratio a test may change."""
+
+    def __init__(self) -> None:
+        self.ratio = 1.0
+
+    def should_sample(
+        self,
+        parent_context: Context | None,
+        trace_id: int,
+        name: str,
+        kind: SpanKind | None = None,
+        attributes: Attributes = None,
+        links: Sequence[Link] | None = None,
+        trace_state: trace.TraceState | None = None,
+    ) -> SamplingResult:
+        sampler = ParentBased(TraceIdRatioBased(self.ratio))
+        return sampler.should_sample(
+            parent_context, trace_id, name, kind, attributes, links, trace_state
+        )
+
+    def get_description(self) -> str:
+        return f"ParentBased(TraceIdRatioBased({self.ratio}))"
+
+
+# One recording provider for the whole session: the global can only be set once.
+_sampler = _Ratio()
+_exporter = InMemorySpanExporter()
+_provider = TracerProvider(sampler=_sampler)
+_provider.add_span_processor(SimpleSpanProcessor(_exporter))
+trace.set_tracer_provider(_provider)
+
+
+@pytest.fixture
+def spans() -> Iterator[InMemorySpanExporter]:
+    """The spans the service finished in this test, sampled at 100 %."""
+    _exporter.clear()
+    yield _exporter
+    _exporter.clear()
+
+
+@pytest.fixture
+def sampling_ratio() -> Iterator[Callable[[float], None]]:
+    """Set the ratio the service samples new traces at, for this test."""
+
+    def set_ratio(ratio: float) -> None:
+        _sampler.ratio = ratio
+
+    yield set_ratio
+    _sampler.ratio = 1.0
+
 
 # The ledger lives in the TimescaleDB instance; the two tables themselves are
 # plain, so the image matters only for fidelity with bootstrap.sql.
@@ -81,6 +148,9 @@ USE_CASES = """
 ledger_hook:
   trigger_url: http://lares-agent-trigger.test:8080
   secret_env: LARES_AGENT_TRIGGER_HOOK_SECRET
+
+tracing:
+  sampling_ratio: 1.0
 
 tool_servers:
   - name: lares
@@ -220,7 +290,10 @@ CREATE TABLE agent_runs (
         CHECK (subject_kind IN ('episode', 'alert_group', 'chat', 'none')),
     subject_key    TEXT,
     session_id     TEXT,
+    enduser_id     TEXT,
+    surface        TEXT           CHECK (surface IN ('discord', 'web')),
     harness_run_id TEXT,
+    trace_id       TEXT,
     status         TEXT           NOT NULL
         CHECK (status IN ('queued', 'running', 'completed', 'failed', 'capped')),
     attempt        SMALLINT       NOT NULL DEFAULT 1,
@@ -235,6 +308,10 @@ CREATE TABLE agent_runs (
     tokens_in      INTEGER,
     tokens_out     INTEGER,
     cost           NUMERIC(10, 6),
+    review_tokens_in  INTEGER,
+    review_tokens_out INTEGER,
+    review_cost    NUMERIC(10, 6),
+    review_text    TEXT,
     duration       INTERVAL,
     tool_trace     JSONB,
     verdict        TEXT           CHECK (verdict IN ('helpful', 'useless')),
@@ -456,7 +533,7 @@ def settings(
         # A reconcile the harness refused is tried again after this long.
         reconcile_retry_seconds=0.01,
         # An event run waits this long for its calls; the tests deliver them first.
-        trace_wait_seconds=0.05,
+        turn_wait_seconds=0.05,
         # The poll loop is exercised, not waited on.
         hermes_poll_seconds=0.01,
         alertmanager_url=ALERTMANAGER_URL,
@@ -568,8 +645,8 @@ async def service(
         closer,
         metrics,
         retry_delay_seconds=settings.retry_delay_seconds,
-        traces=turns,
-        trace_wait_seconds=settings.trace_wait_seconds,
+        turns=turns,
+        turn_wait_seconds=settings.turn_wait_seconds,
     )
     schedules = Schedules(
         load_cron_jobs(settings.cron_jobs_file, use_cases),

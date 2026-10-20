@@ -1,4 +1,4 @@
-"""Generator tests: the use-case file and the settings in, the three rendered files out.
+"""Generator tests: the use-case file and the settings in, the four rendered files out.
 
 `rendering/` holds one declaration that touches every surface and the files it
 renders to. A deliberate change to the rendering is reviewed as a diff of
@@ -57,6 +57,7 @@ def test_the_rendering_matches_the_expected_files(tmp_path: Path) -> None:
         "config.yaml": rendered.hermes_config,
         "cron-jobs.yaml": rendered.cron_jobs,
         "client-tools.env": rendered.client_tools,
+        "tracing.env": rendered.tracing,
     }
     if os.environ.get("UPDATE_RENDERING"):
         for name, text in files.items():
@@ -138,12 +139,24 @@ def test_the_hook_reports_every_finished_turn_to_the_trigger(tmp_path: Path) -> 
             {
                 "name": "lares-agent-trigger",
                 "url": "http://lares-agent-trigger.agents.svc.cluster.local:8080/hooks/hermes",
-                "events": ["post_api_request", "on_session_end"],
+                "events": ["post_api_request", "post_tool_call", "on_session_end"],
                 "secret_env": "LARES_AGENT_TRIGGER_HOOK_SECRET",
                 "timeout": 10,
             }
         ]
     }
+
+
+def test_one_sampling_ratio_is_rendered_for_every_service_of_the_platform(
+    tmp_path: Path,
+) -> None:
+    """The trigger, the bridge and the engine read it from the same rendered variable."""
+    line = _render(tmp_path).tracing.splitlines()[-1]
+
+    assert line == "TRACING_SAMPLING_RATIO=0.5"
+    text = USE_CASES.read_text(encoding="utf-8")
+    whole = text.replace("sampling_ratio: 0.5", "sampling_ratio: 1")
+    assert _render(tmp_path, whole).tracing.splitlines()[-1] == "TRACING_SAMPLING_RATIO=1.0"
 
 
 def test_a_schedule_use_case_becomes_one_managed_cron_job(tmp_path: Path) -> None:
@@ -205,7 +218,12 @@ def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> Non
 def test_every_rendered_file_opens_with_the_generated_line(tmp_path: Path) -> None:
     rendered = _render(tmp_path)
 
-    for text in (rendered.hermes_config, rendered.cron_jobs, rendered.client_tools):
+    for text in (
+        rendered.hermes_config,
+        rendered.cron_jobs,
+        rendered.client_tools,
+        rendered.tracing,
+    ):
         assert text.splitlines()[0] == GENERATED_LINE
 
 
@@ -245,17 +263,19 @@ def _cli(tmp_path: Path, use_cases: Path = USE_CASES) -> int:
             str(tmp_path / "out" / "cron-jobs.yaml"),
             "--client-tools",
             str(tmp_path / "out" / "client-tools.env"),
+            "--tracing",
+            str(tmp_path / "out" / "tracing.env"),
         ]
     )
 
 
-def test_the_command_writes_the_three_files_whole(tmp_path: Path) -> None:
+def test_the_command_writes_the_four_files_whole(tmp_path: Path) -> None:
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "config.yaml").write_text("stale\n", encoding="utf-8")
 
     assert _cli(tmp_path) == 0
 
-    for name in ("config.yaml", "cron-jobs.yaml", "client-tools.env"):
+    for name in ("config.yaml", "cron-jobs.yaml", "client-tools.env", "tracing.env"):
         written = (tmp_path / "out" / name).read_text(encoding="utf-8")
         assert written == (EXPECTED / name).read_text(encoding="utf-8"), name
 

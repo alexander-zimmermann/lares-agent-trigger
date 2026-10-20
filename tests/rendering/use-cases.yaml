@@ -6,6 +6,9 @@ ledger_hook:
   trigger_url: http://lares-agent-trigger.agents.svc.cluster.local:8080
   secret_env: LARES_AGENT_TRIGGER_HOOK_SECRET
 
+tracing:
+  sampling_ratio: 0.5
+
 tool_servers:
   - name: lares
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp

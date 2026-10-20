@@ -11,6 +11,7 @@ import hmac
 import itertools
 import json
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -217,23 +218,32 @@ CRON_SESSION = f"cron_{JOB_ID}_20260927_030000"
 CRON_TASK = f"cron:{JOB_ID}:{EXECUTION_ID}"
 
 
-def _hook_body(event: str, session_id: str, extra: dict[str, Any]) -> bytes:
+def _hook_body(
+    event: str,
+    session_id: str,
+    extra: dict[str, Any],
+    *,
+    fired_at: float,
+    tool_name: str | None = None,
+    tool_input: dict[str, Any] | None = None,
+) -> bytes:
     """A delivery as `agent/outbound_webhooks.py` renders it.
 
-    `session_id` is promoted to the top level and every other keyword of the
-    hook call lands under `extra` (`_payload_fields` in `agent/shell_hooks.py`),
-    serialised with `default=str`.
+    `session_id`, the tool's name and its arguments are promoted to the top
+    level and every other keyword of the hook call lands under `extra`
+    (`_payload_fields` in `agent/shell_hooks.py`), serialised with
+    `default=str`. `timestamp` is when the hook fired, in UTC.
     """
     payload = {
         "hook_event_name": event,
         "profile": "default",
-        "tool_name": None,
-        "tool_input": None,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
         "session_id": session_id,
         "cwd": "/opt/data",
         "extra": extra,
         "delivery_id": "0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e",
-        "timestamp": "2026-09-30T10:15:42.123456Z",
+        "timestamp": datetime.fromtimestamp(fired_at, UTC).isoformat().replace("+00:00", "Z"),
     }
     return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
 
@@ -323,6 +333,7 @@ def model_call(
             "assistant_tool_call_count": tool_calls,
             "moa_references": None,
         },
+        fired_at=started_at + seconds,
     )
 
 
@@ -337,8 +348,9 @@ def turn_ended(
     exit_reason: str = "text_response(stop)",
     model: str = "gpt-6-sol",
     event: str = "on_session_end",
+    at: float = 1790756112.0,
 ) -> bytes:
-    """One `on_session_end` delivery — `agent/turn_finalizer.py`, once per turn."""
+    """One `on_session_end` delivery — `agent/turn_finalizer.py`, once per turn, fired `at`."""
     task = task_id if task_id is not None else session_id
     return _hook_body(
         event,
@@ -353,6 +365,51 @@ def turn_ended(
             "model": model,
             "platform": platform,
         },
+        fired_at=at,
+    )
+
+
+def tool_call(
+    call: str,
+    *,
+    session_id: str = CHAT_SESSION,
+    task_id: str | None = None,
+    turn: str = CHAT_TURN,
+    name: str = "list_episodes",
+    arguments: dict[str, Any] | None = None,
+    result: str = '{"episodes": [{"id": 15510, "fault": "appliance_runtime"}]}',
+    ended_at: float = 1790756103.5,
+    milliseconds: int = 420,
+    status: str = "ok",
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> bytes:
+    """One `post_tool_call` delivery — `_emit_post_tool_call_hook` in `model_tools.py`.
+
+    The tool's name and arguments sit at the top level; under `extra` the
+    result as the model got it, the call's ids, its duration in whole
+    milliseconds and how it ended (`ok`, `error`, `blocked`). No platform and
+    no start: the hook fires as the tool returns, `ended_at`.
+    """
+    task = task_id if task_id is not None else session_id
+    return _hook_body(
+        "post_tool_call",
+        session_id,
+        {
+            "result": result,
+            "task_id": task,
+            "tool_call_id": call,
+            "turn_id": f"{session_id}:{task}:{turn}",
+            "api_request_id": f"req_{turn}_1",
+            "duration_ms": milliseconds,
+            "status": status,
+            "error_type": error_type,
+            "error_message": error_message,
+            "middleware_trace": [],
+        },
+        fired_at=ended_at,
+        tool_name=name,
+        tool_input=arguments if arguments is not None else {"state": "open", "days": 7},
     )
 
 
