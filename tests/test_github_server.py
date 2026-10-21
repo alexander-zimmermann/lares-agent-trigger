@@ -56,12 +56,14 @@ def server_dir(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
 
 @pytest.fixture
 def entry() -> dict[str, Any]:
+    declared = load_use_case_file(USE_CASES)
     rendered = render(
-        load_use_case_file(USE_CASES),
-        load_persons_file(PERSONS),
+        declared,
+        load_persons_file(PERSONS, declared),
         SETTINGS.read_text(encoding="utf-8"),
     )
-    config: dict[str, Any] = yaml.safe_load(rendered.hermes_config)
+    # Only the chat holds it, and kim chats on their own profile.
+    config: dict[str, Any] = yaml.safe_load(rendered.profiles["kim"])
     github: dict[str, Any] = config["mcp_servers"]["github"]
     return github
 

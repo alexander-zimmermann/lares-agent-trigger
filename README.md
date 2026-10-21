@@ -99,7 +99,7 @@ Schema and loader live in this package because the generator renders the harness
 
 ## The model sources
 
-`persons.yaml` sits beside the use-case file in lares. It declares the model sources a profile may run on and names the default profile's, which every event and cron run uses:
+`persons.yaml` sits beside the use-case file in lares. It declares the model sources a profile may run on, names the default profile's, which every event and cron run uses, and declares the persons (next section):
 
 ```yaml
 default_profile:
@@ -131,31 +131,72 @@ A source nobody runs on may leave its bound and its fallbacks' prices open, and 
 
 Every model call is priced at the row's write by the step of its profile's source that served it, matched on the call's provider and model. A subscription step costs 0. A priced step costs fresh input, cache reads and output at their own rates; a cache write counts as fresh input. The row's `cost` is the sum over its calls, on every path: chat, cron and event; an event attempt that is retried keeps no row of its own, and what it spent counts in the metrics only. A row's `cost` stays NULL, and `agent_trigger_unpriced_calls_total` counts it, when a call matches no declared step (`undeclared`), a metered call reported no usage (`no_usage`), or a run answered or read tokens and none of its calls came through the hook (`no_calls`). The session record's cost estimate is never read.
 
+## The persons
+
+A person is a household member known in Git by a handle, never by a legal name, an e-mail or a Discord id: Git holds their rights, the sign-in provider their identity. Each enabled person gets a Hermes profile of their own.
+
+```yaml
+persons:
+  - name: kim                      # the handle: the profile's, the bridge client's and the sign-in's
+    discord: admin                 # true: the bot routes their messages to their profile; admin: every slash command too
+    tools: [lares, lares-runs, github]   # a subset of the chat use case's tools
+    model: owner-subscription      # a declared model source
+    keep_answers: true             # whether the person's rows keep the answers' text; default false
+    enabled: true                  # or `dormant: <reason>`
+```
+
+The loader refuses the file at pre-commit and at startup when:
+
+- two persons share a handle, a handle is no Hermes profile name of lower-case letters, digits and `-` up to 32 characters (it names the profile's volumes too), it is one Hermes keeps (`hermes`, `test`, `tmp`, `root`, `sudo`), or it is `default`, which belongs to the machines;
+- a handle is the `client` of a bridge server: a person's own client is named by the handle;
+- an enabled person names a tool the chat use case does not hold, or no chat use case is enabled;
+- an enabled person's source is not declared, has no `bound`, or names `anthropic` in any step: Hermes keeps that provider's login state in the default profile's credentials;
+- more than one enabled person runs on a `shared-with-default` source;
+- enabled persons are on Discord and none is `discord: admin`;
+- a person sets both `enabled` and `dormant`, `enabled: false`, or a `dormant` without a reason.
+
+A dormant person renders nothing, so it may name tools and sources still to come.
+
 ## The generator
 
-`lares-agent-trigger generate` renders the use-case file and the person declaration into what the harness, the bridge and the platform's services read. lares runs it at the trigger's deployed tag (`task agents:create-harness-config`) and checks in pre-commit that the committed files match a fresh rendering (`task agents:validate-use-cases`).
+`lares-agent-trigger generate` renders the use-case file and the person declaration into what the harness, the bridge and the platform's services read. lares's pre-commit hook runs it at the trigger's deployed tag (`task agents:create-harness-config`) and writes the files in place; a commit whose files it changed stops once, to be added.
 
 ```bash
 lares-agent-trigger generate \
   --use-cases use-cases.yaml --persons persons.yaml --settings settings.yaml \
   --hermes-config config.yaml --cron-jobs cron-jobs.yaml --client-tools client-tools.env \
-  --tracing tracing.env --env-template env-template.yaml --clients-template clients-template.yaml
+  --tracing tracing.env --env-template env-template.yaml --clients-template clients-template.yaml \
+  --profiles profiles
 ```
 
 | Output             | What it holds                                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `config.yaml`      | the hand-written `settings.yaml` copied whole, then `model` and `fallback_providers` from the default profile's source, then `platform_toolsets`, `hooks.outbound` and `mcp_servers` |
+| `config.yaml`      | the default profile's: the hand-written `settings.yaml` copied whole, then `model`, `fallback_providers` and `terminal` from its source and directory, then `platform_toolsets`, `hooks.outbound` and `mcp_servers`; with persons on Discord, their routes and rights inside the settings' `gateway` and `discord` blocks |
+| `profiles/<handle>/config.yaml` | each enabled person's: `settings.yaml` copied whole, then `model`, `fallback_providers` and `terminal` from their source and profile directory, then their tool servers on `discord` and `api_server`, the same hook, and their `mcp_servers` |
+| `profiles/kustomization.yaml` | the ConfigMap `hermes-profiles`, one key per person's config, named by the handle |
+| `profiles/profiles.values.yaml` | an additional values file of Hermes's chart: per person a read-only subPath mount of their config, their `.env`, the persons' `SOUL.md`, `AGENTS.md` and `.no-bundled-skills` into `/opt/data/profiles/<handle>/` |
 | `cron-jobs.yaml`   | one job per enabled schedule use case, named `lares:<use case>`, with its schedule, skill, prompt and delivery     |
-| `client-tools.env` | `MCP_AUTH_CLIENT_TOOLS`, the bridge's allowlist per machine client of a bridge server in use                      |
+| `client-tools.env` | `MCP_AUTH_CLIENT_TOOLS`, the bridge's allowlist per machine client of a bridge server in use and per person; `MCP_AUTH_PERSONS`, the clients that are persons |
 | `tracing.env`      | `TRACING_SAMPLING_RATIO`, the declared `tracing.sampling_ratio`, which the trigger, the bridge and the engine's CronJobs read |
-| `env-template.yaml` | a patch of the harness's SealedSecret `hermes-credentials`: `default.env`, the default profile's `.env`, as a template of its sealed keys |
-| `clients-template.yaml` | a patch of the bridge's SealedSecret `lares-mcp-bridge-auth-clients`: `clients.json`, the bridge's machine clients and their keys, as a template of its sealed keys |
+| `env-template.yaml` | a patch of the harness's SealedSecret `hermes-credentials`: `default.env` and each person's `<handle>.env`, as templates of its sealed keys |
+| `clients-template.yaml` | a patch of the bridge's SealedSecret `lares-mcp-bridge-auth-clients`: `clients.json`, the bridge's clients and their keys, as a template of its sealed keys |
 
-Every file opens with ``# generated by `task agents:create-harness-config`, do not edit`` and is written whole. The settings file may not carry a key the generator owns. A dormant use case renders nothing, and neither does a tool server only dormant use cases name or a model source no profile runs on.
+Every file opens with ``# generated by `task agents:create-harness-config`, do not edit`` and is written whole; a person not rendered has no `profiles/<handle>/`. The settings file may not carry a key the generator owns, nor a key it renders into the settings' `discord` or `gateway` block. A dormant use case renders nothing, and neither does a dormant person, a tool server only dormant use cases name or a model source no profile runs on.
+
+### The default profile and the persons on Discord
+
+Without a person on Discord, the default profile serves the chat. With one, the bot answers through the default profile, which:
+
+- routes each Discord person's messages to their profile: one `gateway.profile_routes` entry per person, `user_id: ${env:DISCORD_USER_<HANDLE>}`;
+- lets only them write (`discord.allow_from`), from the same references, so a missing id leaves its person ignored, never misrouted to the default profile;
+- gives the `discord: admin` persons every slash command (`allow_admin_from`, `group_allow_admin_from`) and everyone else `reset`, `stop`, `retry` and `undo` beside Hermes's `/help` and `/whoami` (`user_allowed_commands`, `group_user_allowed_commands`);
+- holds no tool server on `discord`: the chat is the persons'.
+
+A person reads through a bridge client of their own, named by the handle, which may call the tools of the read servers they hold; a request server they hold they reach through its machine client.
 
 ### The keys
 
-The harness reads every key from its profile's `.env`, never from the pod's environment, and the bridge reads its machine clients' keys from `clients.json`. Each value is sealed once, under its own key, and the two templates compose the files from those keys: kubeseal rewrites a SealedSecret whole, so each template is a patch beside it. A variable's value is sealed under the variable's name in lower case and dashed (`LARES_MCP_KEY` under `lares-mcp-key`), a client's under the client's name:
+The harness reads every key from its profile's `.env`, never from the pod's environment, and the bridge reads its clients' keys from `clients.json`. Each value is sealed once, under its own key, and the two templates compose the files from those keys: kubeseal rewrites a SealedSecret whole, so each template is a patch beside it. A variable's value is sealed under the variable's name in lower case and dashed (`LARES_MCP_KEY` under `lares-mcp-key`), a person's own value under the handle and that name (`kim-lares-mcp-key`), a client's under the client's name (`lares-agent`, `kim`):
 
 ```yaml
 spec:
@@ -171,9 +212,12 @@ The default profile's `.env` names, once each and in this order:
 
 - `API_SERVER_KEY`: the Runs and Jobs API and the probes;
 - `DISCORD_BOT_TOKEN`, when a chat use case is enabled;
+- `DISCORD_USER_<HANDLE>` of each enabled person on Discord;
 - the hook's `secret_env`;
-- the `key_env` of each bridge server in use;
+- the `key_env` of each bridge server the profile holds;
 - the key variable of each provider its source and their fallbacks run on.
+
+A person's `<handle>.env` names their own `API_SERVER_KEY`, the shared hook secret, the `key_env` of each bridge server they hold, their own for a read server and the machine client's for a request server, and their own key of each provider their source runs on. A person's bridge key is sealed twice: in the harness's namespace under `<handle>-<variable>`, in the bridge's under the handle.
 
 Sealed Secrets renders a key the SealedSecret lacks as empty, without an error. lares therefore checks in pre-commit that every key a template names is sealed (`task k8s:validate-sealed-templates`).
 
@@ -181,8 +225,8 @@ What each surface may hold follows how Hermes resolves its toolsets:
 
 | Surface      | Rendered list                                                     | Why                                                                                         |
 | ------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `discord`    | `hermes-discord` and the chat's servers                           | without its composite the chat would lose memory and skills; the settings disable `discord`, which any explicit Discord list switches on |
-| `api_server` | the event use cases' servers                                      | an event run reads, nothing else                                                            |
+| `discord`    | `hermes-discord` and the chat's servers; once persons are on Discord, none, and in each person's profile their own | without its composite the chat would lose memory and skills; the settings disable `discord`, which any explicit Discord list switches on |
+| `api_server` | the event use cases' servers; in a person's profile their own     | an event run reads, nothing else; a person's web chat holds what their Discord chat holds   |
 | `cron`       | `hermes-cron`, every read server in use and the schedule use cases' memory servers | what every managed cron job sees, the Jobs API taking no list per job; never a writing server |
 
 A list that would name no server is `no_mcp`: Hermes reads a list without a server name as "every server".
@@ -483,7 +527,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | Variable                                    | Default                                            | What it is                                        |
 | ------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |
 | `USE_CASES_FILE`                            | `/etc/lares-agent-trigger/use-cases.yaml`          | The declared use cases.                            |
-| `PERSONS_FILE`                              | `/etc/lares-agent-trigger/persons.yaml`            | The model sources and their prices.                |
+| `PERSONS_FILE`                              | `/etc/lares-agent-trigger/persons.yaml`            | The model sources and their prices, and the persons. |
 | `CRON_JOBS_FILE`                            | `/etc/lares-agent-trigger/cron-jobs.yaml`          | The job set rendered from them.                    |
 | `NATS_SERVERS`                              | `nats://localhost:4222`                            | Comma-separated server list.                       |
 | `NATS_NKEY_SEED_FILE`                       | —                                                  | The nkey seed; needs `$JS.ACK.>` to acknowledge.   |
