@@ -30,7 +30,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
-    uses: alexander-zimmermann/lares/.github/workflows/sidecar-renovate.yaml@201839de3c999a3d8abbca0eb19078144310c9ef # main
+    uses: alexander-zimmermann/lares/.github/workflows/sidecar-renovate.yaml@c71090b59468da70c880dcc9376fe4a5440e0c45 # main
     with:
       dryRun: ${{ inputs.dryRun && 'full' || '' }}
       logLevel: ${{ inputs.logLevel || 'debug' }}
