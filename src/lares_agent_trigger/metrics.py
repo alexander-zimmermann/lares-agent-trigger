@@ -74,11 +74,14 @@ class Metrics:
             registry=self.registry,
         )
         # What the model calls of every run cost, by the declared source step
-        # that served them, and the calls without a cost.
+        # that served them and the person the run answered (empty for the
+        # machines), and the calls without a cost.
         self.cost = Counter(
             "agent_trigger_cost_usd_total",
-            "Model spend in USD from the declared prices, by use case, model source and step.",
-            ["use_case", "source", "step"],  # primary | fallback
+            "Model spend in USD from the declared prices, by use case, model source, step "
+            "and person.",
+            # step: primary | fallback
+            ["use_case", "source", "step", "enduser_id"],
             registry=self.registry,
         )
         self.unpriced_calls = Counter(
@@ -94,10 +97,22 @@ class Metrics:
             ["use_case", "source", "step"],  # primary | fallback | undeclared
             registry=self.registry,
         )
+        # `enduser_id` is the person a chat turn answered; empty for the machines.
         self.recorded_runs = Counter(
             "agent_trigger_recorded_runs_total",
-            "Chat and cron runs the harness ran on its own, by use case and row status.",
-            ["use_case", "status"],  # completed | failed
+            "Chat and cron runs the harness ran on its own, by use case, row status and person.",
+            # status: completed | failed
+            ["use_case", "status", "enduser_id"],
+            registry=self.registry,
+        )
+        # A turn that should not have come the way it did: from a profile no
+        # person runs on, a Discord turn on the default profile while the
+        # chat is the persons', a cron turn on a person's profile.
+        self.odd_turns = Counter(
+            "agent_trigger_odd_turns_total",
+            "Turns from where none should come, by what was odd and the profile's person.",
+            # undeclared_profile | discord_on_default | cron_on_person
+            ["kind", "enduser_id"],
             registry=self.registry,
         )
         self.api_requests = Counter(

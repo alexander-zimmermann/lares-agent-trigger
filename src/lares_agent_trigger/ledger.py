@@ -35,6 +35,8 @@ from .spans import TRACER
 
 SubjectKind = Literal["episode", "alert_group", "chat", "none"]
 TriggerKind = Literal["event", "schedule", "message", "manual"]
+# Where a person wrote: Discord, or the web chat through the API server.
+Surface = Literal["discord", "web"]
 # How a row ends that a run reached the end of.
 ClosedStatus = Literal["completed", "failed"]
 # Where an output with a state stands: a pull request is open, merged or closed.
@@ -336,13 +338,18 @@ class Ledger:
         error: str | None,
         usage: Usage,
         trace_id: str | None,
+        enduser_id: str | None,
+        surface: Surface | None,
+        keep_answers: bool,
     ) -> int | None:
         """Write the row of a run that is already over; None when its key exists.
 
         A turn the harness ran on its own, or a hand-fed run. The row is
         closed, unless it is `running` because its text still has to be
         delivered, which then closes it. `trace_id` is its trace when that
-        was sampled.
+        was sampled. `enduser_id` and `surface` name the person a chat turn
+        answered and where they wrote; a machine's row has neither. Without
+        `keep_answers` the row holds the numbers and the tools' names only.
         """
         async with self._require_pool.connection() as conn:
             rows = await (
@@ -350,10 +357,10 @@ class Ledger:
                     """
                     INSERT INTO agent_runs
                         (use_case, trigger, subject_kind, subject_key, session_id,
-                         harness_run_id, trace_id, status, language, error, finished_at,
-                         tldr, text, model_source, model, tokens_in, tokens_out, cost,
-                         duration, tool_trace)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                         enduser_id, surface, harness_run_id, trace_id, status, language,
+                         error, finished_at, tldr, text, model_source, model, tokens_in,
+                         tokens_out, cost, duration, tool_trace)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             CASE WHEN %s::text = 'running' THEN NULL ELSE now() END,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (use_case, subject_kind, subject_key) DO NOTHING
@@ -365,13 +372,15 @@ class Ledger:
                         subject_kind,
                         subject_key,
                         session_id,
+                        enduser_id,
+                        surface,
                         harness_run_id,
                         trace_id,
                         status,
                         language,
                         error,
                         status,
-                        *_output_columns(text, usage),
+                        *_output_columns(text, usage, keep_answers=keep_answers),
                     ),
                 )
             ).fetchall()
@@ -499,14 +508,19 @@ class Ledger:
         return len(text.encode("utf-8"))
 
 
-def _output_columns(text: str | None, usage: Usage) -> tuple[object, ...]:
+def _output_columns(
+    text: str | None, usage: Usage, *, keep_answers: bool = True
+) -> tuple[object, ...]:
     """What a run produced and cost, in column order from `tldr` to `tool_trace`.
 
     `tldr` is the first line of the text — the sentence an answer opens with —
     and the tool trace holds the tool count and, where the hook reported
     them, the model calls in order with the tools each asked for. Never a raw
-    result.
+    result. Without `keep_answers` the text, `tldr` and the tools' arguments
+    stay empty.
     """
+    if not keep_answers:
+        text = None
     tldr = text.strip().splitlines()[0] if text and text.strip() else None
     duration = (
         timedelta(seconds=usage.duration_seconds) if usage.duration_seconds is not None else None
@@ -521,7 +535,10 @@ def _output_columns(text: str | None, usage: Usage) -> tuple[object, ...]:
                 "tokens_in": call.tokens_in,
                 "tokens_out": call.tokens_out,
                 "seconds": call.seconds,
-                "tools": [{"name": t.name, "arguments": t.arguments} for t in call.tools],
+                "tools": [
+                    {"name": t.name, "arguments": t.arguments if keep_answers else ""}
+                    for t in call.tools
+                ],
             }
             for call in usage.calls
         ]

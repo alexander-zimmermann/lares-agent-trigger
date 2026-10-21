@@ -210,9 +210,24 @@ class PersonsFile:
         """The persons that run, in file order."""
         return [person for person in self.persons.values() if person.is_enabled]
 
+    @property
+    def on_discord(self) -> list[Person]:
+        """The persons that run and write on Discord, in file order."""
+        return [person for person in self.enabled_persons if person.discord is not None]
+
     def source_of(self, person: Person) -> ModelSource:
         """The source a person runs on; the loader refuses an enabled person without one."""
         return self.model_sources[person.model]
+
+    def enabled_person(self, profile: str) -> Person | None:
+        """The enabled person this profile is; None for the default, a dormant or an unknown one."""
+        person = self.persons.get(profile)
+        return person if person is not None and person.is_enabled else None
+
+
+def enduser_of(profile: str) -> str | None:
+    """Whom a turn of this profile answered: the profile's name, nobody for the machines'."""
+    return None if profile == DEFAULT_PROFILE else profile
 
 
 def load_persons_file(path: Path, declared: UseCaseFile) -> PersonsFile:

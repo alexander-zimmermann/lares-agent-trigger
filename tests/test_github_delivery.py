@@ -638,6 +638,7 @@ async def test_a_cron_run_of_propose_opens_its_pull_request(
             "agent_trigger_recorded_runs_total",
             use_case="propose-faults",
             status="completed",
+            enduser_id="",
         )
         == 1.0
     )
@@ -666,7 +667,11 @@ async def test_a_cron_run_without_its_block_fails_and_raises_the_alert(
     )
     assert (
         sample(
-            metrics, "agent_trigger_recorded_runs_total", use_case="propose-faults", status="failed"
+            metrics,
+            "agent_trigger_recorded_runs_total",
+            use_case="propose-faults",
+            status="failed",
+            enduser_id="",
         )
         == 1.0
     )

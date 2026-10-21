@@ -64,16 +64,26 @@ async def _deliver(client: httpx.AsyncClient, *bodies: bytes) -> None:
         assert response.status_code == 200, response.text
 
 
-def _by_step(metrics: Metrics, name: str, use_case: str, step: str) -> float:
-    return sample(metrics, name, use_case=use_case, source="owner-subscription", step=step)
-
-
 def _answers(metrics: Metrics, use_case: str, step: str) -> float:
-    return _by_step(metrics, "agent_trigger_answers_total", use_case, step)
+    return sample(
+        metrics,
+        "agent_trigger_answers_total",
+        use_case=use_case,
+        source="owner-subscription",
+        step=step,
+    )
 
 
 def _spent(metrics: Metrics, use_case: str, step: str) -> float:
-    return _by_step(metrics, "agent_trigger_cost_usd_total", use_case, step)
+    # Every turn here is the machines' or the default profile's chat: nobody's.
+    return sample(
+        metrics,
+        "agent_trigger_cost_usd_total",
+        use_case=use_case,
+        source="owner-subscription",
+        step=step,
+        enduser_id="",
+    )
 
 
 def _unpriced(metrics: Metrics, use_case: str, provider: str, model: str, reason: str) -> float:
@@ -310,12 +320,10 @@ async def test_a_subscription_call_without_usage_still_costs_nothing(
 async def test_a_turn_from_a_profile_without_a_source_is_unpriced(
     receiver: Receiver, rows: Rows
 ) -> None:
-    """Only the default profile is declared; another one's calls have no source to price by."""
+    """No person is declared; another profile's calls have no source to price by."""
     client, metrics = receiver
-    call = _call(1, content=ANSWER).replace(b'"profile": "default"', b'"profile": "kim"')
-    end = turn_ended().replace(b'"profile": "default"', b'"profile": "kim"')
 
-    await _deliver(client, call, end)
+    await _deliver(client, _call(1, profile="kim", content=ANSWER), turn_ended(profile="kim"))
 
     (row,) = rows()
     assert row["cost"] is None

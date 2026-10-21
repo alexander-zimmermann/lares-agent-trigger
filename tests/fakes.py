@@ -224,6 +224,7 @@ def _hook_body(
     extra: dict[str, Any],
     *,
     fired_at: float,
+    profile: str,
     tool_name: str | None = None,
     tool_input: dict[str, Any] | None = None,
 ) -> bytes:
@@ -236,7 +237,7 @@ def _hook_body(
     """
     payload = {
         "hook_event_name": event,
-        "profile": "default",
+        "profile": profile,
         "tool_name": tool_name,
         "tool_input": tool_input,
         "session_id": session_id,
@@ -251,6 +252,7 @@ def _hook_body(
 def model_call(
     number: int,
     *,
+    profile: str = "default",
     session_id: str = CHAT_SESSION,
     platform: str = "discord",
     task_id: str | None = None,
@@ -334,11 +336,13 @@ def model_call(
             "moa_references": None,
         },
         fired_at=started_at + seconds,
+        profile=profile,
     )
 
 
 def turn_ended(
     *,
+    profile: str = "default",
     session_id: str = CHAT_SESSION,
     platform: str = "discord",
     task_id: str | None = None,
@@ -366,12 +370,14 @@ def turn_ended(
             "platform": platform,
         },
         fired_at=at,
+        profile=profile,
     )
 
 
 def tool_call(
     call: str,
     *,
+    profile: str = "default",
     session_id: str = CHAT_SESSION,
     task_id: str | None = None,
     turn: str = CHAT_TURN,
@@ -408,6 +414,7 @@ def tool_call(
             "middleware_trace": [],
         },
         fired_at=ended_at,
+        profile=profile,
         tool_name=name,
         tool_input=arguments if arguments is not None else {"state": "open", "days": 7},
     )

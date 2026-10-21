@@ -7,14 +7,26 @@ the turn's end writes the row with what the tally holds: the tokens, the model
 and its source, the tools asked for, the time from the first call to the last,
 and the last call's reply as the answer.
 
-Whose run a turn was is decided at its end. A Discord turn belongs to the chat
-use case; a cron execution to the schedule use case its managed job is named
-after, started by its schedule — or by a person, when the chat asked for the
-job to run now and this is the job's first turn since
-(:meth:`TurnRuns.expect_requested`). An API-server turn is a run this service
+Whose run a turn was is decided at its end, by the profile it ran in and the
+platform it came in on. The default profile is the machines': its cron
+execution belongs to the schedule use case its managed job is named after,
+started by its schedule — or by a person, when the chat asked for the job to
+run now and this is the job's first turn since
+(:meth:`TurnRuns.expect_requested`); its API-server turn is a run this service
 started itself and whose row it writes on the event path, so its tally is kept
-for that path to collect by session id (:meth:`TurnRuns.turn_of`). The rest is
-left alone.
+for that path to collect by session id (:meth:`TurnRuns.turn_of`). A person's
+profile is their chat: a Discord turn is the chat use case's row on surface
+`discord`, an API-server turn one on surface `web`, the web chat. Each names
+the person by the handle, and keeps the answer's text only for a person who
+keeps answers. A machine's row names nobody.
+
+Three turns should not come at all, and each is counted and said: a turn of
+a profile no enabled person runs on is a chat row under the profile's name,
+with the numbers only; a Discord turn on the default profile, while the chat
+is the persons', is one of nobody, with the numbers only; a cron turn on any
+profile but the default gets no row, as no use case owns it. Without a person
+on Discord the default profile serves the chat, and its turns are rows of
+nobody that keep their text. The rest is left alone.
 
 Each turn with a row is one trace (`spans.py`), its root started before the
 row is written so the row can name it. A turn that never ended is a trace too,
@@ -49,8 +61,9 @@ from .closing import Closer
 from .deliveries import RunOutput
 from .hermes import HermesClient
 from .hooks import ModelCall, ToolCall, TurnEnded
-from .ledger import CallTrace, ClosedStatus, Ledger, SubjectKind, TriggerKind, Usage
+from .ledger import CallTrace, ClosedStatus, Ledger, SubjectKind, Surface, TriggerKind, Usage
 from .metrics import Metrics
+from .persons import DEFAULT_PROFILE, PersonsFile, enduser_of
 from .pricing import Pricing
 from .spans import TURN_FAILED, TURN_WITHOUT_END, TurnTrace
 from .use_cases import UseCase, chat_use_case, scheduled_use_case
@@ -58,6 +71,8 @@ from .use_cases import UseCase, chat_use_case, scheduled_use_case
 logger = logging.getLogger(__name__)
 
 Outcome = Literal["counted", "recorded", "handed_over", "duplicate", "ignored"]
+# What was odd about a turn that should not have come the way it did.
+OddTurn = Literal["undeclared_profile", "discord_on_default", "cron_on_person"]
 
 # The surface a person writes on, the one the harness's cron runs as, and the
 # one this service's own runs come in through.
@@ -65,6 +80,8 @@ _CHAT_PLATFORM = "discord"
 _CRON_PLATFORM = "cron"
 _API_PLATFORM = "api_server"
 _TALLIED_PLATFORMS = (_CHAT_PLATFORM, _CRON_PLATFORM, _API_PLATFORM)
+# Where a person wrote, by the platform their turn came in on.
+_SURFACES: dict[str, Surface] = {_CHAT_PLATFORM: "discord", _API_PLATFORM: "web"}
 # Why a cron run whose calls came in before a restart has nothing to deliver.
 _LOST = "the turn's answer came in before the trigger restarted and was lost with it"
 # A tally nobody closed in this long belongs to a turn whose end was lost.
@@ -98,6 +115,10 @@ class _Tally:
     @property
     def session_id(self) -> str | None:
         return self.calls[0].session_id
+
+    @property
+    def profile(self) -> str:
+        return self.calls[0].profile
 
     @property
     def platform(self) -> str:
@@ -162,6 +183,13 @@ class _Owner:
     trigger: TriggerKind
     subject_kind: SubjectKind
     subject_key: str
+    # The person the row answered and where they wrote; None for the machines.
+    enduser_id: str | None = None
+    surface: Surface | None = None
+    # Whether the row keeps the answer's text and the tools' arguments.
+    keep_answers: bool = True
+    # What was odd about the turn, if it should not have come this way.
+    odd: OddTurn | None = None
 
 
 class TurnRuns:
@@ -170,6 +198,7 @@ class TurnRuns:
     def __init__(
         self,
         use_cases: dict[str, UseCase],
+        persons: PersonsFile,
         ledger: Ledger,
         hermes: HermesClient,
         closer: Closer,
@@ -177,6 +206,7 @@ class TurnRuns:
         metrics: Metrics,
     ) -> None:
         self._use_cases = use_cases
+        self._persons = persons
         self._ledger = ledger
         self._hermes = hermes
         self._closer = closer
@@ -246,7 +276,7 @@ class TurnRuns:
         return "counted" if tally.add_tool(call) else "duplicate"
 
     async def _record(self, turn: TurnEnded) -> Outcome:
-        if turn.platform == _API_PLATFORM:
+        if turn.profile == DEFAULT_PROFILE and turn.platform == _API_PLATFORM:
             return self._hand_over(turn)
         owner = await self._owner(turn)
         if owner is None:
@@ -269,6 +299,8 @@ class TurnRuns:
             conversation_id=turn.session_id,
             started_at=reported.started_at,
             context=Context(),
+            enduser_id=owner.enduser_id,
+            surface=owner.surface,
         )
         run_id = await self._ledger.record_turn(
             use_case=owner.use_case.name,
@@ -283,13 +315,15 @@ class TurnRuns:
             error=None if turn.completed else turn.exit_reason,
             usage=usage,
             trace_id=turn_trace.trace_id,
+            enduser_id=owner.enduser_id,
+            surface=owner.surface,
+            keep_answers=owner.keep_answers,
         )
         self._tallies.pop(turn.turn_id, None)
         if turn.cron_run is not None:
             self._requested.pop(turn.cron_run.job_id, None)
         if run_id is None:
             return "duplicate"
-        self._pricing.count(owner.use_case.name, turn.profile, usage, answered=turn.completed)
         turn_trace.finish(
             run_id=run_id,
             ended_at=reported.ended_at,
@@ -297,8 +331,11 @@ class TurnRuns:
             tools=reported.tools,
             error_type=None if turn.completed else TURN_FAILED,
         )
-        # Inside the turn's trace, so the delivery's log lines carry it too.
+        # Inside the turn's trace, so the pricing's and the delivery's log lines carry it too.
         with turn_trace.current():
+            self._pricing.count(owner.use_case.name, turn.profile, usage, answered=turn.completed)
+            if owner.odd is not None:
+                self._odd(owner.odd, turn, run_id)
             logger.info(
                 "%s turn %s: run %d %s",
                 owner.use_case.name,
@@ -308,7 +345,7 @@ class TurnRuns:
             )
             if not delivers:
                 self._metrics.recorded_runs.labels(
-                    use_case=owner.use_case.name, status=status
+                    use_case=owner.use_case.name, status=status, enduser_id=owner.enduser_id or ""
                 ).inc()
                 return "recorded"
             if text is not None and text.strip():
@@ -343,7 +380,9 @@ class TurnRuns:
                 "%s run %d stopped before its row was closed", use_case.name, output.run_id
             )
             return
-        self._metrics.recorded_runs.labels(use_case=use_case.name, status=status).inc()
+        self._metrics.recorded_runs.labels(
+            use_case=use_case.name, status=status, enduser_id=""
+        ).inc()
 
     async def _fail(self, use_case: UseCase, run_id: int, error: str) -> None:
         """Close a cron run that has no text to deliver, and report it."""
@@ -357,22 +396,96 @@ class TurnRuns:
         except Exception:
             logger.exception("%s run %d stopped before its row was closed", use_case.name, run_id)
             return
-        self._metrics.recorded_runs.labels(use_case=use_case.name, status="failed").inc()
+        self._metrics.recorded_runs.labels(
+            use_case=use_case.name, status="failed", enduser_id=""
+        ).inc()
 
     async def _owner(self, turn: TurnEnded) -> _Owner | None:
-        if turn.platform == _CHAT_PLATFORM:
-            use_case = chat_use_case(self._use_cases)
-            if use_case is None:
-                logger.warning(
-                    "a %s turn arrived, and no message use case is enabled", turn.platform
-                )
-                return None
-            # Session, then turn: the part before the colon finds the conversation.
-            return _Owner(use_case, "message", "chat", f"{turn.session_id}:{turn.turn}")
+        """Whose run a turn was, by its profile and its platform."""
+        if turn.profile == DEFAULT_PROFILE:
+            return await self._machine_owner(turn)
+        person = self._persons.enabled_person(turn.profile)
+        if turn.platform == _CRON_PLATFORM:
+            # Only the default profile runs the declared jobs, so no use case owns it.
+            self._odd("cron_on_person" if person is not None else "undeclared_profile", turn)
+            return None
+        surface = _SURFACES.get(turn.platform)
+        if surface is None:
+            self._left_alone(turn)
+            return None
+        if person is None:
+            # Under its name, so whoever it answered can be found, and with the
+            # numbers only, so no other person reads it.
+            return self._chat_owner(
+                turn, enduser_id=turn.profile, surface=surface, odd="undeclared_profile"
+            )
+        return self._chat_owner(
+            turn, enduser_id=person.name, surface=surface, keep_answers=person.keep_answers
+        )
+
+    async def _machine_owner(self, turn: TurnEnded) -> _Owner | None:
+        """Whose run a turn of the default profile was: a schedule's, or the chat's."""
         if turn.platform == _CRON_PLATFORM:
             return await self._cron_owner(turn)
-        logger.debug("left a %s turn alone: not a chat and not a cron run", turn.platform)
-        return None
+        if turn.platform != _CHAT_PLATFORM:
+            self._left_alone(turn)
+            return None
+        if self._persons.on_discord:
+            # The bot routes every message of a person to their profile: this
+            # one reached the machines' profile past the routes.
+            return self._chat_owner(turn, surface="discord", odd="discord_on_default")
+        # Nobody is on Discord: the default profile serves the chat.
+        return self._chat_owner(turn, keep_answers=True)
+
+    def _left_alone(self, turn: TurnEnded) -> None:
+        logger.debug(
+            "left a %s turn of profile %s alone: not a chat and not a cron run",
+            turn.platform,
+            turn.profile,
+        )
+
+    def _chat_owner(
+        self,
+        turn: TurnEnded,
+        *,
+        enduser_id: str | None = None,
+        surface: Surface | None = None,
+        keep_answers: bool = False,
+        odd: OddTurn | None = None,
+    ) -> _Owner | None:
+        """The chat's row of this turn; an odd turn's keeps the numbers only."""
+        use_case = chat_use_case(self._use_cases)
+        if use_case is None:
+            logger.warning("a %s turn arrived, and no message use case is enabled", turn.platform)
+            return None
+        return _Owner(
+            use_case=use_case,
+            trigger="message",
+            subject_kind="chat",
+            # Session, then turn: the part before the colon finds the conversation.
+            subject_key=f"{turn.session_id}:{turn.turn}",
+            enduser_id=enduser_id,
+            surface=surface,
+            keep_answers=keep_answers,
+            odd=odd,
+        )
+
+    def _odd(self, odd: OddTurn, turn: TurnEnded, run_id: int | None = None) -> None:
+        """Count a turn that should not have come the way it did, and say what became of it.
+
+        Outside a turn's trace the line names the profile's person itself.
+        """
+        enduser_id = enduser_of(turn.profile)
+        logger.warning(
+            "%s turn %s of profile %s is odd (%s): %s",
+            turn.platform,
+            turn.turn_id,
+            turn.profile,
+            odd,
+            f"run {run_id}, numbers only" if run_id is not None else "no row",
+            extra={"enduser.id": enduser_id} if enduser_id is not None else None,
+        )
+        self._metrics.odd_turns.labels(kind=odd, enduser_id=enduser_id or "").inc()
 
     async def _cron_owner(self, turn: TurnEnded) -> _Owner | None:
         run = turn.cron_run
@@ -419,14 +532,19 @@ class TurnRuns:
     def _trace_dropped(self, tally: _Tally) -> None:
         """A turn that never ended is a trace of its own, failed as `turn_without_end`.
 
-        Only a chat turn's use case is known without its end.
+        Only a chat turn's use case is known without its end, and a person's
+        names them as their row would.
         """
-        chat = chat_use_case(self._use_cases) if tally.platform == _CHAT_PLATFORM else None
+        surface = _SURFACES.get(tally.platform) if tally.profile != DEFAULT_PROFILE else None
+        chatting = tally.platform == _CHAT_PLATFORM or surface is not None
+        chat = chat_use_case(self._use_cases) if chatting else None
         TurnTrace(
             chat.name if chat is not None else None,
             conversation_id=tally.session_id,
             started_at=tally.started_at,
             context=Context(),
+            enduser_id=tally.profile if surface is not None else None,
+            surface=surface,
         ).finish(
             run_id=None,
             ended_at=tally.reported_until,
