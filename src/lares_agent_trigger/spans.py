@@ -13,7 +13,8 @@ trace; it is ended once the row's id is known. A root that is never ended is
 never exported — what becomes of a delivery whose row was already there.
 
 A log line written inside a span carries its `trace_id` and `span_id`, so
-Grafana can go from a trace to its lines and back.
+Grafana can go from a trace to its lines and back, and a line of a person's
+turn names them as `enduser.id`.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from opentelemetry import trace
@@ -30,6 +32,7 @@ from opentelemetry.trace import Span, SpanKind, StatusCode
 if TYPE_CHECKING:
     # The hooks reach the ledger, whose row write is a span: no import at run time.
     from .hooks import ModelCall, ToolCall
+    from .ledger import Surface
 
 TRACER = trace.get_tracer("lares_agent_trigger")
 
@@ -37,6 +40,9 @@ TRACER = trace.get_tracer("lares_agent_trigger")
 TURN_FAILED = "turn_failed"
 # A turn whose end never came, given up with its tally.
 TURN_WITHOUT_END = "turn_without_end"
+
+# The person the current turn answered, for its log lines.
+_ENDUSER: ContextVar[str | None] = ContextVar("enduser_id", default=None)
 
 
 def failed(span: Span, error_type: str) -> None:
@@ -55,16 +61,25 @@ class TurnTrace:
         conversation_id: str | None,
         started_at: float,
         context: Context | None = None,
+        enduser_id: str | None = None,
+        surface: Surface | None = None,
     ) -> None:
         """Start the root; `context` None makes it a child of the current span.
 
         `agent` is the use case the turn ran; None for one nobody can tell.
+        `enduser_id` and `surface` name the person a chat turn answered and
+        where they wrote; a machine's turn has neither.
         """
         attributes = {"gen_ai.operation.name": "invoke_agent"}
         if agent is not None:
             attributes["gen_ai.agent.name"] = agent
         if conversation_id is not None:
             attributes["gen_ai.conversation.id"] = conversation_id
+        if enduser_id is not None:
+            attributes["enduser.id"] = enduser_id
+        if surface is not None:
+            attributes["lares.surface"] = surface
+        self._enduser_id = enduser_id
         self._root: Span = TRACER.start_span(
             f"invoke_agent {agent}" if agent is not None else "invoke_agent",
             context=context,
@@ -80,9 +95,13 @@ class TurnTrace:
 
     @contextmanager
     def current(self) -> Iterator[None]:
-        """Make the root the current span, so a log line carries the turn's trace."""
+        """Make the root the current span, so a log line carries the turn's trace and person."""
         with trace.use_span(self._root, end_on_exit=False):
-            yield
+            token = _ENDUSER.set(self._enduser_id)
+            try:
+                yield
+            finally:
+                _ENDUSER.reset(token)
 
     def finish(
         self,
@@ -110,13 +129,20 @@ class TurnTrace:
 
 
 class TraceIds(logging.Filter):
-    """Adds the current span's `trace_id` and `span_id` to a record, when it is sampled."""
+    """Adds the current span's `trace_id` and `span_id` to a record, when it is sampled.
+
+    Inside a person's turn it adds `enduser.id` as well, sampled or not.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         context = trace.get_current_span().get_span_context()
         if context.is_valid and context.trace_flags.sampled:
             record.trace_id = f"{context.trace_id:032x}"
             record.span_id = f"{context.span_id:016x}"
+        enduser_id = _ENDUSER.get()
+        if enduser_id is not None:
+            # OpenTelemetry's name, as the bridge's lines carry it.
+            record.__dict__["enduser.id"] = enduser_id
         return True
 
 

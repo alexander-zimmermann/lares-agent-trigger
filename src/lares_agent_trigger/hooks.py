@@ -51,6 +51,8 @@ _TOOL_OK = "ok"
 class ModelCall:
     """One call to the model inside a turn."""
 
+    # The harness profile the call ran in: `default` for the machines'.
+    profile: str
     # Empty for a call the harness made outside a session.
     session_id: str | None
     turn_id: str
@@ -176,6 +178,7 @@ def _model_call(raw: dict[str, Any], extra: dict[str, Any]) -> ModelCall:
     reply = response.get("assistant_message") if isinstance(response, dict) else None
     content = reply.get("content") if isinstance(reply, dict) else None
     return ModelCall(
+        profile=_text(raw, "profile"),
         session_id=_optional_text(raw.get("session_id")),
         turn_id=_text(extra, "turn_id"),
         platform=_text(extra, "platform"),

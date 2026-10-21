@@ -1,9 +1,12 @@
 """What a run's model calls cost: each priced by the declared source step that served it.
 
 A call is matched by its provider and model against the steps of its
-profile's source in the person declaration: the source itself, then its
-fallbacks in order. A subscription step costs nothing per call; a priced step
-costs its fresh input, its cache reads and its output at their own rates.
+profile's source in the person declaration, the default profile's or the
+person's: the source itself, then its fallbacks in order. A profile no enabled
+person runs on has no source. A subscription step costs nothing per call; a
+priced step costs its fresh input, its cache reads and its output at their
+own rates. What was spent is counted by the person the run answered, nobody
+for the machines.
 
 A run's cost is the sum over its calls, and unknown once one call's is: the
 row's cost stays NULL, an honest unknown where a guess would not be, and the
@@ -22,7 +25,7 @@ from typing import Literal
 
 from .ledger import CallTrace, Usage
 from .metrics import Metrics
-from .persons import DEFAULT_PROFILE, ModelSource, PersonsFile, SourceStep
+from .persons import DEFAULT_PROFILE, ModelSource, PersonsFile, SourceStep, enduser_of
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +89,10 @@ class Pricing:
                 self._unpriced(use_case, call.model_source, call.model, reason)
             else:
                 self._metrics.cost.labels(
-                    use_case=use_case, source=served.source, step=served.step
+                    use_case=use_case,
+                    source=served.source,
+                    step=served.step,
+                    enduser_id=enduser_of(profile) or "",
                 ).inc(float(call.cost))
         # A run that answered or read tokens called the model, whether the hook said so or not.
         if not usage.calls and (answered or usage.tokens_in):
@@ -112,8 +118,11 @@ class Pricing:
         ).inc()
 
     def _source_of(self, profile: str) -> ModelSource | None:
-        # Only the default profile runs on a declared source.
-        return self._persons.default_source if profile == DEFAULT_PROFILE else None
+        """The default profile's source or an enabled person's; None for any other profile."""
+        if profile == DEFAULT_PROFILE:
+            return self._persons.default_source
+        person = self._persons.enabled_person(profile)
+        return self._persons.source_of(person) if person is not None else None
 
 
 def _cost(served: Served, call: CallTrace) -> Decimal | None:

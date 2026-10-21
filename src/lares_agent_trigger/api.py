@@ -269,6 +269,9 @@ class TriggerApi:
             error=None,
             usage=Usage(),
             trace_id=current_trace_id(),
+            enduser_id=None,
+            surface=None,
+            keep_answers=True,
         )
         if run_id is None:
             raise _RefusedError(409, f"a hand-fed run of {use_case.name} was taken a moment ago")

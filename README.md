@@ -155,7 +155,7 @@ The loader refuses the file at pre-commit and at startup when:
 - enabled persons are on Discord and none is `discord: admin`;
 - a person sets both `enabled` and `dormant`, `enabled: false`, or a `dormant` without a reason.
 
-A dormant person renders nothing, so it may name tools and sources still to come.
+A dormant person renders nothing, so it may name tools and sources still to come. At runtime a turn of their profile is one of a profile nobody runs on (see [Chat and cron runs](#chat-and-cron-runs)).
 
 ## The generator
 
@@ -451,24 +451,38 @@ A row that a dead pod left `queued` or `running` is not started again when its e
 
 ## Chat and cron runs
 
-The harness starts two kinds of run on its own: a turn in Discord, and a cron job coming due. The trigger hears of them as they happen, through the harness's outbound hook (`hooks.outbound` in its configuration), which posts three of its lifecycle hooks to `POST /hooks/hermes`, signed with HMAC-SHA256 over the raw body (`X-Hermes-Signature-256: sha256=<hex>`) under a secret both pods read:
+The harness starts two kinds of run on its own: a person's turn in Discord or the web chat, and a cron job coming due. The trigger hears of them as they happen, through the harness's outbound hook (`hooks.outbound` in its configuration), which posts three of its lifecycle hooks to `POST /hooks/hermes`, signed with HMAC-SHA256 over the raw body (`X-Hermes-Signature-256: sha256=<hex>`) under a secret both pods read:
 
 - `post_api_request`, once per call to the model: its tokens, the model and its source, when it started and ended, the tools it asked for with their arguments, and its reply. Each call is added to its turn's tally in memory.
 - `post_tool_call`, once per tool the model asked for, as the tool returns: its name, its call id, how long it took and whether it failed. The tool's arguments and result come along and are dropped on arrival. A tool joins the tally its model call opened; one of no tally is left alone.
 - `on_session_end`, which despite its name fires once per turn, after that turn's calls: whether it completed, and why it stopped. It writes the turn's row from the tally.
 
-| Platform      | Use case                                                        | Row                                                                    |
-| ------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `discord`     | the one enabled `message` use case                              | trigger `message`, subject kind `chat`, key `<session id>:<turn>`       |
-| `cron`        | the enabled `schedule` use case its job is named after          | trigger `schedule` (`message` when the chat asked it to run now), subject kind `none`, key `<job id>:<execution id>` |
-| `api_server`  | —                                                               | none: the event run it belongs to takes its calls (see below)           |
-| anything else | —                                                               | none                                                                    |
+Whose row a turn is, the end's top-level `profile` and its platform decide. The default profile is the machines'; every other profile is the person of that handle:
+
+| Profile   | Platform      | Use case                                                 | Row                                                                    |
+| --------- | ------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `default` | `api_server`  | —                                                        | none: the event run it belongs to takes its calls (see below)           |
+| `default` | `cron`        | the enabled `schedule` use case its job is named after   | trigger `schedule` (`message` when the chat asked it to run now), subject kind `none`, key `<job id>:<execution id>` |
+| `default` | `discord`     | the one enabled `message` use case                       | an odd turn while a person is on Discord (below); without one, the chat's row of nobody, text kept |
+| a person  | `discord`     | the one enabled `message` use case                       | trigger `message`, subject kind `chat`, key `<session id>:<turn>`, `enduser_id` the handle, `surface = discord` |
+| a person  | `api_server`  | the one enabled `message` use case                       | the same, `surface = web`: the web chat                                 |
+| any       | anything else | —                                                        | none                                                                    |
+
+A machine's row leaves `enduser_id` and `surface` NULL, a run a person asked for through `start_run` included. A person who does not `keep_answers` gets rows without `text`, `tldr` and the tools' arguments; the model, its source, the tokens, the cost and the tools' names stay.
+
+Three turns should not come at all. Each is counted in `agent_trigger_odd_turns_total` with its kind, for an alert to fire on, and logged as a warning:
+
+| Kind                 | The turn                                                       | Row                                                         |
+| -------------------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
+| `undeclared_profile` | a chat turn of a profile no enabled person runs on: undeclared, or a dormant person's | the chat's, `enduser_id` the profile's name, numbers only |
+| `discord_on_default` | a Discord turn on the default profile while a person is on Discord, so it got past the routes | the chat's, `enduser_id` NULL, `surface = discord`, numbers only |
+| `cron_on_person`     | a cron turn on a person's profile (on an undeclared one it is `undeclared_profile`) | none: only the default profile runs the declared jobs |
 
 A cron run whose use case delivers somewhere other than `stored` — a pull request, a page, a mail — is delivered by the trigger, as an event run is: the hook is answered first, the row is written `running` with the turn's answer as its text, and the delivery closes it, `failed` with `AgentRunFailed` when a target refuses. A turn that completed without an answer fails the same way. A chat turn is answered by the harness in its own conversation and delivered nowhere.
 
 The gateway mints cron job ids itself, so a managed job carries its use case in its name: `lares:propose-faults`. A job without that prefix, or one naming a use case the file does not enable as a schedule, is left alone.
 
-The row holds what the turn's calls added up to: the tokens the model read (cache included) and wrote, the tools it asked for, the time from the first call's start to the last call's end, the model and model source of the last call — a fallback shows up there — and the last call's reply as the answer. Nothing is read off the session record, whose counters run over a whole conversation. Each call is priced by the declared source step that served it (see [The model sources](#the-model-sources)): a turn on the subscription costs 0, one that moved to a priced fallback costs what its calls on it did. A turn whose calls came in before a restart and whose end came after still gets its row, without the tally.
+The row holds what the turn's calls added up to: the tokens the model read (cache included) and wrote, the tools it asked for, the time from the first call's start to the last call's end, the model and model source of the last call — a fallback shows up there — and the last call's reply as the answer. Nothing is read off the session record, whose counters run over a whole conversation. Each call is priced by the declared source step of its profile's source that served it, the default profile's or the person's (see [The model sources](#the-model-sources)): a turn on the subscription costs 0, one that moved to a priced fallback costs what its calls on it did. A turn whose calls came in before a restart and whose end came after still gets its row, without the tally.
 
 `tool_trace` records which tools a run asked for, never what they returned:
 
@@ -495,13 +509,13 @@ What the receiver answers is what the gateway acts on — it sends a delivery at
 Every turn and every event run is one trace, and its row names it in `trace_id` when the trace was sampled. The harness emits no spans of its own for a turn, so the trigger writes them from the hooks' own times once the turn is over:
 
 ```
-invoke_agent messenger            gen_ai.conversation.id, lares.run.id
+invoke_agent messenger            gen_ai.conversation.id, lares.run.id, enduser.id, lares.surface
 ├─ chat gpt-6-sol                 model source, model, tokens in and out
 ├─ execute_tool list_episodes     tool name, call id; error.type when it failed
 └─ chat gpt-6-sol
 ```
 
-The root runs from the first call's start to the turn's end, and is started before the row is written so the row can carry its id. A cron turn is the same trace under its use case. A turn that never ended is given up after an hour as a trace of its own, failed with `error.type = turn_without_end`.
+The root runs from the first call's start to the turn's end, and is started before the row is written so the row can carry its id. A person's turn names them in `enduser.id` and where they wrote in `lares.surface`, as their row does; a machine's names neither. A cron turn is the same trace under its use case. A turn that never ended is given up after an hour as a trace of its own, failed with `error.type = turn_without_end`; a person's still names them.
 
 An event run continues the trace of the engine's run that published the event, from the `traceparent` in the message's NATS headers:
 
@@ -516,7 +530,7 @@ detect-faults (engine) ─► send episode.appeared ─► process episode.appea
                                                         └─ deliver explain-episode   every declared output
 ```
 
-`POST /api/runs` is a server span that continues the caller's `traceparent`; the run it starts stays in that trace after the answer. Log lines written inside a span carry its `trace_id` and `span_id`.
+`POST /api/runs` is a server span that continues the caller's `traceparent`; the run it starts stays in that trace after the answer. Log lines written inside a span carry its `trace_id` and `span_id`, and those of a person's turn their handle as `enduser.id`.
 
 A span carries names and numbers only: never a prompt, an answer, or what a tool was asked or returned. A new trace is kept at `TRACING_SAMPLING_RATIO`, decided by its id; one that came in keeps the caller's decision.
 
@@ -583,8 +597,9 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |
 | `agent_trigger_run_duration_seconds`    | `use_case`         | Wall-clock time from start to terminal state.                |
 | `agent_trigger_hook_events_total`       | `outcome`          | Hook deliveries: `counted` (a model call or a tool), `recorded`, `handed_over` (an event run's turn ended, kept for it), `duplicate`, `ignored`, `refused`, `invalid`, `error`. |
-| `agent_trigger_recorded_runs_total`     | `use_case`, `status` | Chat and cron runs written from the hook, by the status of their row. |
-| `agent_trigger_cost_usd_total`          | `use_case`, `source`, `step` | USD the runs' calls cost at the declared prices, by model source and step (`primary`, `fallback`). |
+| `agent_trigger_recorded_runs_total`     | `use_case`, `status`, `enduser_id` | Chat and cron runs written from the hook, by the status of their row and the person it answered (empty for the machines). |
+| `agent_trigger_odd_turns_total`         | `kind`, `enduser_id` | Turns that should not have come: `undeclared_profile`, `discord_on_default`, `cron_on_person` (see [Chat and cron runs](#chat-and-cron-runs)). |
+| `agent_trigger_cost_usd_total`          | `use_case`, `source`, `step`, `enduser_id` | USD the runs' calls cost at the declared prices, by model source, step (`primary`, `fallback`) and the person the run answered (empty for the machines). |
 | `agent_trigger_unpriced_calls_total`    | `use_case`, `provider`, `model`, `reason` | Calls without a cost, `undeclared`, `no_usage` or `no_calls`; their row's cost is NULL. |
 | `agent_trigger_answers_total`           | `use_case`, `source`, `step` | Answered runs, by the step of the model source that gave the answer: `primary`, `fallback`, or `undeclared`. |
 | `agent_trigger_orphaned_calls_total`    | —                  | Model calls of turns that never reported their end within an hour — the harness's own work after an answer, spent and in no row. |

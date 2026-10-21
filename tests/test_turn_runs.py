@@ -142,7 +142,11 @@ async def test_a_discord_turn_becomes_a_messenger_row(receiver: Receiver, rows: 
     assert _hook_events(metrics, "recorded") == 1.0
     assert (
         sample(
-            metrics, "agent_trigger_recorded_runs_total", use_case="messenger", status="completed"
+            metrics,
+            "agent_trigger_recorded_runs_total",
+            use_case="messenger",
+            status="completed",
+            enduser_id="",
         )
         == 1.0
     )
@@ -224,7 +228,13 @@ async def test_a_turn_that_failed_is_a_failed_row_with_its_reason(
     # What it spent before it failed still counts.
     assert row["tokens_in"] == 42000
     assert (
-        sample(metrics, "agent_trigger_recorded_runs_total", use_case="messenger", status="failed")
+        sample(
+            metrics,
+            "agent_trigger_recorded_runs_total",
+            use_case="messenger",
+            status="failed",
+            enduser_id="",
+        )
         == 1.0
     )
 

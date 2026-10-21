@@ -660,11 +660,9 @@ async def service(
     github = github_app(settings)
     deliveries = build_deliveries(settings, use_cases, metrics, github)
     closer = Closer(ledger, deliveries, alertmanager, metrics)
-    pricing = Pricing(
-        load_persons_file(settings.persons_file, load_use_case_file(settings.use_cases_file)),
-        metrics,
-    )
-    turns = TurnRuns(use_cases, ledger, hermes, closer, pricing, metrics)
+    persons = load_persons_file(settings.persons_file, load_use_case_file(settings.use_cases_file))
+    pricing = Pricing(persons, metrics)
+    turns = TurnRuns(use_cases, persons, ledger, hermes, closer, pricing, metrics)
     runs = EventRuns(
         use_cases,
         ledger,

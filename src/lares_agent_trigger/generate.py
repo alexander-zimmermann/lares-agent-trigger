@@ -207,7 +207,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
     """Render the declarations; ``settings`` is the text of the hand-written settings file."""
     parsed = _parse_settings(settings)
     enabled = [use_case for use_case in declared.use_cases.values() if use_case.is_enabled]
-    on_discord = [person for person in persons.enabled_persons if person.discord is not None]
+    on_discord = persons.on_discord
     # With a person on Discord, every chat message is routed to a person's profile.
     served = [use_case for use_case in enabled if not (use_case.is_chat and on_discord)]
     in_use = _servers_named(declared, served)
