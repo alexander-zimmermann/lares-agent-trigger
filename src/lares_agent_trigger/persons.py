@@ -31,6 +31,9 @@ Account = Literal["shared-with-default", "per-person"]
 DEFAULT_PROFILE = "default"
 # The provider of a ChatGPT login: a profile's own source, never a fallback.
 _CODEX = "openai-codex"
+# The variable each provider reads its key from; a login keeps its token on the
+# data volume and reads none.
+_PROVIDER_KEYS: dict[str, str | None] = {_CODEX: None, "openai-api": "OPENAI_API_KEY"}
 _PER_MILLION = Decimal(1_000_000)
 
 
@@ -67,6 +70,11 @@ class SourceStep(_Strict):
     def label(self) -> str:
         return f"{self.provider}/{self.model}"
 
+    @property
+    def key_env(self) -> str | None:
+        """The variable this step's key is read from; none for a login."""
+        return _PROVIDER_KEYS[self.provider]
+
     @model_validator(mode="after")
     def _metered_steps_name_their_price(self) -> SourceStep:
         if self.bound == "capped" and self.price is None:
@@ -84,6 +92,17 @@ class ModelSource(SourceStep):
     name: str = Field(min_length=1)
     account: Account
     fallback: tuple[SourceStep, ...] = ()
+
+    @property
+    def steps(self) -> tuple[SourceStep, ...]:
+        """The source itself, then its fallbacks in order."""
+        return (self, *self.fallback)
+
+    @property
+    def key_envs(self) -> tuple[str, ...]:
+        """The variables the steps read their keys from, once each, in order."""
+        keys = (step.key_env for step in self.steps)
+        return tuple(dict.fromkeys(key for key in keys if key is not None))
 
     @model_validator(mode="after")
     def _no_fallback_on_a_codex_login(self) -> ModelSource:
@@ -152,15 +171,21 @@ def load_persons_file(path: Path) -> PersonsFile:
 
 
 def _check_reachable(path: Path, source: ModelSource) -> None:
-    """Refuse a source a profile runs on whose calls could go without a cost.
+    """Refuse a source a profile runs on whose calls could go without a cost or a key.
 
-    A source nobody runs on may leave its bound and its fallbacks' prices open:
-    it renders nothing and prices nothing.
+    A source nobody runs on may leave its bound and its fallbacks' prices open,
+    and name any provider: it renders nothing and prices nothing.
     """
     if source.bound is None:
         raise ValueError(
             f"{path}: model source {source.name}: a source a profile runs on names its `bound`"
         )
+    for step in source.steps:
+        if step.provider not in _PROVIDER_KEYS:
+            raise ValueError(
+                f"{path}: model source {source.name}: {step.label}: no key variable is known "
+                f"for {step.provider}; the profile's .env could not name its key"
+            )
     for step in source.fallback:
         if step.price is None and step.bound != "subscription":
             raise ValueError(

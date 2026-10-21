@@ -1,5 +1,5 @@
 """Generator tests: the use-case file, the person declaration and the settings in,
-the four rendered files out.
+the rendered files out.
 
 `rendering/` holds one declaration that touches every surface and the files it
 renders to. A deliberate change to the rendering is reviewed as a diff of
@@ -63,6 +63,12 @@ def _allowlists(tmp_path: Path, use_cases: str | None = None) -> dict[str, list[
     return loaded
 
 
+def _env_lines(tmp_path: Path, use_cases: str | None = None) -> list[str]:
+    patch = yaml.safe_load(_render(tmp_path, use_cases).env_template)
+    text: str = patch["spec"]["template"]["data"]["default.env"]
+    return text.splitlines()
+
+
 def test_the_rendering_matches_the_expected_files(tmp_path: Path) -> None:
     rendered = _render(tmp_path)
     files = {
@@ -70,6 +76,8 @@ def test_the_rendering_matches_the_expected_files(tmp_path: Path) -> None:
         "cron-jobs.yaml": rendered.cron_jobs,
         "client-tools.env": rendered.client_tools,
         "tracing.env": rendered.tracing,
+        "env-template.yaml": rendered.env_template,
+        "clients-template.yaml": rendered.clients_template,
     }
     if os.environ.get("UPDATE_RENDERING"):
         for name, text in files.items():
@@ -217,6 +225,58 @@ def test_each_client_of_a_server_in_use_gets_its_allowlist(tmp_path: Path) -> No
     # GitHub's server is no bridge client: the token and the server bound it.
 
 
+def test_the_default_profiles_env_names_each_key_its_config_reads(tmp_path: Path) -> None:
+    """Each value is one sealed key, named after its variable; the template names keys only."""
+    assert _env_lines(tmp_path) == [
+        # The Runs and Jobs API, and the probes
+        """API_SERVER_KEY='{{ index . "api-server-key" }}'""",
+        # The chat is on
+        """DISCORD_BOT_TOKEN='{{ index . "discord-bot-token" }}'""",
+        """LARES_AGENT_TRIGGER_HOOK_SECRET='{{ index . "lares-agent-trigger-hook-secret" }}'""",
+        # Each bridge server in use; the dormant lares-wiki and GitHub's App key are not here
+        """LARES_MCP_KEY='{{ index . "lares-mcp-key" }}'""",
+        """LARES_CONTROL_KEY='{{ index . "lares-control-key" }}'""",
+        """LARES_MEMORY_MCP_KEY='{{ index . "lares-memory-mcp-key" }}'""",
+        # Both fallbacks run on one API key; the Codex login is on the data volume
+        """OPENAI_API_KEY='{{ index . "openai-api-key" }}'""",
+    ]
+
+
+def test_without_a_chat_the_default_profile_holds_no_bot_token(tmp_path: Path) -> None:
+    """The chat is what Discord serves; the trigger delivers to Discord with its own mount."""
+    text = USE_CASES.read_text(encoding="utf-8")
+    without_chat = (
+        text[: text.index("  - name: messenger")] + text[text.index("  - name: explain-episode") :]
+    )
+
+    assert _env_lines(tmp_path, without_chat) == [
+        """API_SERVER_KEY='{{ index . "api-server-key" }}'""",
+        """LARES_AGENT_TRIGGER_HOOK_SECRET='{{ index . "lares-agent-trigger-hook-secret" }}'""",
+        """LARES_MCP_KEY='{{ index . "lares-mcp-key" }}'""",
+        """LARES_MEMORY_MCP_KEY='{{ index . "lares-memory-mcp-key" }}'""",
+        """OPENAI_API_KEY='{{ index . "openai-api-key" }}'""",
+    ]
+
+
+def test_the_bridges_clients_file_is_composed_from_one_sealed_key_per_client(
+    tmp_path: Path,
+) -> None:
+    """The bridge's clients of the servers in use, each key sealed under the client's name."""
+    patch = yaml.safe_load(_render(tmp_path).clients_template)
+
+    assert patch["metadata"] == {
+        "name": "lares-mcp-bridge-auth-clients",
+        "namespace": "lares-mcp-bridge",
+    }
+    assert patch["spec"]["template"]["data"]["clients.json"] == (
+        "{\n"
+        """  "lares-agent": {{ index . "lares-agent" | toJson }},\n"""
+        """  "lares-control": {{ index . "lares-control" | toJson }},\n"""
+        """  "lares-memory": {{ index . "lares-memory" | toJson }}\n"""
+        "}\n"
+    )
+
+
 def test_a_dormant_use_case_renders_nothing(tmp_path: Path) -> None:
     """The dormant entry is the only one naming lares-wiki: no entry, no job, no allowlist."""
     text = USE_CASES.read_text(encoding="utf-8")
@@ -252,6 +312,8 @@ def test_every_rendered_file_opens_with_the_generated_line(tmp_path: Path) -> No
         rendered.cron_jobs,
         rendered.client_tools,
         rendered.tracing,
+        rendered.env_template,
+        rendered.clients_template,
     ):
         assert text.splitlines()[0] == GENERATED_LINE
 
@@ -307,17 +369,28 @@ def _cli(tmp_path: Path, use_cases: Path = USE_CASES, persons: Path = PERSONS) -
             str(tmp_path / "out" / "client-tools.env"),
             "--tracing",
             str(tmp_path / "out" / "tracing.env"),
+            "--env-template",
+            str(tmp_path / "out" / "env-template.yaml"),
+            "--clients-template",
+            str(tmp_path / "out" / "clients-template.yaml"),
         ]
     )
 
 
-def test_the_command_writes_the_four_files_whole(tmp_path: Path) -> None:
+def test_the_command_writes_every_file_whole(tmp_path: Path) -> None:
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "config.yaml").write_text("stale\n", encoding="utf-8")
 
     assert _cli(tmp_path) == 0
 
-    for name in ("config.yaml", "cron-jobs.yaml", "client-tools.env", "tracing.env"):
+    for name in (
+        "config.yaml",
+        "cron-jobs.yaml",
+        "client-tools.env",
+        "tracing.env",
+        "env-template.yaml",
+        "clients-template.yaml",
+    ):
         written = (tmp_path / "out" / name).read_text(encoding="utf-8")
         assert written == (EXPECTED / name).read_text(encoding="utf-8"), name
 

@@ -168,6 +168,26 @@ def test_a_fallback_on_a_codex_login_is_refused(tmp_path: Path) -> None:
         load_persons_file(_write(tmp_path, f"{head}  - name: free-account{tail}"))
 
 
+def test_a_reachable_provider_without_a_known_key_is_refused(tmp_path: Path) -> None:
+    """The profile's .env could not name its key, and the harness would run without one."""
+    text = VALID.replace("      - provider: openai-api\n", "      - provider: xai\n", 1)
+
+    with pytest.raises(
+        ValueError, match="owner-subscription: xai/gpt-6-luna: no key variable is known for xai"
+    ):
+        load_persons_file(_write(tmp_path, text))
+
+
+def test_a_provider_nobody_runs_on_needs_no_known_key(tmp_path: Path) -> None:
+    head, _, tail = VALID.partition("  - name: free-account")
+    tail = tail.replace("      - provider: openai-api\n", "      - provider: xai\n")
+
+    declared = load_persons_file(_write(tmp_path, f"{head}  - name: free-account{tail}"))
+
+    (fallback,) = declared.model_sources["free-account"].fallback
+    assert fallback.provider == "xai"
+
+
 def test_two_sources_of_one_name_are_refused(tmp_path: Path) -> None:
     text = VALID.replace("  - name: free-account", "  - name: owner-subscription")
 
