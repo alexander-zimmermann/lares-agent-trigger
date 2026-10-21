@@ -18,9 +18,42 @@ model_sources:
         bound: capped
         price: {input: 0.25, cached_input: 0.025, output: 2.00}
 
-  # Nobody runs on it: it renders nothing.
   - name: free-account
     provider: openai-codex
     model: gpt-6-luna
     account: per-person
     bound: subscription
+    fallback:
+      - provider: openai-api
+        model: gpt-6-luna
+        bound: capped
+        price: {input: 0.10, cached_input: 0.01, output: 0.50}
+
+  # Nobody runs on it: it renders nothing.
+  - name: spare-account
+    provider: openai-codex
+    model: gpt-6-luna
+    account: per-person
+    bound: subscription
+
+# The owner beside the machines and admin on Discord, a household member on
+# their own account, and one who is dormant and renders nothing.
+persons:
+  - name: kim
+    discord: admin
+    tools: [lares, lares-control, github]
+    model: owner-subscription
+    keep_answers: true
+    enabled: true
+
+  - name: lou
+    discord: true
+    tools: [lares]
+    model: free-account
+    enabled: true
+
+  - name: max
+    discord: true
+    tools: [lares]
+    model: free-account
+    dormant: Waits for their own account.

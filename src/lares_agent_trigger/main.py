@@ -36,7 +36,7 @@ from .receiver import ReceiverServer, create_app
 from .schedules import Schedules
 from .spans import log_trace_ids
 from .turn_runs import TurnRuns
-from .use_cases import load_use_cases
+from .use_cases import load_use_case_file
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,9 @@ async def _amain() -> int:
     # the reason in the log: starting runs from a half-read catalogue is worse
     # than not starting.
     try:
-        use_cases = load_use_cases(settings.use_cases_file)
-        persons = load_persons_file(settings.persons_file)
+        declared = load_use_case_file(settings.use_cases_file)
+        use_cases = declared.use_cases
+        persons = load_persons_file(settings.persons_file, declared)
         cron_jobs = load_cron_jobs(settings.cron_jobs_file, use_cases)
         github = github_app(settings)
         deliveries = build_deliveries(settings, use_cases, metrics, github)
@@ -67,6 +68,12 @@ async def _amain() -> int:
             "config: use case %s (%s)",
             use_case.name,
             "enabled" if use_case.is_enabled else f"dormant — {use_case.dormant}",
+        )
+    for person in persons.persons.values():
+        logger.info(
+            "config: person %s (%s)",
+            person.name,
+            "enabled" if person.is_enabled else f"dormant — {person.dormant}",
         )
 
     ledger = Ledger(settings)

@@ -5,3 +5,11 @@ agent:
     - terminal
     # Switched on by any explicit Discord list; stays off.
     - discord
+
+# One gateway serves every profile.
+gateway:
+  multiplex_profiles: true
+
+discord:
+  # In a channel, only when mentioned.
+  require_mention: true

@@ -65,7 +65,7 @@ from lares_agent_trigger.pricing import Pricing
 from lares_agent_trigger.receiver import create_app
 from lares_agent_trigger.schedules import Schedules
 from lares_agent_trigger.turn_runs import TurnRuns
-from lares_agent_trigger.use_cases import load_use_cases
+from lares_agent_trigger.use_cases import load_use_case_file, load_use_cases
 
 
 class _Ratio(Sampler):
@@ -660,7 +660,10 @@ async def service(
     github = github_app(settings)
     deliveries = build_deliveries(settings, use_cases, metrics, github)
     closer = Closer(ledger, deliveries, alertmanager, metrics)
-    pricing = Pricing(load_persons_file(settings.persons_file), metrics)
+    pricing = Pricing(
+        load_persons_file(settings.persons_file, load_use_case_file(settings.use_cases_file)),
+        metrics,
+    )
     turns = TurnRuns(use_cases, ledger, hermes, closer, pricing, metrics)
     runs = EventRuns(
         use_cases,

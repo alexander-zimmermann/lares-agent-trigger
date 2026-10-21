@@ -10,7 +10,45 @@ agent:
     # Switched on by any explicit Discord list; stays off.
     - discord
 
-# Rendered from persons.yaml: the default profile's source and its fallbacks, in order.
+# One gateway serves every profile.
+gateway:
+  multiplex_profiles: true
+  # Rendered from persons.yaml: each Discord person's messages go to their profile.
+  profile_routes:
+    - name: kim
+      platform: discord
+      user_id: ${env:DISCORD_USER_KIM}
+      profile: kim
+    - name: lou
+      platform: discord
+      user_id: ${env:DISCORD_USER_LOU}
+      profile: lou
+
+discord:
+  # In a channel, only when mentioned.
+  require_mention: true
+  # Rendered from persons.yaml: who may write to the bot, who runs every command,
+  # and what everyone else may run.
+  allow_from:
+    - ${env:DISCORD_USER_KIM}
+    - ${env:DISCORD_USER_LOU}
+  allow_admin_from:
+    - ${env:DISCORD_USER_KIM}
+  group_allow_admin_from:
+    - ${env:DISCORD_USER_KIM}
+  user_allowed_commands:
+    - reset
+    - stop
+    - retry
+    - undo
+  group_user_allowed_commands:
+    - reset
+    - stop
+    - retry
+    - undo
+
+# Rendered from persons.yaml: the default profile's source, its fallbacks in order,
+# and the profile's directory, where Hermes discovers the context files.
 model:
   provider: openai-codex
   default: gpt-6-sol
@@ -19,22 +57,21 @@ fallback_providers:
     model: gpt-6-luna
   - provider: openai-api
     model: gpt-5.6-terra
+terminal:
+  cwd: /opt/data
 
 # Rendered from use-cases.yaml: what each surface may hold, the tool servers,
 # and the hook that reports every finished turn.
 platform_toolsets:
   discord:
     - hermes-discord
-    - lares
-    - lares-control
-    - github
+    - no_mcp
   api_server:
     - lares
   cron:
     - hermes-cron
     - lares
     - lares-memory
-    - github
 hooks:
   outbound:
     - name: lares-agent-trigger
@@ -59,15 +96,6 @@ mcp_servers:
         - query_*
         - correlate_events
         - search_wiki
-  lares-control:
-    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    headers:
-      Authorization: Bearer ${env:LARES_CONTROL_KEY}
-    timeout: 30
-    tools:
-      include:
-        - request_knx_write
-        - get_write_request
   lares-memory:
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     headers:
@@ -77,23 +105,3 @@ mcp_servers:
       include:
         - get_memory
         - append_memory
-  github:
-    command: /opt/github-mcp/github-mcp-server
-    args:
-      - stdio
-      - --read-only
-      - --toolsets=repos,issues,pull_requests
-    env:
-      GITHUB_APP_ID: '1234567'
-      GITHUB_APP_INSTALLATION_ID: '89012345'
-      GITHUB_APP_PRIVATE_KEY_PATH: /etc/github-reader/private-key
-    timeout: 60
-    tools:
-      include:
-        - get_*
-        - list_*
-        - search_*
-        - issue_read
-        - pull_request_read
-      resources: false
-      prompts: false
