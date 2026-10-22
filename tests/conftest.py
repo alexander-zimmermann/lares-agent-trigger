@@ -565,6 +565,8 @@ def settings(
         turn_wait_seconds=0.05,
         # The sweep comes round often enough to wait on.
         sweep_interval_seconds=0.01,
+        # Long beside two deliveries in a row, short enough to wait on.
+        failed_turn_grace_seconds=0.2,
         # The poll loop is exercised, not waited on.
         hermes_poll_seconds=0.01,
         alertmanager_url=ALERTMANAGER_URL,
@@ -670,7 +672,16 @@ async def service(
     closer = Closer(ledger, deliveries, alertmanager, metrics)
     persons = load_persons_file(settings.persons_file, load_use_case_file(settings.use_cases_file))
     pricing = Pricing(persons, metrics)
-    turns = TurnRuns(use_cases, persons, ledger, hermes, closer, pricing, metrics)
+    turns = TurnRuns(
+        use_cases,
+        persons,
+        ledger,
+        hermes,
+        closer,
+        pricing,
+        metrics,
+        failed_turn_grace_seconds=settings.failed_turn_grace_seconds,
+    )
     runs = EventRuns(
         use_cases,
         ledger,

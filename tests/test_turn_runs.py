@@ -29,6 +29,7 @@ from .fakes import (
     JOB_ID,
     REVIEWED,
     SESSION,
+    failed_call,
     fake_hermes,
     fake_job,
     model_call,
@@ -309,11 +310,12 @@ async def test_a_body_that_is_neither_hook_is_refused(receiver: Receiver, rows: 
         model_call(1).replace(b'"cache_read_tokens"', b'"cached_tokens"'),
         turn_ended().replace(b'"profile"', b'"home"'),
         tool_call("call_1_0").replace(b'"duration_ms"', b'"duration"'),
+        failed_call(1).replace(b'"reason"', b'"cause"'),
     )
 
-    assert statuses == [400] * 10
+    assert statuses == [400] * 11
     assert rows() == []
-    assert _hook_events(metrics, "invalid") == 10.0
+    assert _hook_events(metrics, "invalid") == 11.0
 
 
 async def test_a_run_of_the_api_server_is_left_to_the_event_path(

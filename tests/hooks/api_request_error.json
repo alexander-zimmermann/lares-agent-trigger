@@ -1,0 +1,87 @@
+{
+  "hook_event_name": "api_request_error",
+  "profile": "default",
+  "tool_name": null,
+  "tool_input": null,
+  "session_id": "local-42ddf494d326648073b662d7c0eb453c88ff23b15907925c6453db045dde7eee",
+  "cwd": "/opt/hermes",
+  "extra": {
+    "task_id": "local-42ddf494d326648073b662d7c0eb453c88ff23b15907925c6453db045dde7eee",
+    "turn_id": "local-42ddf494d326648073b662d7c0eb453c88ff23b15907925c6453db045dde7eee:local-42ddf494d326648073b662d7c0eb453c88ff23b15907925c6453db045dde7eee:a3a7729e",
+    "api_request_id": "local-42ddf494d326648073b662d7c0eb453c88ff23b15907925c6453db045dde7eee:local-42ddf494d326648073b662d7c0eb453c88ff23b15907925c6453db045dde7eee:a3a7729e:api:1",
+    "platform": "cli",
+    "model": "gpt-6-luna",
+    "provider": "openai-api",
+    "base_url": "https://api.openai.com/v1",
+    "api_mode": "codex_responses",
+    "api_call_count": 1,
+    "api_duration": 0.708914041519165,
+    "started_at": 1792677453.692953,
+    "ended_at": 1792677454.4018672,
+    "status_code": 401,
+    "retry_count": 0,
+    "max_retries": 3,
+    "retryable": false,
+    "reason": "auth",
+    "error": {
+      "type": "AuthenticationError",
+      "message": "Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-proj-********************************0000. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'code': 'invalid_api_key', 'param': None}, 'status': 401}"
+    },
+    "request": {
+      "method": "POST",
+      "body": {
+        "model": "gpt-6-luna",
+        "instructions": "You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply to the weight of the ask — a one...[cut for the fixture]",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": "Sag Hallo."
+          }
+        ],
+        "store": false,
+        "tools": [
+          {
+            "type": "function",
+            "name": "hermes_tool_search",
+            "description": "Search 1 additional tools that are loaded on demand. Send one keyword query per capability you need; returns matching tool names and descriptions. Then `tool_describe` loads schemas and `tool_call` invokes. Tools already in your tool list need no search.\n\nEvery tool listed below exists: never call it unavailable, and go straight to `tool_describe` when you see the exact name.\n\nDeferred tool catalog (call schemas via `tool_describe`, invoke via `tool_call`):\ntodo tools (1):\n- todo_list: Track a task list for multi-step work (3+ steps).",
+            "strict": false,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "queries": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "One query per capability: service + action + object keywords (e.g. ['gmail send email', 'github create issue']), never a question; every word must match tool text. Searched in parallel."
+                },
+                "limit": {
+                  "type": "integer",
+                  "description": "Max matches per query (default 5)."
+                }
+              },
+              "required": [
+                "queries"
+              ]
+            }
+          }
+        ],
+        "reasoning": {
+          "effort": "medium",
+          "summary": "auto",
+          "context": "all_turns"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "prompt_cache_key": "pck_ef32f3605d8a0f0c4b865617"
+      }
+    },
+    "telemetry_schema_version": "hermes.observer.v1"
+  },
+  "delivery_id": "40ce3c6a68b94dc5b1f08d658208f878",
+  "timestamp": "2026-10-22T13:57:34.404463Z"
+}

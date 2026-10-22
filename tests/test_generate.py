@@ -230,8 +230,32 @@ def test_each_persons_files_are_mounted_read_only_into_their_profile(tmp_path: P
     assert {name.split("-")[1] for name in deployment["volumes"]} == {"kim", "lou"}
 
 
+def test_each_persons_agent_log_is_streamed_by_a_container_of_its_own(tmp_path: Path) -> None:
+    """Hermes writes each profile's log under its home; Loki names the person by the container."""
+    containers = _values(tmp_path)["deployment"]["additionalContainers"]
+
+    # max is dormant.
+    assert list(containers) == ["agent-log-kim", "agent-log-lou"]
+    assert containers["agent-log-lou"] == {
+        # lares pins the image every log container runs under this name.
+        "image": "agent-log",
+        "command": ["tail", "-n", "0", "-F", "/opt/data/profiles/lou/logs/agent.log"],
+        "volumeMounts": [{"name": "hermes-data", "mountPath": "/opt/data", "readOnly": True}],
+        "securityContext": {
+            "runAsUser": 10000,
+            "runAsGroup": 10000,
+            "runAsNonRoot": True,
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+        },
+    }
+
+
 def test_without_persons_the_profiles_values_add_nothing(tmp_path: Path) -> None:
-    assert _values(tmp_path, NO_PERSONS) == {"deployment": {"volumes": {}, "volumeMounts": {}}}
+    assert _values(tmp_path, NO_PERSONS) == {
+        "deployment": {"volumes": {}, "volumeMounts": {}, "additionalContainers": {}}
+    }
 
 
 def test_each_persons_config_is_one_key_of_the_profiles_config_map(tmp_path: Path) -> None:
@@ -654,13 +678,20 @@ def test_a_memory_server_reaches_only_the_surface_of_the_use_cases_keeping_one(
     ]
 
 
-def test_the_hook_reports_every_finished_turn_to_the_trigger(tmp_path: Path) -> None:
+def test_the_hook_reports_every_call_failure_and_finished_turn_to_the_trigger(
+    tmp_path: Path,
+) -> None:
     assert _config(tmp_path)["hooks"] == {
         "outbound": [
             {
                 "name": "lares-agent-trigger",
                 "url": "http://lares-agent-trigger.agents.svc.cluster.local:8080/hooks/hermes",
-                "events": ["post_api_request", "post_tool_call", "on_session_end"],
+                "events": [
+                    "post_api_request",
+                    "post_tool_call",
+                    "api_request_error",
+                    "on_session_end",
+                ],
                 "secret_env": "LARES_AGENT_TRIGGER_HOOK_SECRET",
                 "timeout": 10,
             }

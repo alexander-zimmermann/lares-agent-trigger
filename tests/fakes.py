@@ -14,6 +14,7 @@ import json
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -394,6 +395,67 @@ def turn_ended(
         fired_at=at,
         profile=profile,
     )
+
+
+# Captured from Hermes v0.22.4 as OpenAI refused the key; the request's prompt and tools cut.
+FAILED_CALL: dict[str, Any] = json.loads(
+    (Path(__file__).parent / "hooks" / "api_request_error.json").read_text(encoding="utf-8")
+)
+# What the person wrote, which the captured request carries.
+FAILED_PROMPT = "Sag Hallo."
+
+
+def failed_call(
+    number: int,
+    *,
+    profile: str = "default",
+    session_id: str = CHAT_SESSION,
+    platform: str = "discord",
+    task_id: str | None = None,
+    turn: str = CHAT_TURN,
+    model: str = "gpt-6-luna",
+    provider: str = "openai-api",
+    status_code: int | str | None = 401,
+    reason: str = "auth",
+    started_at: float = 1790756100.0,
+    seconds: float = 0.7,
+) -> bytes:
+    """One `api_request_error` delivery — `agent/api_request_hooks.py`, once per failed attempt.
+
+    The captured delivery, moved into this turn: everything else, the error in
+    the source's words and the request with the person's message, stays as
+    Hermes sent it. A retry keeps the call's number and its start.
+    """
+    task = task_id if task_id is not None else session_id
+    turn_id = f"{session_id}:{task}:{turn}"
+    payload = json.loads(json.dumps(FAILED_CALL))
+    extra = payload["extra"]
+    extra.update(
+        {
+            "task_id": task,
+            "turn_id": turn_id,
+            "api_request_id": f"{turn_id}:api:{number}",
+            "platform": platform,
+            "model": model,
+            "provider": provider,
+            "api_call_count": number,
+            "api_duration": seconds,
+            "started_at": started_at,
+            "ended_at": started_at + seconds,
+            "status_code": status_code,
+            "reason": reason,
+        }
+    )
+    payload.update(
+        {
+            "profile": profile,
+            "session_id": session_id,
+            "timestamp": datetime.fromtimestamp(started_at + seconds, UTC)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+    )
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
 def tool_call(

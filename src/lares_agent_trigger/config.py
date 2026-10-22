@@ -107,6 +107,9 @@ class Settings(NatsSettings):
     turn_wait_seconds: float = 5.0
     # How often the turns whose end never came are given up and counted.
     sweep_interval_seconds: float = 60.0
+    # How long a turn whose last call failed may send nothing more before it is
+    # closed as failed: longer than the harness's 10-minute wait plus a call.
+    failed_turn_grace_seconds: float = 900.0
     # The key the trigger's own API takes on the same port: the bridge holds
     # it too and forwards its start_run tool with it.
     api_key: str = Field(default="", repr=False)

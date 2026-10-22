@@ -34,9 +34,20 @@ of their own and its end never comes, so each is booked at once on the
 session's newest chat row, in the review columns, priced like any call; its
 calls and tools join that answer's trace. The row stays one answered message.
 
+A call that fails is tried again or handed to the source's fallback, and
+each failed attempt is reported and kept in the turn's tally. A turn whose
+last call failed for good sends no end. When it has sent nothing more for the
+grace the harness may wait before its next attempt, it is closed as its end
+would have closed it, failed, and its row names the source, the status it
+answered and the harness's class of the failure. A turn that ends after a
+failed attempt is closed by its end; the counter of failed chat turns rises
+when the person got an error instead of an answer: a chat turn whose last call
+failed.
+
 Each turn with a row is one trace (`spans.py`), its root started before the
-row is written so the row can name it. A turn that never ended is a trace too:
-a sweep gives its tally up after an hour and counts its calls as orphaned.
+row is written so the row can name it; a failed attempt is a failed span in
+it. A turn that never ended is a trace too: a sweep gives its tally up after
+an hour and counts its calls as orphaned.
 
 A chat turn is answered by the harness in its conversation. A cron turn of a
 use case that delivers somewhere — a pull request, a page — is delivered here,
@@ -59,15 +70,17 @@ import contextlib
 import logging
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
+import httpx
+import psycopg
 from opentelemetry.context import Context
 
 from .closing import Closer
 from .deliveries import RunOutput
-from .hermes import HermesClient
-from .hooks import ModelCall, ToolCall, TurnEnded
+from .hermes import HermesClient, HermesError
+from .hooks import FailedCall, ModelCall, ToolCall, TurnEnded
 from .ledger import (
     CallTrace,
     ChatRow,
@@ -108,17 +121,23 @@ _TALLY_LIFETIME_SECONDS = 3600.0
 
 @dataclass
 class _Tally:
-    """What one turn reported so far: opened by its first model call, then every call and tool."""
+    """What one turn reported so far: opened by its first attempt, then every attempt and tool."""
 
-    calls: list[ModelCall]
+    # Every call that went through and every failed attempt, as they arrived.
+    attempts: list[ModelCall | FailedCall]
     tools: list[ToolCall] = field(default_factory=list)
     touched: float = field(default_factory=time.monotonic)
 
-    def add(self, call: ModelCall) -> bool:
-        """Add a model call; False when the tally already holds it, a redelivery."""
-        if any(held.number == call.number for held in self.calls):
+    def add(self, call: ModelCall | FailedCall) -> bool:
+        """Add a call or a failed attempt; False when the tally already holds it, a redelivery."""
+        if isinstance(call, ModelCall):
+            held = any(held.number == call.number for held in self.calls)
+        else:
+            # Each attempt fails at a time of its own.
+            held = call in self.attempts
+        if held:
             return False
-        self.calls.append(call)
+        self.attempts.append(call)
         self.touched = time.monotonic()
         return True
 
@@ -131,33 +150,62 @@ class _Tally:
         return True
 
     @property
+    def calls(self) -> list[ModelCall]:
+        return [call for call in self.attempts if isinstance(call, ModelCall)]
+
+    @property
+    def failures(self) -> list[FailedCall]:
+        return [call for call in self.attempts if isinstance(call, FailedCall)]
+
+    @property
+    def last_failure(self) -> FailedCall | None:
+        """The last attempt, if it failed: no call went through after it."""
+        last = self.attempts[-1]
+        return last if isinstance(last, FailedCall) else None
+
+    @property
     def session_id(self) -> str | None:
-        return self.calls[0].session_id
+        return self.attempts[0].session_id
 
     @property
     def profile(self) -> str:
-        return self.calls[0].profile
+        return self.attempts[0].profile
 
     @property
     def platform(self) -> str:
-        return self.calls[0].platform
+        return self.attempts[0].platform
 
     @property
     def started_at(self) -> float:
-        return min(call.started_at for call in self.calls)
+        return min(call.started_at for call in self.attempts)
 
     @property
     def reported_until(self) -> float:
-        """When the last call or tool it reported ended."""
-        return max([call.ended_at for call in self.calls] + [tool.ended_at for tool in self.tools])
+        """When the last attempt or tool it reported ended."""
+        return max(
+            [call.ended_at for call in self.attempts] + [tool.ended_at for tool in self.tools]
+        )
 
     @property
     def answer(self) -> str | None:
         """The last call's reply: the turn's answer."""
-        return self.calls[-1].content
+        calls = self.calls
+        return calls[-1].content if calls else None
 
     def usage(self) -> Usage:
-        return _usage(self.calls)
+        """What its calls read and wrote, from the first attempt's start to the last's end.
+
+        A turn whose last call failed names the source that failed it.
+        """
+        calls = self.calls
+        usage = replace(
+            _usage(calls) if calls else Usage(),
+            duration_seconds=max(call.ended_at for call in self.attempts) - self.started_at,
+        )
+        failed = self.last_failure
+        if failed is None:
+            return usage
+        return replace(usage, model_source=failed.model_source, model=failed.model)
 
 
 @dataclass(frozen=True)
@@ -169,6 +217,8 @@ class ReportedTurn:
     started_at: float
     ended_at: float
     completed: bool
+    # The failed attempts, retried or not.
+    failures: tuple[FailedCall, ...] = ()
 
     @property
     def call_traces(self) -> tuple[CallTrace, ...]:
@@ -257,6 +307,8 @@ class TurnRuns:
         closer: Closer,
         pricing: Pricing,
         metrics: Metrics,
+        *,
+        failed_turn_grace_seconds: float,
     ) -> None:
         self._use_cases = use_cases
         self._persons = persons
@@ -265,6 +317,7 @@ class TurnRuns:
         self._closer = closer
         self._pricing = pricing
         self._metrics = metrics
+        self._failed_turn_grace_seconds = failed_turn_grace_seconds
         # The deliveries of cron runs still going, held so they are neither collected nor lost.
         self._delivering: set[asyncio.Task[None]] = set()
         self._tallies: dict[str, _Tally] = {}
@@ -278,15 +331,18 @@ class TurnRuns:
         self._answers: dict[str, _Answer] = {}
         self._reviews: dict[str, _Review] = {}
 
-    async def handle(self, hook: ModelCall | ToolCall | TurnEnded) -> Outcome:
-        """Add a call or a tool to its turn's tally, or write the row of a turn that ended."""
-        if isinstance(hook, ModelCall):
+    async def handle(self, hook: ModelCall | ToolCall | FailedCall | TurnEnded) -> Outcome:
+        """Add a call, a failure or a tool to its turn's tally, or write an ended turn's row."""
+        if isinstance(hook, ModelCall | FailedCall):
             session_id = hook.session_id
             # A chat turn's task is its session; the harness forks a background
             # review into the session without one, so its calls run under their own.
             if session_id is not None and hook.task_id not in (None, session_id):
                 whom = self._chat_of(hook.profile, hook.platform)
                 if whom is not None:
+                    if isinstance(hook, FailedCall):
+                        # A review that fails costs nothing and answers nobody.
+                        return "ignored"
                     return await self._book(hook, session_id, whom)
             return self._count(hook)
         if isinstance(hook, ToolCall):
@@ -323,12 +379,13 @@ class TurnRuns:
         return finished[0] if finished is not None else None
 
     async def keep_sweeping(self, interval_seconds: float) -> None:
-        """Give up what no turn end came for, once every interval."""
+        """Close the turns that failed and give up what no turn end came for, every interval."""
         while True:
             await asyncio.sleep(interval_seconds)
+            await self._close_failed()
             self._forget_stale()
 
-    def _count(self, call: ModelCall) -> Outcome:
+    def _count(self, call: ModelCall | FailedCall) -> Outcome:
         if call.platform not in _TALLIED_PLATFORMS:
             return "ignored"
         tally = self._tallies.get(call.turn_id)
@@ -416,6 +473,8 @@ class TurnRuns:
         tally = self._tallies.get(turn.turn_id)
         reported = _reported(tally, turn)
         status: ClosedStatus = "completed" if turn.completed else "failed"
+        # The person got an error instead of an answer.
+        failed = tally.last_failure if tally is not None and not turn.completed else None
         usage = tally.usage() if tally is not None else Usage(model=turn.model)
         usage = self._pricing.price(turn.profile, usage)
         text = tally.answer if tally is not None and turn.completed else None
@@ -441,7 +500,7 @@ class TurnRuns:
             status="running" if delivers else status,
             language=owner.use_case.language,
             text=text,
-            error=None if turn.completed else turn.exit_reason,
+            error=None if turn.completed else _error_text(failed) or turn.exit_reason,
             usage=usage,
             trace_id=turn_trace.trace_id,
             enduser_id=owner.whom.enduser_id,
@@ -458,6 +517,7 @@ class TurnRuns:
             ended_at=reported.ended_at,
             calls=reported.calls,
             tools=reported.tools,
+            failures=reported.failures,
             error_type=None if turn.completed else TURN_FAILED,
         )
         if owner.subject_kind == "chat":
@@ -468,6 +528,17 @@ class TurnRuns:
             self._pricing.count(owner.use_case.name, turn.profile, usage, answered=turn.completed)
             if owner.whom.odd is not None:
                 self._odd(owner.whom.odd, turn, run_id)
+            if failed is not None and owner.subject_kind == "chat":
+                logger.warning(
+                    "%s turn %s: run %d failed, %s",
+                    owner.use_case.name,
+                    turn.turn_id,
+                    run_id,
+                    _error_text(failed),
+                )
+                self._metrics.failed_chat_turns.labels(
+                    enduser_id=owner.whom.enduser_id or "", error_type=failed.reason
+                ).inc()
             logger.info(
                 "%s turn %s: run %d %s",
                 owner.use_case.name,
@@ -629,6 +700,39 @@ class TurnRuns:
             arrived.set()
         return "handed_over"
 
+    async def _close_failed(self) -> None:
+        """Close each turn whose last call failed and that has sent nothing more for the grace.
+
+        Its end never comes, so it is closed as its end would have closed it.
+        One that cannot be written now is tried again at the next sweep.
+        """
+        cutoff = time.monotonic() - self._failed_turn_grace_seconds
+        for turn_id, tally in list(self._tallies.items()):
+            failed = tally.last_failure
+            if failed is None or tally.touched >= cutoff:
+                continue
+            if tally.session_id is None:
+                # A call outside a session is in no turn with a row; the hour gives it up.
+                continue
+            ended = TurnEnded(
+                profile=tally.profile,
+                session_id=tally.session_id,
+                turn_id=turn_id,
+                task_id=failed.task_id or tally.session_id,
+                platform=tally.platform,
+                model=failed.model,
+                completed=False,
+                exit_reason=None,
+                ended_at=failed.ended_at,
+            )
+            try:
+                await self._record(ended)
+            except HermesError, httpx.HTTPError, psycopg.Error, OSError:
+                logger.exception(
+                    "could not close turn %s, whose last call failed; trying at the next sweep",
+                    turn_id,
+                )
+
     def _forget_stale(self) -> None:
         """Drop what no turn end came for, and say so: those calls are in no row.
 
@@ -679,6 +783,7 @@ class TurnRuns:
             ended_at=tally.reported_until,
             calls=tally.calls,
             tools=tally.tools,
+            failures=tally.failures,
             error_type=TURN_WITHOUT_END,
         )
 
@@ -691,7 +796,16 @@ def _reported(tally: _Tally | None, turn: TurnEnded) -> ReportedTurn:
         started_at=tally.started_at if tally is not None else turn.ended_at,
         ended_at=turn.ended_at,
         completed=turn.completed,
+        failures=tuple(tally.failures) if tally is not None else (),
     )
+
+
+def _error_text(call: FailedCall | None) -> str | None:
+    """What a row says of a call that failed for good: source, status, the harness's class."""
+    if call is None:
+        return None
+    status = f" with {call.status_code}" if call.status_code is not None else ""
+    return f"the last model call to {call.model_source} failed{status} ({call.reason})"
 
 
 def _usage(calls: Sequence[ModelCall]) -> Usage:
