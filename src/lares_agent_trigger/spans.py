@@ -13,10 +13,6 @@ The root is started before the row is written, because the row names the
 trace; it is ended once the row's id is known. A root that is never ended is
 never exported — what becomes of a delivery whose row was already there.
 
-A background review the harness forks after a chat answer reports its calls
-and tools after the answer's end; they join the answer's trace, under its
-root, as they come.
-
 A log line written inside a span carries its `trace_id` and `span_id`, so
 Grafana can go from a trace to its lines and back, and a line of a person's
 turn names them as `enduser.id`.
@@ -126,20 +122,6 @@ class TurnTrace:
             self._root.set_attribute("lares.run.id", run_id)
         if error_type is not None:
             failed(self._root, error_type)
-        self.join(calls=calls, tools=tools, failures=failures)
-        self._root.end(end_time=_ns(ended_at))
-
-    def join(
-        self,
-        *,
-        calls: Sequence[ModelCall] = (),
-        tools: Sequence[ToolCall] = (),
-        failures: Sequence[FailedCall] = (),
-    ) -> None:
-        """Add a span per call, failure and tool under the root, at the times the hook reported.
-
-        Also after the root has ended: a background review's calls come after its answer's end.
-        """
         parent = trace.set_span_in_context(self._root)
         for call in calls:
             _chat_span(call, parent)
@@ -147,6 +129,7 @@ class TurnTrace:
             _failed_chat_span(failure, parent)
         for tool in tools:
             _tool_span(tool, parent)
+        self._root.end(end_time=_ns(ended_at))
 
 
 class TraceIds(logging.Filter):

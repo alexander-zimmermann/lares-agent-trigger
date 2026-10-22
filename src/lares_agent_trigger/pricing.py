@@ -10,10 +10,9 @@ for the machines.
 
 A run's cost is the sum over its calls, and unknown once one call's is: the
 row's cost stays NULL, an honest unknown where a guess would not be, and the
-call is counted with why it has no cost. `undeclared`: no step covers its
-provider and model. `no_usage`: a metered call that reported no usage.
-`no_calls`: a run that called the model, and none of its calls came through
-the hook.
+call is counted: no step covers its provider and model, a metered call
+reported no usage, or a run called the model and none of its calls came
+through the hook.
 """
 
 from __future__ import annotations
@@ -31,8 +30,6 @@ logger = logging.getLogger(__name__)
 
 # Which step of its profile's source served a call: none, for a provider and model it does not name.
 Step = Literal["primary", "fallback", "undeclared"]
-# Why a call or a run has no cost.
-Unpriced = Literal["undeclared", "no_usage", "no_calls"]
 
 
 @dataclass(frozen=True)
@@ -85,8 +82,7 @@ class Pricing:
         for call in usage.calls:
             served = self.served(profile, call.model_source, call.model)
             if call.cost is None:
-                reason: Unpriced = "undeclared" if served.declared is None else "no_usage"
-                self._unpriced(use_case, call.model_source, call.model, reason)
+                self._unpriced(use_case, call.model_source, call.model)
             else:
                 self._metrics.cost.labels(
                     use_case=use_case,
@@ -96,25 +92,19 @@ class Pricing:
                 ).inc(float(call.cost))
         # A run that answered or read tokens called the model, whether the hook said so or not.
         if not usage.calls and (answered or usage.tokens_in):
-            self._unpriced(use_case, usage.model_source, usage.model, "no_calls")
+            self._unpriced(use_case, usage.model_source, usage.model)
         if answered and usage.model_source is not None:
             served = self.served(profile, usage.model_source, usage.model)
             self._metrics.answers.labels(
                 use_case=use_case, source=served.source, step=served.step
             ).inc()
 
-    def _unpriced(
-        self, use_case: str, provider: str | None, model: str | None, reason: Unpriced
-    ) -> None:
+    def _unpriced(self, use_case: str, provider: str | None, model: str | None) -> None:
         logger.warning(
-            "%s: a call on %s/%s has no cost (%s); its row's cost stays NULL",
-            use_case,
-            provider,
-            model,
-            reason,
+            "%s: a call on %s/%s has no cost; its row's cost stays NULL", use_case, provider, model
         )
         self._metrics.unpriced_calls.labels(
-            use_case=use_case, provider=provider or "", model=model or "", reason=reason
+            use_case=use_case, provider=provider or "", model=model or ""
         ).inc()
 
     def _source_of(self, profile: str) -> ModelSource | None:

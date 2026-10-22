@@ -135,7 +135,7 @@ The generator renders the default profile's `model` and `fallback_providers` fro
 
 A source nobody runs on may leave its bound and its fallbacks' prices open, and name any provider; it renders nothing.
 
-Every model call is priced at the row's write by the step of its profile's source that served it, matched on the call's provider and model. A subscription step costs 0. A priced step costs fresh input, cache reads and output at their own rates; a cache write counts as fresh input. The row's `cost` is the sum over its calls, on every path: chat, cron and event; an event attempt that is retried keeps no row of its own, and what it spent counts in the metrics only. A row's `cost` stays NULL, and `agent_trigger_unpriced_calls_total` counts it, when a call matches no declared step (`undeclared`), a metered call reported no usage (`no_usage`), or a run answered or read tokens and none of its calls came through the hook (`no_calls`). The session record's cost estimate is never read.
+Every model call is priced at the row's write by the step of its profile's source that served it, matched on the call's provider and model. A subscription step costs 0. A priced step costs fresh input, cache reads and output at their own rates; a cache write counts as fresh input. The row's `cost` is the sum over its calls, on every path: chat, cron and event; an event attempt that is retried keeps no row of its own, and what it spent counts in the metrics only. A row's `cost` stays NULL, and `agent_trigger_unpriced_calls_total` counts it, when a call matches no declared step, a metered call reported no usage, or a run answered or read tokens and none of its calls came through the hook. The session record's cost estimate is never read.
 
 ## The persons
 
@@ -472,7 +472,7 @@ A row that a dead pod left `queued` or `running` is not started again when its e
 
 The harness starts two kinds of run on its own: a person's turn in Discord or the web chat, and a cron job coming due. The trigger hears of them as they happen, through the harness's outbound hook (`hooks.outbound` in its configuration), which posts four of its lifecycle hooks to `POST /hooks/hermes`, signed with HMAC-SHA256 over the raw body (`X-Hermes-Signature-256: sha256=<hex>`) under a secret both pods read:
 
-- `post_api_request`, once per call to the model: its tokens, the model and its source, when it started and ended, the tools it asked for with their arguments, and its reply. Each call is added to its turn's tally in memory; a background review's is booked at once (below).
+- `post_api_request`, once per call to the model: its tokens, the model and its source, when it started and ended, the tools it asked for with their arguments, and its reply. Each call is added to its turn's tally in memory; a background review's is counted at once (below).
 - `post_tool_call`, once per tool the model asked for, as the tool returns: its name, its call id, how long it took and whether it failed. The tool's arguments and result come along and are dropped on arrival. A tool joins the tally its model call opened; one of no tally is left alone.
 - `api_request_error`, once per failed attempt at a call, whether the harness tries again, falls back or gives up: the model and source it asked, the status they answered and the harness's class of the failure (`auth`, `rate_limit`, `model_not_found`, …). The request it sent, the person's message included, and the error in the source's words come along and are dropped on arrival. The attempt joins its turn's tally.
 - `on_session_end`, which despite its name fires once per turn, after that turn's calls: whether it completed, and why it stopped. It writes the turn's row from the tally.
@@ -483,20 +483,14 @@ Whose row a turn is, the end's top-level `profile` and its platform decide. The 
 | --------- | ------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `default` | `api_server`  | —                                                        | none: the event run it belongs to takes its calls (see below)           |
 | `default` | `cron`        | the enabled `schedule` use case its job is named after   | trigger `schedule` (`message` when the chat asked it to run now), subject kind `none`, key `<job id>:<execution id>` |
-| `default` | `discord`     | the one enabled `message` use case                       | an odd turn while a person is on Discord (below); without one, the chat's row of nobody, text kept |
+| `default` | `discord`     | the one enabled `message` use case                       | none while a person is on Discord (below); without one, the chat's row of nobody, text kept |
 | a person  | `discord`     | the one enabled `message` use case                       | trigger `message`, subject kind `chat`, key `<session id>:<turn>`, `enduser_id` the handle, `surface = discord` |
 | a person  | `api_server`  | the one enabled `message` use case                       | the same, `surface = web`: the web chat                                 |
 | any       | anything else | —                                                        | none                                                                    |
 
 A machine's row leaves `enduser_id` and `surface` NULL, a run a person asked for through `start_run` included. A person who does not `keep_answers` gets rows without `text`, `tldr` and the tools' arguments; the model, its source, the tokens, the cost and the tools' names stay.
 
-Three turns should not come at all. Each is counted in `agent_trigger_odd_turns_total` with its kind, for an alert to fire on, and logged as a warning:
-
-| Kind                 | The turn                                                       | Row                                                         |
-| -------------------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
-| `undeclared_profile` | a chat turn of a profile no enabled person runs on: undeclared, or a dormant person's | the chat's, `enduser_id` the profile's name, numbers only |
-| `discord_on_default` | a Discord turn on the default profile while a person is on Discord, so it got past the routes | the chat's, `enduser_id` NULL, `surface = discord`, numbers only |
-| `cron_on_person`     | a cron turn on a person's profile (on an undeclared one it is `undeclared_profile`) | none: only the default profile runs the declared jobs |
+Three turns are left alone, with one log line and no row: a chat turn of a profile no enabled person runs on (undeclared, or a dormant person's), a Discord turn on the default profile while a person is on Discord, which got past the routes, and a cron turn on any profile but the default, which alone runs the declared jobs.
 
 A cron run whose use case delivers somewhere other than `stored` — a pull request, a page, a mail — is delivered by the trigger, as an event run is: the hook is answered first, the row is written `running` with the turn's answer as its text, and the delivery closes it, `failed` with `AgentRunFailed` when a target refuses. A turn that completed without an answer fails the same way. A chat turn is answered by the harness in its own conversation and delivered nowhere.
 
@@ -529,26 +523,17 @@ An event run gets its calls the same way: its turn comes in on the `api_server` 
 
 ### Background reviews
 
-After a chat answer the harness may review the person's profile notes and skills in the background: the notes every `memory.nudge_interval`-th message of a session, the skills once enough tool rounds have built up. It forks the review into the answer's session, without a task id, so the review's calls run under a task of their own, and the fork never sends `on_session_end`. A chat call whose task is not its session is such a review. Each of its calls is added at once to the session's newest chat row:
-
-| Column              | What it holds                                                                    |
-| ------------------- | -------------------------------------------------------------------------------- |
-| `review_tokens_in`  | What the review's calls read, cache included.                                    |
-| `review_tokens_out` | What they wrote.                                                                 |
-| `review_cost`       | What they cost, each call priced like any other.                                 |
-| `review_text`       | The review's last reply ("Nothing to save."); empty for a person who does not `keep_answers`. |
-
-An unknown part leaves its sum unknown, as on the row's own columns. The row stays one answered message, so the day's runs are unchanged, and a person's spend is `cost + review_cost`. A redelivered call is booked once. A review in a session no row holds, because its answer's end never came through, is in no row, and its calls are counted in `agent_trigger_orphaned_calls_total`.
+After a chat answer the harness may review the person's profile notes and skills in the background: the notes every `memory.nudge_interval`-th message of a session, the skills once enough tool rounds have built up. It forks the review into the answer's session, without a task id, so the review's calls run under a task of their own, and the fork never sends `on_session_end`. A chat call whose task is not its session is such a review. Its calls are in no row: each is priced like any call and counted in `agent_trigger_cost_usd_total` by the person, and that is all; a failed attempt of a review is left alone.
 
 The web chat has to send its session header (`X-Hermes-Session-Id`): without it an API-server turn runs under a task of its own and reads as a review.
 
-Every `SWEEP_INTERVAL_SECONDS`, a sweep closes the failed turns past their grace and gives up what no end came for within an hour. The calls of a turn that is no review and never ended are counted in `agent_trigger_orphaned_calls_total` by the profile's person, for an alert to fire on.
+Every `SWEEP_INTERVAL_SECONDS`, a sweep closes the failed turns past their grace and gives up what no end came for within an hour. The calls of a turn that never ended are counted in `agent_trigger_orphaned_calls_total` by the profile's person, for an alert to fire on.
 
 What the receiver answers is what the harness acts on — it sends a delivery at most twice, the second time only after a connection error or a 5xx:
 
 | Answer | When                                                                                 |
 | ------ | ------------------------------------------------------------------------------------ |
-| `200`  | The call is counted or booked or the row written, either was already (a replay), or the turn is not ours. |
+| `200`  | The call is counted or the row written, either was already (a replay), or the turn is not ours. |
 | `401`  | The signature is missing or wrong. Counted, never parsed.                            |
 | `400`  | The body is none of the four hooks.                                                  |
 | `503`  | The ledger or the Jobs API did not answer; the second try may succeed.              |
@@ -566,7 +551,7 @@ invoke_agent messenger            gen_ai.conversation.id, lares.run.id, enduser.
 
 A failed attempt at a call is a `chat` span too, failed with the harness's class of the failure as `error.type`; every attempt at one call starts when its first did. A turn that failed ends its root failed with `error.type = turn_failed`.
 
-The root runs from the first call's start to the turn's end, and is started before the row is written so the row can carry its id. A person's turn names them in `enduser.id` and where they wrote in `lares.surface`, as their row does; a machine's names neither. A cron turn is the same trace under its use case. A turn that never ended is given up after an hour as a trace of its own, failed with `error.type = turn_without_end`; a person's still names them. A background review's calls and tools join its answer's trace as they come, under the root, after the answer's end; a review that follows a restart is booked, but not traced, as the answer's root is gone with the process.
+The root runs from the first call's start to the turn's end, and is started before the row is written so the row can carry its id. A person's turn names them in `enduser.id` and where they wrote in `lares.surface`, as their row does; a machine's names neither. A cron turn is the same trace under its use case. A turn that never ended is given up after an hour as a trace of its own, failed with `error.type = turn_without_end`; a person's still names them.
 
 An event run continues the trace of the engine's run that published the event, from the `traceparent` in the message's NATS headers:
 
@@ -649,14 +634,13 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_capped_total`            | `use_case`         | Events refused because the day's budget was spent.           |
 | `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |
 | `agent_trigger_run_duration_seconds`    | `use_case`         | Wall-clock time from start to terminal state.                |
-| `agent_trigger_hook_events_total`       | `outcome`          | Hook deliveries: `counted` (a model call or a tool), `recorded`, `booked` (a background review's call), `handed_over` (an event run's turn ended, kept for it), `duplicate`, `orphaned` (a review's call no row holds), `ignored`, `refused`, `invalid`, `error`. |
+| `agent_trigger_hook_events_total`       | `outcome`          | Hook deliveries: `counted` (a model call, a background review's call or a tool), `recorded`, `handed_over` (an event run's turn ended, kept for it), `duplicate`, `ignored`, `refused`, `invalid`, `error`. |
 | `agent_trigger_recorded_runs_total`     | `use_case`, `status`, `enduser_id` | Chat and cron runs written from the hook, by the status of their row and the person it answered (empty for the machines). |
 | `agent_trigger_failed_chat_turns_total` | `enduser_id`, `error_type` | Chat turns whose last model call failed for good, by the person and the harness's class of the failure, as on the failed call's span (see [Failed turns](#failed-turns)). |
-| `agent_trigger_odd_turns_total`         | `kind`, `enduser_id` | Turns that should not have come: `undeclared_profile`, `discord_on_default`, `cron_on_person` (see [Chat and cron runs](#chat-and-cron-runs)). |
 | `agent_trigger_cost_usd_total`          | `use_case`, `source`, `step`, `enduser_id` | USD the runs' calls cost at the declared prices, background reviews' included, by model source, step (`primary`, `fallback`) and the person the run answered (empty for the machines). |
-| `agent_trigger_unpriced_calls_total`    | `use_case`, `provider`, `model`, `reason` | Calls without a cost, `undeclared`, `no_usage` or `no_calls`; their row's cost is NULL. |
+| `agent_trigger_unpriced_calls_total`    | `use_case`, `provider`, `model` | Calls without a cost: no declared step, no usage, or calls that never came through the hook; their row's cost is NULL. |
 | `agent_trigger_answers_total`           | `use_case`, `source`, `step` | Answered runs, by the step of the model source that gave the answer: `primary`, `fallback`, or `undeclared`. |
-| `agent_trigger_orphaned_calls_total`    | `enduser_id`       | Model calls spent and in no row: of a turn that never reported its end within an hour, or of a background review in a session no row holds, by the profile's person (empty for the machines). |
+| `agent_trigger_orphaned_calls_total`    | `enduser_id`       | Model calls spent and in no row: of a turn that never reported its end within an hour, by the profile's person (empty for the machines). |
 | `agent_trigger_reconciles_total`        | `outcome`          | Reconciles of the cron jobs: `done`, `failed` (not answered, tried again) or `refused`. |
 | `agent_trigger_cron_jobs_total`         | `action`           | Managed jobs the reconcile `created`, `updated` or `deleted`. |
 | `agent_trigger_api_requests_total`      | `route`, `code`    | Requests to the API (`runs`, `memory`), by the status code they were answered. |
@@ -666,7 +650,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 ## Tests
 
-The generator is pure and tested apart: the declarations and settings in `tests/rendering/` go in, and every rendered file must equal its expected file in `tests/rendering/expected/`. After a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review. The rendered routes are also run as the harness runs them: agentgateway in a container, started as its chart starts it with the rendered values, every variable set from its sealed key, the routes and every credential laid into a volume the way kubelet lays a Secret, with the real GitHub server, a stand-in bridge and a stand-in Authentik behind it under the names the declaration gives them. A key opens its own route only, a tool outside a server's `tools` is neither listed nor callable, each route names its client and the key's person to the bridge and a caller's own such headers never reach it, GitHub answers only with the attached token, a renewed credential reaches a session the harness keeps open without a restart, and the connector points a client without a token at its sign-in, hands out the pre-registered client, serves a declared person's token, refuses anyone else's, and names the token's person whatever headers the client sends.
+The generator is pure and tested apart: the declarations and settings in `tests/rendering/` go in, and every rendered file must equal its expected file in `tests/rendering/expected/`. After a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review. The rendered routes are also run as the harness runs them: agentgateway in a container, started as its chart starts it with the rendered values, every variable set from its sealed key, the routes and every credential laid into a volume the way kubelet lays a Secret, with a stand-in bridge under the bridge's and GitHub's names and a stand-in Authentik behind it, under the names the declaration gives them. A key opens its own route only, a tool outside a server's `tools` is neither listed nor callable, each route names its client and the key's person to the bridge and a caller's own such headers never reach it, a route attaches its server's credential from the mounted file, a renewed credential reaches a session the harness keeps open without a restart, and the connector points a client without a token at its sign-in, hands out the pre-registered client, serves a declared person's token, refuses anyone else's, and names the token's person whatever headers the client sends.
 
 Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the harness and the bridge send it; the ledger rows land in a real TimescaleDB container and the spans in an in-memory exporter, sampled at a ratio a test may set; the harness, Alertmanager, Discord, Wiki.js and GitHub are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the harness's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the harness refuses, resumes a paused job it runs, hides paused jobs from a plain list), the others so the alert, the message, the page and the pull request are asserted as they would arrive; GitHub keeps its own rules on the App's JWT and tokens, refs, contents writes, pull requests and labels — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the harness's error texts, and so has the diff a pull request carries against the file it changes.
 

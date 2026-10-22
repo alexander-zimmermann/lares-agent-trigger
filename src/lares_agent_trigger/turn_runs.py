@@ -20,19 +20,16 @@ profile is their chat: a Discord turn is the chat use case's row on surface
 the person by the handle, and keeps the answer's text only for a person who
 keeps answers. A machine's row names nobody.
 
-Three turns should not come at all, and each is counted and said: a turn of
-a profile no enabled person runs on is a chat row under the profile's name,
-with the numbers only; a Discord turn on the default profile, while the chat
-is the persons', is one of nobody, with the numbers only; a cron turn on any
-profile but the default gets no row, as no use case owns it. Without a person
-on Discord the default profile serves the chat, and its turns are rows of
-nobody that keep their text. The rest is left alone.
+A turn of a profile no enabled person runs on, a Discord turn on the default
+profile while the chat is the persons', and a cron turn on any profile but the
+default are left alone: one log line, no row. Without a person on Discord the
+default profile serves the chat, and its turns are rows of nobody that keep
+their text. So is every other turn left alone.
 
 After a chat answer the harness may fork a background review of the
 profile notes and skills into the answer's session. Its calls run under a task
-of their own and its end never comes, so each is booked at once on the
-session's newest chat row, in the review columns, priced like any call; its
-calls and tools join that answer's trace. The row stays one answered message.
+of their own and its end never comes, so they are in no row: each is priced
+like any call and counted in the metrics by the person, and that is all.
 
 A call that fails is tried again or handed to the source's fallback, and
 each failed attempt is reported and kept in the turn's tally. A turn whose
@@ -56,8 +53,7 @@ and the delivery closes it as an event run's would, with AgentRunFailed when a
 target refuses.
 
 The tallies live in memory. A turn whose calls came in before a restart and
-whose end came after gets its row without them, never with a guess; a review
-that follows a restart is booked, but not traced.
+whose end came after gets its row without them, never with a guess.
 
 Every call is priced at the row's write by the declared step of its profile's
 source that served it (`pricing.py`), and the row's cost is their sum.
@@ -83,7 +79,6 @@ from .hermes import HermesClient, HermesError
 from .hooks import FailedCall, ModelCall, ToolCall, TurnEnded
 from .ledger import (
     CallTrace,
-    ChatRow,
     ClosedStatus,
     Ledger,
     SubjectKind,
@@ -99,11 +94,7 @@ from .use_cases import UseCase, chat_use_case, scheduled_use_case
 
 logger = logging.getLogger(__name__)
 
-Outcome = Literal[
-    "counted", "recorded", "booked", "handed_over", "duplicate", "orphaned", "ignored"
-]
-# What was odd about a turn that should not have come the way it did.
-OddTurn = Literal["undeclared_profile", "discord_on_default", "cron_on_person"]
+Outcome = Literal["counted", "recorded", "handed_over", "duplicate", "ignored"]
 
 # The surface a person writes on, the one the harness's cron runs as, and the
 # one this service's own runs come in through.
@@ -234,54 +225,10 @@ class _Whom:
     surface: Surface | None = None
     # Whether the row keeps the answer's text and the tools' arguments.
     keep_answers: bool = False
-    # What was odd about the turn, if it should not have come this way.
-    odd: OddTurn | None = None
 
 
 # A machine's run: it answered nobody and keeps its text.
 _MACHINES = _Whom(keep_answers=True)
-
-
-@dataclass(frozen=True)
-class _Answer:
-    """A chat row this process wrote, and the trace it is in."""
-
-    run_id: int
-    trace: TurnTrace
-    written: float = field(default_factory=time.monotonic)
-
-
-@dataclass
-class _Review:
-    """A background review: each of its calls booked on the row its answer was written to."""
-
-    # None when no row holds the session.
-    row: ChatRow | None
-    keep_answers: bool
-    # The answer's trace; None when its row was written before a restart.
-    trace: TurnTrace | None
-    # The calls already seen by number, and the tools traced by call id:
-    # what tells a redelivery from the next one.
-    seen: set[int] = field(default_factory=set)
-    tools: set[str] = field(default_factory=set)
-    touched: float = field(default_factory=time.monotonic)
-
-    def holds(self, call: ModelCall) -> bool:
-        """Whether the call was seen already: a redelivery."""
-        return call.number in self.seen
-
-    def add(self, call: ModelCall) -> None:
-        self.seen.add(call.number)
-        self.touched = time.monotonic()
-
-    def add_tool(self, call: ToolCall) -> bool:
-        """Note a tool for the trace; False when it is a redelivery."""
-        if call.call_id is not None:
-            if call.call_id in self.tools:
-                return False
-            self.tools.add(call.call_id)
-        self.touched = time.monotonic()
-        return True
 
 
 @dataclass(frozen=True)
@@ -326,10 +273,6 @@ class TurnRuns:
         self._arrivals: dict[str, asyncio.Event] = {}
         # Jobs a person asked to run now, by job id, with when they asked.
         self._requested: dict[str, float] = {}
-        # The newest chat row of each session, by session id, and the
-        # background reviews going on, by their turn id.
-        self._answers: dict[str, _Answer] = {}
-        self._reviews: dict[str, _Review] = {}
 
     async def handle(self, hook: ModelCall | ToolCall | FailedCall | TurnEnded) -> Outcome:
         """Add a call, a failure or a tool to its turn's tally, or write an ended turn's row."""
@@ -337,13 +280,12 @@ class TurnRuns:
             session_id = hook.session_id
             # A chat turn's task is its session; the harness forks a background
             # review into the session without one, so its calls run under their own.
-            if session_id is not None and hook.task_id not in (None, session_id):
-                whom = self._chat_of(hook.profile, hook.platform)
-                if whom is not None:
-                    if isinstance(hook, FailedCall):
-                        # A review that fails costs nothing and answers nobody.
-                        return "ignored"
-                    return await self._book(hook, session_id, whom)
+            if (
+                session_id is not None
+                and hook.task_id not in (None, session_id)
+                and self._chat_of(hook.profile, hook.platform) is not None
+            ):
+                return self._count_review(hook)
             return self._count(hook)
         if isinstance(hook, ToolCall):
             return self._count_tool(hook)
@@ -394,72 +336,30 @@ class TurnRuns:
             return "counted"
         return "counted" if tally.add(call) else "duplicate"
 
-    async def _book(self, call: ModelCall, session_id: str, whom: _Whom) -> Outcome:
-        """Add a review's call at once to the row of the answer that set the review off.
+    def _count_review(self, call: ModelCall | FailedCall) -> Outcome:
+        """Count a background review's call by the person; it is in no row.
 
-        A review in a session no row holds — its answer's end never came
-        through — is in no row, and its calls are counted as orphaned.
+        The review's end never comes, so its calls open no tally: each is
+        priced like any call and counted in the metrics, and that is all. A
+        review's failed attempt costs nothing and answers nobody.
         """
-        review = self._reviews.get(call.turn_id)
-        if review is None:
-            review = self._reviews[call.turn_id] = await self._open_review(call, session_id, whom)
-        if review.holds(call):
-            return "duplicate"
-        if review.row is None:
-            review.add(call)
-            self._metrics.orphaned_calls.labels(enduser_id=enduser_of(call.profile) or "").inc()
-            return "orphaned"
+        if isinstance(call, FailedCall):
+            return "ignored"
+        chat = chat_use_case(self._use_cases)
+        if chat is None:
+            return "ignored"
         usage = self._pricing.price(call.profile, _usage([call]))
-        await self._ledger.add_review(
-            review.row.id,
-            tokens_in=call.tokens_in,
-            tokens_out=call.tokens_out,
-            cost=usage.cost,
-            text=call.content if review.keep_answers else None,
-            continued=bool(review.seen),
-        )
-        review.add(call)
-        self._pricing.count(review.row.use_case, call.profile, usage, answered=False)
-        if review.trace is not None:
-            review.trace.join(calls=[call])
-        return "booked"
-
-    async def _open_review(self, call: ModelCall, session_id: str, whom: _Whom) -> _Review:
-        """The review a first call opens: on the session's newest chat row, in its trace."""
-        row = await self._ledger.newest_chat_row(session_id)
-        if row is None:
-            logger.warning(
-                "turn %s is a background review in session %s, which no row holds:"
-                " its calls are in no row",
-                call.turn_id,
-                session_id,
-                extra={"enduser.id": whom.enduser_id} if whom.enduser_id is not None else None,
-            )
-            return _Review(None, whom.keep_answers, None)
-        answer = self._answers.get(session_id)
-        # After a restart the answer's root is gone: the calls are booked, never traced.
-        joined = answer.trace if answer is not None and answer.run_id == row.id else None
-        with joined.current() if joined is not None else contextlib.nullcontext():
-            logger.info("turn %s is a background review of run %d", call.turn_id, row.id)
-        return _Review(row, whom.keep_answers, joined)
+        self._pricing.count(chat.name, call.profile, usage, answered=False)
+        return "counted"
 
     def _count_tool(self, call: ToolCall) -> Outcome:
-        """Add a tool to the tally its turn's model call opened, or a review's to its trace.
-
-        A tool of neither is not ours.
-        """
+        """Add a tool to the tally its turn's model call opened; one of no tally is not ours."""
         if call.turn_id is None:
             return "ignored"
         tally = self._tallies.get(call.turn_id)
-        if tally is not None:
-            return "counted" if tally.add_tool(call) else "duplicate"
-        review = self._reviews.get(call.turn_id)
-        if review is None or review.trace is None:
+        if tally is None:
             return "ignored"
-        if not review.add_tool(call):
-            return "duplicate"
-        review.trace.join(tools=[call])
-        return "counted"
+        return "counted" if tally.add_tool(call) else "duplicate"
 
     async def _record(self, turn: TurnEnded) -> Outcome:
         if turn.profile == DEFAULT_PROFILE and turn.platform == _API_PLATFORM:
@@ -520,14 +420,9 @@ class TurnRuns:
             failures=reported.failures,
             error_type=None if turn.completed else TURN_FAILED,
         )
-        if owner.subject_kind == "chat":
-            # What a background review after this answer is booked on and traced under.
-            self._answers[turn.session_id] = _Answer(run_id, turn_trace)
         # Inside the turn's trace, so the pricing's and the delivery's log lines carry it too.
         with turn_trace.current():
             self._pricing.count(owner.use_case.name, turn.profile, usage, answered=turn.completed)
-            if owner.whom.odd is not None:
-                self._odd(owner.whom.odd, turn, run_id)
             if failed is not None and owner.subject_kind == "chat":
                 logger.warning(
                     "%s turn %s: run %d failed, %s",
@@ -606,43 +501,38 @@ class TurnRuns:
         ).inc()
 
     async def _owner(self, turn: TurnEnded) -> _Owner | None:
-        """Whose run a turn was, by its profile and its platform."""
-        if turn.platform == _CRON_PLATFORM:
-            if turn.profile == DEFAULT_PROFILE:
-                return await self._cron_owner(turn)
-            # Only the default profile runs the declared jobs, so no use case owns it.
-            person = self._persons.enabled_person(turn.profile)
-            self._odd("cron_on_person" if person is not None else "undeclared_profile", turn)
-            return None
+        """Whose run a turn was, by its profile and its platform; None for one left alone."""
+        if turn.platform == _CRON_PLATFORM and turn.profile == DEFAULT_PROFILE:
+            return await self._cron_owner(turn)
         whom = self._chat_of(turn.profile, turn.platform)
         if whom is None:
-            logger.debug(
-                "left a %s turn of profile %s alone: not a chat and not a cron run",
+            # Only the default profile runs the declared jobs, and only a
+            # declared person's profile is a chat: no use case owns this one.
+            logger.info(
+                "left %s turn %s of profile %s alone: no use case owns it",
                 turn.platform,
+                turn.turn_id,
                 turn.profile,
             )
             return None
         return self._chat_owner(turn, whom)
 
     def _chat_of(self, profile: str, platform: str) -> _Whom | None:
-        """Whose chat a turn of this profile on this platform is; None for one that is no chat."""
+        """Whose chat a turn of this profile on this platform is; None for one that is no chat.
+
+        The default profile serves the chat only while nobody is on Discord:
+        with persons on Discord the bot routes every message to a person's
+        profile, and a turn that reached the machines' profile past the routes
+        is no chat, nor is a turn of a profile no enabled person runs on.
+        """
         if profile == DEFAULT_PROFILE:
-            if platform != _CHAT_PLATFORM:
+            if platform != _CHAT_PLATFORM or self._persons.on_discord:
                 return None
-            if self._persons.on_discord:
-                # The bot routes every message of a person to their profile: this
-                # one reached the machines' profile past the routes.
-                return _Whom(surface="discord", odd="discord_on_default")
-            # Nobody is on Discord: the default profile serves the chat.
             return _Whom(keep_answers=True)
         surface = _SURFACES.get(platform)
-        if surface is None:
-            return None
         person = self._persons.enabled_person(profile)
-        if person is None:
-            # Under its name, so whoever it answered can be found, and with the
-            # numbers only, so no other person reads it.
-            return _Whom(enduser_id=profile, surface=surface, odd="undeclared_profile")
+        if surface is None or person is None:
+            return None
         return _Whom(enduser_id=person.name, surface=surface, keep_answers=person.keep_answers)
 
     def _chat_owner(self, turn: TurnEnded, whom: _Whom) -> _Owner | None:
@@ -659,23 +549,6 @@ class TurnRuns:
             subject_key=f"{turn.session_id}:{turn.turn}",
             whom=whom,
         )
-
-    def _odd(self, odd: OddTurn, turn: TurnEnded, run_id: int | None = None) -> None:
-        """Count a turn that should not have come the way it did, and say what became of it.
-
-        Outside a turn's trace the line names the profile's person itself.
-        """
-        enduser_id = enduser_of(turn.profile)
-        logger.warning(
-            "%s turn %s of profile %s is odd (%s): %s",
-            turn.platform,
-            turn.turn_id,
-            turn.profile,
-            odd,
-            f"run {run_id}, numbers only" if run_id is not None else "no row",
-            extra={"enduser.id": enduser_id} if enduser_id is not None else None,
-        )
-        self._metrics.odd_turns.labels(kind=odd, enduser_id=enduser_id or "").inc()
 
     async def _cron_owner(self, turn: TurnEnded) -> _Owner | None:
         run = turn.cron_run
@@ -734,11 +607,7 @@ class TurnRuns:
                 )
 
     def _forget_stale(self) -> None:
-        """Drop what no turn end came for, and say so: those calls are in no row.
-
-        An answer no review followed and a review that stopped are dropped
-        silently: their calls are already booked.
-        """
+        """Drop what no turn end came for, and say so: those calls are in no row."""
         cutoff = time.monotonic() - _TALLY_LIFETIME_SECONDS
         for turn_id in [key for key, tally in self._tallies.items() if tally.touched < cutoff]:
             tally = self._tallies.pop(turn_id)
@@ -754,10 +623,6 @@ class TurnRuns:
             self._trace_dropped(tally)
         for session_id in [key for key, (_, at) in self._finished.items() if at < cutoff]:
             del self._finished[session_id]
-        for session_id in [key for key, answer in self._answers.items() if answer.written < cutoff]:
-            del self._answers[session_id]
-        for turn_id in [key for key, review in self._reviews.items() if review.touched < cutoff]:
-            del self._reviews[turn_id]
         # A request whose run never came: the job's next turn is its schedule's again.
         for job_id in [key for key, asked in self._requested.items() if asked < cutoff]:
             del self._requested[job_id]

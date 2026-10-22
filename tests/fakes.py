@@ -227,11 +227,6 @@ def review_call(number: int, **fields: Any) -> bytes:
     return model_call(number, task_id=REVIEW_TASK, turn=REVIEW_TURN, **fields)
 
 
-def review_tool(call: str, **fields: Any) -> bytes:
-    """One `post_tool_call` of a background review in the chat session."""
-    return tool_call(call, task_id=REVIEW_TASK, turn=REVIEW_TURN, **fields)
-
-
 # A managed cron job: the harness mints the 12-hex id itself, so the use case
 # rides on the name. A cron run's task id is `cron:<job id>:<execution id>`
 # and its session `cron_<job id>_<time>` — `cron/scheduler.py`.

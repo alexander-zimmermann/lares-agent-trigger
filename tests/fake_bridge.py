@@ -1,15 +1,16 @@
 """A stand-in bridge for the gateway test: lists a tool no route serves, echoes the caller.
 
 Run inside a container on the gateway's network, standard library only:
-`python -I fake_bridge.py`. It speaks MCP over streamable HTTP without
-sessions, the way the gateway calls a route's server, and answers every tool
-call with what names the call: the `Authorization` header it arrived with,
-and the client and the person the gateway set.
+`python -I fake_bridge.py`, on `PORT` (8080 by default). It speaks MCP over
+streamable HTTP without sessions, the way the gateway calls a route's server,
+and answers every tool call with what names the call: the `Authorization`
+header it arrived with, and the client and the person the gateway set.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, override
 
@@ -71,4 +72,4 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 8080), _Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), _Handler).serve_forever()
