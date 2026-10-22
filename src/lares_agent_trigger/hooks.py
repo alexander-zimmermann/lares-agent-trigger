@@ -169,7 +169,7 @@ def parse_hook(body: bytes) -> ModelCall | ToolCall | TurnEnded:
 
 
 def _model_call(raw: dict[str, Any], extra: dict[str, Any]) -> ModelCall:
-    # The gateway sends `usage: null` for a response that carried none.
+    # The harness sends `usage: null` for a response that carried none.
     usage = extra.get("usage")
     if usage is not None and not isinstance(usage, dict):
         raise ValueError("hook body carries an `extra.usage` that is not an object")
@@ -199,7 +199,7 @@ def _model_call(raw: dict[str, Any], extra: dict[str, Any]) -> ModelCall:
 def _tools(calls: Any) -> tuple[ToolUse, ...]:
     """Name and arguments of each tool call.
 
-    The gateway sends its own `ToolCall` dataclass as a dict: `name` and
+    The harness sends its own `ToolCall` dataclass as a dict: `name` and
     `arguments` (a JSON string) at the top, next to `id` and `provider_data`.
     """
     if not isinstance(calls, list):

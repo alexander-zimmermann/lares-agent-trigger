@@ -245,7 +245,7 @@ The harness runs the schedules; its own cron ledger, incidents and overdue gauge
 | a `lares:` job nothing declares, or a second job of one managed name | deletes it                                      |
 | any other job, and whether a managed job is paused | nothing: pausing a job is a person's lever                        |
 
-The pod rolls when the rendering changes, so startup is the only moment the set changes. The harness rolls on the same commit, so a reconcile the gateway does not answer is tried again every `RECONCILE_RETRY_SECONDS` until one goes through. One it answers with a refusal — a schedule it cannot parse, say — is logged as an error and counted as `refused`, and not tried again: the declaration changes only with a new commit, which rolls the pod. A job set rendered from another declaration than the mounted use-case file stops the pod at startup.
+The pod rolls when the rendering changes, so startup is the only moment the set changes. The harness rolls on the same commit, so a reconcile the harness does not answer is tried again every `RECONCILE_RETRY_SECONDS` until one goes through. One it answers with a refusal — a schedule it cannot parse, say — is logged as an error and counted as `refused`, and not tried again: the declaration changes only with a new commit, which rolls the pod. A job set rendered from another declaration than the mounted use-case file stops the pod at startup.
 
 The Jobs API creates a job from its name, schedule, prompt, skills and delivery, and takes no tool list and no model per job. Every managed job therefore sees the cron surface — every read server in use and the memory servers the schedule use cases name — and runs on the harness's default model. The loader refuses an enabled schedule use case that would need more: one naming a writing server, or pinning a model. Such a use case stays dormant until the harness can carry it. A memory server on the cron surface reaches every job, so the loader also refuses an enabled schedule use case without `memory: true` beside one that names it.
 
@@ -258,7 +258,7 @@ The trigger's own API sits on the receiver's port. The bridge forwards its `star
 | Use case                    | What happens                                                                                                  | Answer |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------- | ------ |
 | an event use case           | runs on the episode `subject` names, through the Runs API, with the filter skipped and everything else as on an event: the claim, the daily cap, the retry, the delivery | `202` with `run_id`, `subject_key` and the `output` targets, once the row is claimed |
-| a schedule use case         | its managed job runs now (`POST /api/jobs/{id}/run`); it takes no subject. `focus`, what the person asked it to look at (at most 500 characters), goes into that one run's prompt, never into the job's; an event use case takes none. Its rows of the day count against its cap, and a job a person paused is not run: the gateway's run-now would resume it for good | `202` with `job_id`; `429`, `409`; `400` when the gateway blocks the focus |
+| a schedule use case         | its managed job runs now (`POST /api/jobs/{id}/run`); it takes no subject. `focus`, what the person asked it to look at (at most 500 characters), goes into that one run's prompt, never into the job's; an event use case takes none. Its rows of the day count against its cap, and a job a person paused is not run: the harness's run-now would resume it for good | `202` with `job_id`; `429`, `409`; `400` when the harness blocks the focus |
 | the chat, a dormant use case, one not declared | nothing                                                                    | `400`, `409`, `404` |
 
 A run on an episode records `trigger = message` and the subject key `<episode id>:message:<when it was asked, UTC>`, so every request is a run of its own — the skill then says what got worse since the last one. A request while a run asked for on the same episode is still queued or running is that run, answered `409` with its id: the model sending its call twice, or a person asking before the answer came. The day's spent runs answer `429` with the `capped` row's id. The run's input is the episode as the engine recorded it (`episode_id`, `fault`, `subject`, `severity`, `requested_at`), read from `episodes`; an episode the table does not hold answers `404`.
@@ -422,16 +422,16 @@ Nothing fails silently. A failed run is retried once when the failure fixes itse
 | `timeout`            | yes   | The model source or the harness took too long to answer one call.        |
 | `network_error`      | yes   | The harness could not reach the model source.                            |
 | `hermes_unreachable` | yes   | The harness itself did not answer, or answered 5xx.                      |
-| `interrupted`        | yes   | The gateway restarted before the run settled.                            |
+| `interrupted`        | yes   | Hermes restarted before the run settled.                                 |
 | `credits_exhausted`  | no    | The account is empty; xAI sends it as a 403, so it outranks auth.        |
 | `auth_failed`        | no    | A key or token the source refused.                                       |
 | `budget_exhausted`   | no    | The run spent its tool calls or its minutes.                             |
-| `invalid_config`     | no    | A model, provider or request the gateway does not accept.                |
+| `invalid_config`     | no    | A model, provider or request the harness does not accept.                |
 | `unknown`            | no    | Nothing above matched; the raw error in the alert says what it was.      |
 | `trigger_restarted`  | no    | A redelivered event found its row still open: this pod died mid-run.     |
 | `delivery_failed`    | no    | The run completed, but a declared target refused its output.             |
 
-The harness reports a failed run as free text, so the class is read off the text by rules that follow the gateway's own cron classifier. The retry starts after `RETRY_DELAY_SECONDS` on the same row, with `attempt = 2` and its own idempotency key — the ledger key with `/2` appended, because the gateway replays the run it holds for a key it has seen, failed or not.
+The harness reports a failed run as free text, so the class is read off the text by rules that follow the harness's own cron classifier. The retry starts after `RETRY_DELAY_SECONDS` on the same row, with `attempt = 2` and its own idempotency key — the ledger key with `/2` appended, because the harness replays the run it holds for a key it has seen, failed or not.
 
 A run still failed after that closes its row with `status = failed`, `attempt` and the raw `error`, and the trigger posts `AgentRunFailed` straight to Alertmanager's `/api/v2/alerts`:
 
@@ -480,7 +480,7 @@ Three turns should not come at all. Each is counted in `agent_trigger_odd_turns_
 
 A cron run whose use case delivers somewhere other than `stored` — a pull request, a page, a mail — is delivered by the trigger, as an event run is: the hook is answered first, the row is written `running` with the turn's answer as its text, and the delivery closes it, `failed` with `AgentRunFailed` when a target refuses. A turn that completed without an answer fails the same way. A chat turn is answered by the harness in its own conversation and delivered nowhere.
 
-The gateway mints cron job ids itself, so a managed job carries its use case in its name: `lares:propose-faults`. A job without that prefix, or one naming a use case the file does not enable as a schedule, is left alone.
+The harness mints cron job ids itself, so a managed job carries its use case in its name: `lares:propose-faults`. A job without that prefix, or one naming a use case the file does not enable as a schedule, is left alone.
 
 The row holds what the turn's calls added up to: the tokens the model read (cache included) and wrote, the tools it asked for, the time from the first call's start to the last call's end, the model and model source of the last call — a fallback shows up there — and the last call's reply as the answer. Nothing is read off the session record, whose counters run over a whole conversation. Each call is priced by the declared source step of its profile's source that served it, the default profile's or the person's (see [The model sources](#the-model-sources)): a turn on the subscription costs 0, one that moved to a priced fallback costs what its calls on it did. A turn whose calls came in before a restart and whose end came after still gets its row, without the tally.
 
@@ -495,7 +495,7 @@ The row holds what the turn's calls added up to: the tokens the model read (cach
 
 Arguments are cut at 300 characters. An event run gets its calls the same way: its turn comes in on the `api_server` platform under the session the Runs API gave the run, and the event path collects them by that session once the run is over, waiting up to `TURN_WAIT_SECONDS` for the turn's end to arrive. Past the wait the row keeps the count alone.
 
-What the receiver answers is what the gateway acts on — it sends a delivery at most twice, the second time only after a connection error or a 5xx:
+What the receiver answers is what the harness acts on — it sends a delivery at most twice, the second time only after a connection error or a 5xx:
 
 | Answer | When                                                                                 |
 | ------ | ------------------------------------------------------------------------------------ |
@@ -614,7 +614,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 The generator is pure and tested apart: the declarations and settings in `tests/rendering/` go in, and every rendered file must equal its expected file in `tests/rendering/expected/`. After a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review. The rendered GitHub entry is also run as the harness would run it: the real server binary, copied out of its image, starts in a container with a key file in place, answers MCP over stdio with the network off, and offers read tools only; without the key it never starts.
 
-Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the gateway and the bridge send it; the ledger rows land in a real TimescaleDB container and the spans in an in-memory exporter, sampled at a ratio a test may set; the harness, Alertmanager, Discord, Wiki.js and GitHub are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the gateway's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the gateway refuses, resumes a paused job it runs, hides paused jobs from a plain list), the others so the alert, the message, the page and the pull request are asserted as they would arrive; GitHub keeps its own rules on the App's JWT and tokens, refs, contents writes, pull requests and labels — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the gateway's error texts, and so has the diff a pull request carries against the file it changes.
+Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the harness and the bridge send it; the ledger rows land in a real TimescaleDB container and the spans in an in-memory exporter, sampled at a ratio a test may set; the harness, Alertmanager, Discord, Wiki.js and GitHub are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the harness's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the harness refuses, resumes a paused job it runs, hides paused jobs from a plain list), the others so the alert, the message, the page and the pull request are asserted as they would arrive; GitHub keeps its own rules on the App's JWT and tokens, refs, contents writes, pull requests and labels — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the harness's error texts, and so has the diff a pull request carries against the file it changes.
 
 ```bash
 uv sync --extra dev

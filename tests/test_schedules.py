@@ -95,7 +95,7 @@ async def test_a_managed_name_held_twice_keeps_one_job(
 async def test_a_harness_that_does_not_answer_is_asked_again(
     service: Service, respx_mock: respx.MockRouter
 ) -> None:
-    """The reconcile runs once per pod; a gateway rolling at the same moment must not lose it."""
+    """The reconcile runs once per pod; a harness rolling at the same moment must not lose it."""
     jobs = FakeJobs(respx_mock)
     jobs.unavailable = 2
 

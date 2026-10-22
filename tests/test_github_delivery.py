@@ -602,7 +602,7 @@ async def _settled(rows: Rows) -> dict[str, Any]:
 
 
 async def _cron_turn(client: httpx.AsyncClient, text: str) -> None:
-    """A cron execution of `lares:propose-faults` reported through the hook, as the gateway does."""
+    """A cron execution of `lares:propose-faults` reported through the hook, as the harness does."""
     for body in (
         model_call(1, session_id=CRON_SESSION, platform="cron", task_id=CRON_TASK, content=text),
         turn_ended(session_id=CRON_SESSION, platform="cron", task_id=CRON_TASK),

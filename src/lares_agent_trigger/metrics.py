@@ -124,7 +124,7 @@ class Metrics:
         # The cron job set brought into the harness at startup.
         self.reconciles = Counter(
             "agent_trigger_reconciles_total",
-            "Reconciles of the managed cron jobs, by whether the gateway let them through.",
+            "Reconciles of the managed cron jobs, by whether the harness let them through.",
             ["outcome"],  # done | failed | refused
             registry=self.registry,
         )

@@ -56,7 +56,7 @@ def settings(settings: Settings) -> Settings:
 
 
 async def _deliver(client: httpx.AsyncClient, *bodies: bytes) -> list[int]:
-    """Post each body as the gateway does: one after the other, signed."""
+    """Post each body as the harness does: one after the other, signed."""
     return [
         (await client.post(HOOK, content=body, headers=sign(body))).status_code for body in bodies
     ]
@@ -244,7 +244,7 @@ async def test_the_same_deliveries_twice_yield_one_row(receiver: Receiver, rows:
     call = model_call(1, content=ANSWER)
     end = turn_ended()
 
-    # A replay is answered like a success: the gateway must not send it a third time.
+    # A replay is answered like a success: the harness must not send it a third time.
     statuses = await _deliver(client, call, call, end, end)
 
     assert statuses == [200, 200, 200, 200]
@@ -293,7 +293,7 @@ async def test_a_bad_signature_is_refused_and_counted(receiver: Receiver, rows: 
 async def test_a_body_that_is_neither_hook_is_refused(receiver: Receiver, rows: Rows) -> None:
     client, metrics = receiver
 
-    # 4xx is final for the gateway: a body it cannot fix is never sent twice.
+    # 4xx is final for the harness: a body it cannot fix is never sent twice.
     statuses = await _deliver(
         client,
         turn_ended(event="pre_tool_call"),
@@ -381,7 +381,7 @@ async def test_a_cron_run_the_file_does_not_declare_is_ignored(
 async def test_a_job_the_harness_cannot_name_is_answered_for_a_retry(
     receiver: Receiver, rows: Rows, respx_mock: respx.MockRouter
 ) -> None:
-    """Without the job's name the run has no use case; 5xx is the answer the gateway retries."""
+    """Without the job's name the run has no use case; 5xx is the answer the harness retries."""
     respx_mock.get(f"{HERMES_URL}/api/jobs/{JOB_ID}").mock(
         side_effect=[
             httpx.Response(503),
@@ -396,7 +396,7 @@ async def test_a_job_the_harness_cannot_name_is_answered_for_a_retry(
     assert rows() == []
     assert _hook_events(metrics, "error") == 1.0
 
-    # The gateway's one retry lands, with everything the calls reported.
+    # The harness's one retry lands, with everything the calls reported.
     assert await _deliver(client, end) == [200]
     (row,) = rows()
     assert row["use_case"] == "propose-faults"

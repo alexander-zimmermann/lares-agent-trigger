@@ -1,4 +1,4 @@
-"""Which failure is which: the gateway's error texts against the classes that decide a retry."""
+"""Which failure is which: the harness's error texts against the classes that decide a retry."""
 
 from __future__ import annotations
 

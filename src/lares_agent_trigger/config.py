@@ -44,7 +44,7 @@ class Settings(NatsSettings):
     # Which midnight the daily cap counts from. The house thinks in local days.
     timezone: str = "Europe/Berlin"
 
-    # Harness: the Runs API of the Hermes gateway.
+    # Harness: the Runs API of Hermes.
     hermes_url: str = "http://hermes.agents.svc.cluster.local:8642"
     hermes_api_key: str = Field(default="", repr=False)
     hermes_api_key_file: Path | None = None
@@ -53,7 +53,7 @@ class Settings(NatsSettings):
     # A transient failure is started once more after this long; a setting so
     # tests can shorten it.
     retry_delay_seconds: float = 300.0
-    # A reconcile of the cron jobs the gateway did not answer is tried again
+    # A reconcile of the cron jobs the harness did not answer is tried again
     # after this long, until one goes through.
     reconcile_retry_seconds: float = 60.0
 

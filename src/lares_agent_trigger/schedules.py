@@ -15,13 +15,13 @@ ones — named `lares:<use case>` — in line with the rendered `cron-jobs.yaml`
   pausing one is a person's lever.
 
 The pod rolls when the rendering changes, so startup is the only moment the
-set can change. A gateway that does not answer then is asked again until it
+set can change. A harness that does not answer then is asked again until it
 does: both pods roll on the same commit, and a reconcile lost to that would
-wait for the next one. A gateway that answers with a refusal is not asked
+wait for the next one. A harness that answers with a refusal is not asked
 again: the declaration it refused changes only with a new commit, which rolls
 the pod anyway.
 
-A job a person paused is not run now either: the gateway's run-now resumes a
+A job a person paused is not run now either: the harness's run-now resumes a
 paused job for good. What a person asked a run now to look at goes into that
 one run's prompt, never into the job's.
 """
@@ -75,7 +75,7 @@ class Schedules:
         self._retry_seconds = retry_seconds
 
     async def keep_reconciling(self) -> None:
-        """Reconcile until the gateway lets one pass through."""
+        """Reconcile until the harness lets one pass through."""
         while True:
             try:
                 await self._reconcile()
@@ -151,7 +151,7 @@ class Schedules:
 
 
 def _refusal(exc: HermesError) -> bool:
-    """True when the gateway answered and refused, rather than failing to answer."""
+    """True when the harness answered and refused, rather than failing to answer."""
     code = exc.status_code
     return code is not None and 400 <= code < 500 and code != 429
 

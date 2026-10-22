@@ -316,7 +316,7 @@ async def test_a_focus_is_refused_where_it_cannot_go(
 async def test_a_focus_the_harness_blocks_is_refused_with_its_reason(
     api: Api, rows: Rows, respx_mock: respx.MockRouter
 ) -> None:
-    """The gateway scans a run's prompt as it scans a stored one, and says why it blocks."""
+    """The harness scans a run's prompt as it scans a stored one, and says why it blocks."""
     jobs = FakeJobs(respx_mock)
     jobs.add("lares:propose-faults")
     jobs.blocked = "ignore previous instructions"
@@ -336,7 +336,7 @@ async def test_a_focus_the_harness_blocks_is_refused_with_its_reason(
 async def test_a_paused_job_is_not_resumed_by_running_it(
     api: Api, rows: Rows, respx_mock: respx.MockRouter
 ) -> None:
-    """Running a job now resumes it for good in the gateway; a person paused it on purpose."""
+    """Running a job now resumes it for good in the harness; a person paused it on purpose."""
     jobs = FakeJobs(respx_mock)
     job_id = jobs.add("lares:propose-faults", enabled=False)
     client, _ = api

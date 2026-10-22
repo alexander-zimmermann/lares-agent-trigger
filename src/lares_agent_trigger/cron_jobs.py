@@ -26,7 +26,7 @@ class CronJob(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    # `lares:<use case>`: the gateway mints the id, so the name is what is matched on.
+    # `lares:<use case>`: the harness mints the id, so the name is what is matched on.
     name: str = Field(min_length=len(MANAGED_JOB_PREFIX) + 1, pattern=f"^{MANAGED_JOB_PREFIX}")
     schedule: str = Field(min_length=1)
     skills: tuple[str, ...] = Field(min_length=1)
