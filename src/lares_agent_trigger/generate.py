@@ -10,10 +10,10 @@ settings in, one text per rendered file out.
   its key and include list, and the hook that reports every turn.
 - Each enabled person's profile config: the settings copied whole, then the
   person's source and directory, their tool servers on Discord and the API
-  server, and the same hook. Beside the configs, the ConfigMap that holds them
-  and the chart values that mount each person's config, `.env` and shared
-  files into their profile, and run a container that streams the profile's
-  log for Loki.
+  server, the harness's skill tools on the latter, and the same hook. Beside
+  the configs, the ConfigMap that holds them and the chart values that mount
+  each person's config, `.env` and shared files into their profile, and run a
+  container that streams the profile's log for Loki.
 - The cron job set: one managed job per enabled schedule use case.
 - The sampling ratio, one variable every service of the platform reads: the
   trigger, the bridge and the engine's CronJobs.
@@ -52,6 +52,8 @@ the `no_mcp` sentinel. A list for Discord or cron starts with the platform's own
 composite, or the chat would lose memory and skills; an explicit Discord list
 also switches on the harness's `discord` toolset, which the settings keep
 disabled. The API server gets no composite: an event run reads, nothing else.
+A person's API server, where their web chat comes in, starts with the harness's
+own `skills` toolset instead, so what the person's profile learned holds there too.
 The Jobs API takes no list per job, so every managed cron job sees the cron
 surface, which holds every read server in use, the memory servers the schedule
 use cases name, and never a writing one; the loader keeps a memory off a
@@ -183,6 +185,8 @@ _HERMES_UID = 10000
 _HOOK_NAME = "lares-agent-trigger"
 _HOOK_TIMEOUT_SECONDS = 10
 _NO_TOOL_SERVER = "no_mcp"
+# The harness's own skill tools, which Discord's composite holds.
+_SKILLS_TOOLSET = "skills"
 
 # The slash commands a person who is not `discord: admin` may run, beside the
 # harness's /help and /whoami; `reset` is /new.
@@ -485,12 +489,12 @@ def _person_config(
     """A person's profile: their source, their directory, and their tool servers.
 
     Discord keeps the harness's own Discord tools; the API server, where the
-    web chat comes in, holds the same servers.
+    web chat comes in, holds the same servers and the harness's skill tools.
     """
     generated = {
         "platform_toolsets": {
             "discord": _surface("hermes-discord", held),
-            "api_server": _surface(None, held),
+            "api_server": _surface(_SKILLS_TOOLSET, held),
         },
         "hooks": _hooks(declared),
         "mcp_servers": _mcp_servers(declared.gateway, held),
@@ -502,7 +506,8 @@ def _person_config(
         f"{person.name}'s source",
         _profile(persons.source_of(person), _profile_directory(person.name)),
         f"Rendered from persons.yaml and use-cases.yaml: {person.name}'s tool servers on\n"
-        "# Discord and the API server, and the hook that reports every finished turn.",
+        "# Discord and the API server, the web chat's skill tools, and the hook that\n"
+        "# reports every finished turn.",
         generated,
     )
 
@@ -656,8 +661,9 @@ def _cron_servers(declared: UseCaseFile, enabled: Sequence[UseCase]) -> list[Too
     return [server for name, server in declared.tool_servers.items() if name in held]
 
 
-def _surface(composite: str | None, servers: Sequence[ToolServer]) -> list[str]:
-    head = [composite] if composite is not None else []
+def _surface(own: str | None, servers: Sequence[ToolServer]) -> list[str]:
+    """A platform's list: the harness's own tools, if any, then the servers or `no_mcp`."""
+    head = [own] if own is not None else []
     return [*head, *([server.name for server in servers] or [_NO_TOOL_SERVER])]
 
 

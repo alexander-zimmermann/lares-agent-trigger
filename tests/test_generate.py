@@ -151,17 +151,20 @@ def test_a_persons_profile_runs_on_their_source_in_their_directory(tmp_path: Pat
 
 
 def test_a_persons_surfaces_hold_their_own_tool_servers(tmp_path: Path) -> None:
-    """Discord keeps the harness's own Discord tools; the web chat comes in on the API server."""
+    """Discord keeps the harness's own Discord tools; the web chat comes in on the API server.
+
+    The web chat holds the harness's own skill tools as well, which Discord's composite holds.
+    """
     kim, lou = _profile(tmp_path, "kim"), _profile(tmp_path, "lou")
 
     assert kim["platform_toolsets"] == {
         "discord": ["hermes-discord", "lares", "lares-control", "github"],
-        "api_server": ["lares", "lares-control", "github"],
+        "api_server": ["skills", "lares", "lares-control", "github"],
     }
     assert list(kim["mcp_servers"]) == ["lares", "lares-control", "github"]
     assert lou["platform_toolsets"] == {
         "discord": ["hermes-discord", "lares"],
-        "api_server": ["lares"],
+        "api_server": ["skills", "lares"],
     }
     # The default profile's entry: one route per server, whoever holds it.
     assert lou["mcp_servers"] == {"lares": _config(tmp_path)["mcp_servers"]["lares"]}
