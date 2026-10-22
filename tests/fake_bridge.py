@@ -1,9 +1,10 @@
-"""A stand-in bridge for the gateway test: lists a tool no allowlist names, echoes its key.
+"""A stand-in bridge for the gateway test: lists a tool no route serves, echoes the caller.
 
 Run inside a container on the gateway's network, standard library only:
 `python -I fake_bridge.py`. It speaks MCP over streamable HTTP without
 sessions, the way the gateway calls a route's server, and answers every tool
-call with the `Authorization` header it arrived with.
+call with what names the call: the `Authorization` header it arrived with,
+and the client and the person the gateway set.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, override
 
-# One tool of each server the rendering declares, and one no allowlist names.
+# One tool of each server the rendering declares, and one no tool server serves.
 TOOLS = (
     "list_episodes",
     "get_episode",
@@ -56,8 +57,12 @@ class _Handler(BaseHTTPRequestHandler):
             schema = {"type": "object", "properties": {}}
             result = {"tools": [{"name": n, "inputSchema": schema} for n in TOOLS]}
         elif method == "tools/call":
-            text = self.headers.get("Authorization", "")
-            result = {"content": [{"type": "text", "text": text}]}
+            caller = {
+                "authorization": self.headers.get("Authorization"),
+                "client": self.headers.get("X-Client-Id"),
+                "enduser": self.headers.get("X-Enduser-Id"),
+            }
+            result = {"content": [{"type": "text", "text": json.dumps(caller)}]}
         else:
             error = {"code": -32601, "message": f"no {method}"}
             self._send(200, {"jsonrpc": "2.0", "id": message["id"], "error": error})

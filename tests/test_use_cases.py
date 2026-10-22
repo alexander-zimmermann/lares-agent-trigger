@@ -7,8 +7,6 @@ from pathlib import Path
 import pytest
 
 from lares_agent_trigger.use_cases import (
-    BridgeServer,
-    HttpServer,
     ScheduleTrigger,
     load_use_case_file,
     load_use_cases,
@@ -28,32 +26,36 @@ gateway:
 
 tool_servers:
   - name: lares
+    kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-agent
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [list_*, get_episode, query_*]
 
   - name: lares-control
+    kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-control
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_CONTROL_GATEWAY_KEY
     timeout_seconds: 60
     access: request
     tools: [request_knx_write, get_write_request]
 
   - name: lares-memory
+    kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-memory
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_MEMORY_GATEWAY_KEY
     timeout_seconds: 30
     access: memory
     tools: [get_memory, append_memory]
 
   - name: lares-wiki
+    kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-wiki
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_WIKI_GATEWAY_KEY
     timeout_seconds: 60
     access: write
@@ -70,6 +72,15 @@ tool_servers:
     timeout_seconds: 60
     access: read
     tools: [get_*, list_*, search_*, issue_read, pull_request_read]
+
+connectors:
+  - name: claude-ai
+    path: /mcp
+    issuer: ${AUTHENTIK_URL}/application/o/claude-ai/
+    client_id: claude-ai
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
+    tools: ["*"]
 
 use_cases:
   - name: explain-episode
@@ -240,9 +251,10 @@ def test_every_field_of_a_tool_server_and_the_ledger_hook(tmp_path: Path) -> Non
     declared = load_use_case_file(_write(tmp_path, VALID))
 
     lares = declared.tool_servers["lares"]
-    assert isinstance(lares, BridgeServer)
     assert lares.url == "http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp"
-    assert lares.client == "lares-agent"
+    assert lares.credential.secret == "agentgateway-keys"
+    assert lares.credential.key == "lares-mcp-bridge"
+    assert lares.credential.header == "Authorization"
     assert lares.key_env == "LARES_GATEWAY_KEY"
     assert lares.timeout_seconds == 60
     assert lares.access == "read"
@@ -415,14 +427,6 @@ def test_a_request_server_is_granted_to_the_chat_only(tmp_path: Path) -> None:
         load_use_cases(_write(tmp_path, broken))
 
 
-def test_two_tool_servers_on_one_bridge_client_are_refused(tmp_path: Path) -> None:
-    """One key, one client, one allowlist: two servers sharing a client would share a ceiling."""
-    broken = VALID.replace("    client: lares-memory\n", "    client: lares-agent\n", 1)
-
-    with pytest.raises(ValueError, match="lares-memory: client lares-agent is already"):
-        load_use_cases(_write(tmp_path, broken))
-
-
 def test_a_glob_reaching_another_servers_tool_is_refused(tmp_path: Path) -> None:
     """A tool sits on one server: `get_*` on the read key would hand it the gate's read-back."""
     broken = VALID.replace("[list_*, get_episode, query_*]", "[list_*, get_*, query_*]", 1)
@@ -444,11 +448,10 @@ def test_one_tool_named_by_two_servers_is_refused(tmp_path: Path) -> None:
         load_use_cases(_write(tmp_path, broken))
 
 
-def test_every_field_of_an_http_server(tmp_path: Path) -> None:
-    """An MCP server of its own: the gateway attaches its credential from a Secret, no client."""
+def test_every_tool_server_is_one_kind_whatever_serves_it(tmp_path: Path) -> None:
+    """GitHub's own server and the bridge alike: the gateway attaches a credential from a Secret."""
     github = load_use_case_file(_write(tmp_path, VALID)).tool_servers["github"]
 
-    assert isinstance(github, HttpServer)
     assert github.url == "http://github-mcp-server.agents.svc.cluster.local:8082/mcp"
     assert github.credential.secret == "github-mcp-server-token"
     assert github.credential.key == "token"
@@ -464,20 +467,8 @@ def test_every_field_of_an_http_server(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("access", ["write", "request", "memory"])
-def test_an_http_server_only_reads(tmp_path: Path, access: str) -> None:
-    """A GitHub write is a delivery of the trigger, never a tool the model holds."""
-    broken = VALID.replace(
-        "    access: read\n    tools: [get_*, list_*",
-        f"    access: {access}\n    tools: [get_*, list_*",
-        1,
-    )
-
-    with pytest.raises(ValueError, match="tool server github: an http server only reads"):
-        load_use_cases(_write(tmp_path, broken))
-
-
-def test_an_http_server_takes_no_bridge_client(tmp_path: Path) -> None:
+def test_a_tool_server_names_no_client_of_its_own(tmp_path: Path) -> None:
+    """The gateway signs the caller in and names it to the server; a server has no client."""
     broken = VALID.replace(
         "    key_env: GITHUB_GATEWAY_KEY\n",
         "    key_env: GITHUB_GATEWAY_KEY\n    client: lares-github\n",
@@ -485,6 +476,13 @@ def test_an_http_server_takes_no_bridge_client(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="client"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_tool_server_without_its_kind_is_refused(tmp_path: Path) -> None:
+    broken = VALID.replace("  - name: lares\n    kind: http\n", "  - name: lares\n", 1)
+
+    with pytest.raises(ValueError, match="kind"):
         load_use_cases(_write(tmp_path, broken))
 
 
@@ -519,8 +517,8 @@ def test_a_file_without_the_gateway_is_refused(tmp_path: Path) -> None:
         load_use_cases(_write(tmp_path, broken))
 
 
-def test_the_one_server_rule_holds_among_the_bridge_servers_only(tmp_path: Path) -> None:
-    """GitHub's `get_*` cannot reach the bridge's `get_write_request`: different servers."""
+def test_the_one_server_rule_holds_among_the_servers_on_one_url(tmp_path: Path) -> None:
+    """GitHub's `get_*` cannot reach the bridge's `get_write_request`: another endpoint."""
     declared = load_use_case_file(_write(tmp_path, VALID))
 
     assert "get_*" in declared.tool_servers["github"].tools
@@ -599,4 +597,39 @@ def test_an_episode_trigger_names_its_filter(tmp_path: Path) -> None:
     broken = VALID.replace("      filter:\n        appeared: 2\n        escalated: 2\n", "", 1)
 
     with pytest.raises(ValueError, match="filter"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_every_field_of_a_connector(tmp_path: Path) -> None:
+    """A person's own MCP client: signed in through Authentik, on a public path of the gateway."""
+    claude = load_use_case_file(_write(tmp_path, VALID)).connectors["claude-ai"]
+
+    assert claude.path == "/mcp"
+    # The gateway expands the variable at start, set per cluster.
+    assert claude.issuer == "${AUTHENTIK_URL}/application/o/claude-ai/"
+    assert claude.client_id == "claude-ai"
+    assert claude.url == "http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp"
+    assert claude.credential.key == "lares-mcp-bridge"
+    assert claude.tools == ("*",)
+
+
+def test_a_file_without_connectors_declares_none(tmp_path: Path) -> None:
+    start = VALID.index("connectors:\n")
+    text = VALID[:start] + VALID[VALID.index("use_cases:\n") :]
+
+    assert load_use_case_file(_write(tmp_path, text)).connectors == {}
+
+
+def test_a_connector_taking_a_tool_servers_route_is_refused(tmp_path: Path) -> None:
+    """Each route has its own name and path: a connector on `/mcp/lares` would shadow lares."""
+    broken = VALID.replace("    path: /mcp\n", "    path: /mcp/lares\n", 1)
+
+    with pytest.raises(ValueError, match="connector claude-ai: path /mcp/lares is the route of"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_connector_named_like_a_tool_server_is_refused(tmp_path: Path) -> None:
+    broken = VALID.replace("  - name: claude-ai\n", "  - name: lares\n", 1)
+
+    with pytest.raises(ValueError, match="connector lares: the name is already"):
         load_use_cases(_write(tmp_path, broken))

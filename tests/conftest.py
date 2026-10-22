@@ -161,8 +161,9 @@ gateway:
 
 tool_servers:
   - name: lares
+    kind: http
     url: http://lares-mcp-bridge.test:8080/mcp
-    client: lares-agent
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read

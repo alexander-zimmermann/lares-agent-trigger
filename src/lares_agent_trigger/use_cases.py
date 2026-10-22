@@ -3,9 +3,10 @@
 The file lives in lares and is mounted here; the generator renders the harness
 configuration from the same models, which is why schema and loader sit in this
 package rather than in the generator alone. Beside the use cases it declares
-the tool servers they may name, the gateway every one of them sits behind,
-where the harness reports every finished turn, and the share of traces every
-service of the platform keeps. A file
+the tool servers they may name, the gateway every one of them sits behind, the
+connectors a person signs in to on the gateway's public address, where the
+harness reports every finished turn, and the share of traces every service of
+the platform keeps. A file
 that does not validate is refused at startup — a half-read catalogue would
 start runs nobody declared.
 """
@@ -16,15 +17,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
-    Discriminator,
     Field,
-    Tag,
     ValidationError,
     model_validator,
 )
@@ -205,27 +204,6 @@ class UseCase(_Strict):
         return self.is_enabled and isinstance(self.trigger, ScheduleTrigger)
 
 
-class BridgeServer(_Strict):
-    """A tool server on the bridge, behind its gateway route: one machine client and its allowlist.
-
-    The gateway signs in to the bridge as `client`, with the client's key from
-    the gateway's Secret. `tools` (names or fnmatch globs) is the bridge's
-    allowlist for the client, the route's tool list and the harness's include
-    list on top of both.
-    """
-
-    kind: Literal["bridge"] = "bridge"
-    name: str = Field(min_length=1)
-    # The bridge's endpoint, which the gateway calls.
-    url: str = Field(min_length=1)
-    client: str = Field(min_length=1)
-    # Where the harness holds its key for the route, in every profile's .env.
-    key_env: str = Field(min_length=1)
-    timeout_seconds: int = Field(gt=0)
-    access: ToolAccess
-    tools: tuple[str, ...] = Field(min_length=1)
-
-
 class Credential(_Strict):
     """What the gateway attaches on every call: a key of a Secret beside it, in a header.
 
@@ -237,45 +215,43 @@ class Credential(_Strict):
     header: str = Field(min_length=1)
 
 
-class HttpServer(_Strict):
-    """An MCP server of its own behind its gateway route.
+class ToolServer(_Strict):
+    """An MCP endpoint behind its gateway route: the bridge's and GitHub's alike.
 
     The gateway attaches `credential`; the harness holds a key for the route
-    only. `tools` is the route's tool list and the harness's include list on
-    top. A GitHub write is a delivery of the trigger, never a tool, so such a
-    server only reads.
+    only. `tools` (names or `*`/`?` globs) is the route's tool list and the
+    harness's include list on top. The gateway names the caller to the server:
+    the route, and the person behind the key.
     """
 
     kind: Literal["http"]
     name: str = Field(min_length=1)
     url: str = Field(min_length=1)
     credential: Credential
+    # Where the harness holds its key for the route, in every profile's .env.
     key_env: str = Field(min_length=1)
     timeout_seconds: int = Field(gt=0)
     access: ToolAccess
     tools: tuple[str, ...] = Field(min_length=1)
 
-    @model_validator(mode="after")
-    def _only_reads(self) -> HttpServer:
-        if self.access != "read":
-            raise ValueError(f"tool server {self.name}: an http server only reads")
-        return self
 
+class Connector(_Strict):
+    """A person's own MCP client, signed in through Authentik on a public path of the gateway.
 
-ToolServer = BridgeServer | HttpServer
+    `issuer` is the Authentik application's issuer, a variable the gateway
+    expands at start where it differs per cluster; `client_id` is the
+    application's pre-registered client, the tokens' audience. The gateway
+    calls `url` with `credential` and serves `tools` to the persons the
+    person declaration names.
+    """
 
-
-def _server_kind(value: Any) -> str:
-    # A bridge entry may leave its kind out.
-    if isinstance(value, Mapping):
-        return str(value.get("kind", "bridge"))
-    return str(value.kind)
-
-
-_DeclaredServer = Annotated[
-    Annotated[BridgeServer, Tag("bridge")] | Annotated[HttpServer, Tag("http")],
-    Discriminator(_server_kind),
-]
+    name: str = Field(min_length=1)
+    path: str = Field(pattern=r"^/")
+    issuer: str = Field(min_length=1)
+    client_id: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    credential: Credential
+    tools: tuple[str, ...] = Field(min_length=1)
 
 
 class Gateway(_Strict):
@@ -312,16 +288,18 @@ class _File(_Strict):
     ledger_hook: LedgerHook
     tracing: Tracing
     gateway: Gateway
-    tool_servers: list[_DeclaredServer] = Field(min_length=1)
+    tool_servers: list[ToolServer] = Field(min_length=1)
+    connectors: list[Connector] = []
     use_cases: list[UseCase] = Field(min_length=1)
 
 
 @dataclass(frozen=True)
 class UseCaseFile:
-    """The whole declaration: use cases and tool servers keyed by name, in file order."""
+    """The whole declaration: use cases, tool servers and connectors by name, in file order."""
 
     use_cases: dict[str, UseCase]
     tool_servers: dict[str, ToolServer]
+    connectors: dict[str, Connector]
     ledger_hook: LedgerHook
     tracing: Tracing
     gateway: Gateway
@@ -366,7 +344,6 @@ def load_use_case_file(path: Path) -> UseCaseFile:
         raise ValueError(f"{path}: {exc}") from exc
 
     servers: dict[str, ToolServer] = {}
-    clients: dict[str, str] = {}
     keys: dict[str, str] = {}
     for server in parsed.tool_servers:
         if server.name in servers:
@@ -378,15 +355,8 @@ def load_use_case_file(path: Path) -> UseCaseFile:
                 f"the key of {keys[server.key_env]}"
             )
         keys[server.key_env] = server.name
-        if not isinstance(server, BridgeServer):
-            continue
-        if server.client in clients:
-            raise ValueError(
-                f"{path}: tool server {server.name}: client {server.client} is already "
-                f"the client of {clients[server.client]}"
-            )
-        clients[server.client] = server.name
     _check_one_server_per_tool(path, servers)
+    connectors = _connectors(path, parsed.connectors, servers)
 
     by_name: dict[str, UseCase] = {}
     for use_case in parsed.use_cases:
@@ -405,24 +375,45 @@ def load_use_case_file(path: Path) -> UseCaseFile:
     return UseCaseFile(
         use_cases=by_name,
         tool_servers=servers,
+        connectors=connectors,
         ledger_hook=parsed.ledger_hook,
         tracing=parsed.tracing,
         gateway=parsed.gateway,
     )
 
 
-def _check_one_server_per_tool(path: Path, servers: Mapping[str, ToolServer]) -> None:
-    """Refuse a tool two bridge servers grant, so each tool keeps the access of its one server.
+def _connectors(
+    path: Path, declared: list[Connector], servers: Mapping[str, ToolServer]
+) -> dict[str, Connector]:
+    """The connectors by name; each route keeps a name and a path of its own."""
+    routes = {f"/mcp/{name}": f"the route of tool server {name}" for name in servers}
+    connectors: dict[str, Connector] = {}
+    for connector in declared:
+        if connector.name in servers or connector.name in connectors:
+            raise ValueError(
+                f"{path}: connector {connector.name}: the name is already that of another route"
+            )
+        if connector.path in routes:
+            raise ValueError(
+                f"{path}: connector {connector.name}: path {connector.path} is "
+                f"{routes[connector.path]}"
+            )
+        routes[connector.path] = f"the path of connector {connector.name}"
+        connectors[connector.name] = connector
+    return connectors
 
-    An entry of one server, read as a name, must match no entry of another;
-    for globs that catches the overlaps a declaration can show (`get_*` over
-    `get_write_request`), not every pair two globs could share. Only the
-    bridge's servers share tools; GitHub's are GitHub's own.
+
+def _check_one_server_per_tool(path: Path, servers: Mapping[str, ToolServer]) -> None:
+    """Refuse a tool two servers on one endpoint grant, so it keeps the access of its one server.
+
+    An entry of one server, read as a name, must match no entry of another on
+    the same URL; for globs that catches the overlaps a declaration can show
+    (`get_*` over `get_write_request`), not every pair two globs could share.
+    Servers on other endpoints serve tools of their own.
     """
-    bridge = [server for server in servers.values() if isinstance(server, BridgeServer)]
-    for server in bridge:
-        for other in bridge:
-            if other is server:
+    for server in servers.values():
+        for other in servers.values():
+            if other is server or other.url != server.url:
                 continue
             for pattern in server.tools:
                 for entry in other.tools:

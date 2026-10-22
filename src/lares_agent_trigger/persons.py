@@ -24,12 +24,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, TypeIs
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from .use_cases import BridgeServer, ToolServer, UseCaseFile, chat_use_case
+from .use_cases import UseCaseFile, chat_use_case
 
 # How a source's spend is bounded: a flat plan, or metered use under a hard limit.
 Bound = Literal["subscription", "capped"]
@@ -141,13 +141,15 @@ class DefaultProfile(_Strict):
 class Person(_Strict):
     """A declared household member: the handle and the rights, never the identity."""
 
-    # The handle: the profile's name, the bridge client's and the sign-in's.
+    # The handle: the profile's name, the sign-in's, and what the gateway names the person by.
     name: str = Field(min_length=1)
     # The default profile's bot routes the person's Discord messages to their
     # profile; `admin` also runs every slash command.
     discord: Literal[True, "admin"] | None = None
     # A subset of the chat use case's tool servers.
     tools: tuple[str, ...] = Field(min_length=1)
+    # The connectors the person signs in to with their own MCP client.
+    connectors: tuple[str, ...] = ()
     # The model source the profile runs on.
     model: str = Field(min_length=1)
     # Whether the ledger keeps the answers' text, or the numbers only.
@@ -260,29 +262,19 @@ def load_persons_file(path: Path, declared: UseCaseFile) -> PersonsFile:
     _check_reachable(path, sources[default])
 
     persons: dict[str, Person] = {}
-    clients = {
-        server.client: server.name
-        for server in declared.tool_servers.values()
-        if isinstance(server, BridgeServer)
-    }
     for person in parsed.persons:
         if person.name in persons:
             raise ValueError(f"{path}: person {person.name} is declared twice")
-        if person.name in clients:
-            raise ValueError(
-                f"{path}: person {person.name}: the handle is the bridge client of tool server "
-                f"{clients[person.name]}; a person's client is named by the handle"
-            )
         persons[person.name] = person
     enabled = [person for person in persons.values() if person.is_enabled]
     for person in enabled:
         _check_tools(path, person, declared)
+        _check_connectors(path, person, declared)
         if person.model not in sources:
             raise ValueError(
                 f"{path}: person {person.name}: model: no model source named {person.model}"
             )
         _check_person_source(path, person, sources[person.model])
-    _check_own_routes(path, enabled, declared)
     _check_one_shares_the_default_account(path, enabled, sources)
     _check_discord_admin(path, enabled)
     return PersonsFile(
@@ -290,33 +282,10 @@ def load_persons_file(path: Path, declared: UseCaseFile) -> PersonsFile:
     )
 
 
-def reads_through_own_client(server: ToolServer) -> TypeIs[BridgeServer]:
-    """True for a bridge server a person reads through a client of their own, named by the handle.
-
-    Any other server a person holds the gateway calls as the server's own client.
-    """
-    return isinstance(server, BridgeServer) and server.access == "read"
-
-
-def own_route(server: str, handle: str) -> str:
-    """The gateway route of a person's own client on a server: the server's name and the handle."""
-    return f"{server}-{handle}"
-
-
-def _check_own_routes(path: Path, enabled: Iterable[Person], declared: UseCaseFile) -> None:
-    """Refuse a person's own route that takes the name of another route."""
-    routes = {name: f"the route of tool server {name}" for name in declared.tool_servers}
-    for person in enabled:
-        for name in person.tools:
-            if not reads_through_own_client(declared.tool_servers[name]):
-                continue
-            route = own_route(name, person.name)
-            if route in routes:
-                raise ValueError(
-                    f"{path}: person {person.name}: their own route for {name}, {route}, is "
-                    f"already {routes[route]}"
-                )
-            routes[route] = f"{person.name}'s own route for {name}"
+def _check_connectors(path: Path, person: Person, declared: UseCaseFile) -> None:
+    for name in person.connectors:
+        if name not in declared.connectors:
+            raise ValueError(f"{path}: person {person.name}: connectors: no connector named {name}")
 
 
 def _check_tools(path: Path, person: Person, declared: UseCaseFile) -> None:
