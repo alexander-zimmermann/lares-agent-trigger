@@ -1,8 +1,10 @@
 """The rendered routes run as the gateway runs them: agentgateway, GitHub's server and a bridge.
 
-The routes file is filled the way Sealed Secrets fills it, every sealed key a
-value of its own, and laid into a volume the way kubelet lays a Secret into
-a pod: a timestamped directory behind `..data`, swapped whole on a change.
+The gateway starts as its chart starts it with the rendered values: every
+variable they name set from its sealed key, every sealed key a value of its
+own, and the routes and every credential laid into a volume the way kubelet
+lays a Secret into a pod: a timestamped directory behind `..data`, swapped
+whole on a change.
 Each upstream answers under the name the declaration gives it, on a network
 of their own. GitHub's server is the real one, started as lares starts it;
 it refuses a call without a token, so a route that lists its tools attached
@@ -13,7 +15,6 @@ answers with the key it was called with.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import time
 import uuid
@@ -78,16 +79,6 @@ def _value(key: str) -> str:
     return f"value-of-{key}"
 
 
-def _routes_file(template: str, renewed: dict[str, str] | None = None) -> str:
-    """The template filled as the controller fills it, with a renewed value where given."""
-    renewed = renewed or {}
-    return re.sub(
-        r'{{ index \. "([^"]+)" \| toJson }}',
-        lambda match: json.dumps(renewed.get(match[1], _value(match[1]))),
-        template,
-    )
-
-
 @dataclass
 class Gateway:
     url: str
@@ -116,10 +107,29 @@ class Gateway:
 
 @dataclass(frozen=True)
 class Rendered:
-    # The routes file as a template of the sealed keys, and the gateway's chart values.
-    template: str
+    # The routes file and the gateway's chart values.
+    routes: str
     values: dict[str, Any]
     github: HttpServer
+
+    def variables(self) -> dict[str, str]:
+        """Each variable the values set, holding its sealed key."""
+        return {
+            entry["name"]: _value(entry["valueFrom"]["secretKeyRef"]["key"])
+            for entry in self.values["extraEnv"]
+        }
+
+    def credentials(self) -> dict[str, dict[str, str]]:
+        """Each mounted Secret's files: GitHub's a token, every other key a value of its own."""
+        credentials: dict[str, dict[str, str]] = {}
+        for volume in self.values["extraVolumes"]:
+            if "secret" not in volume:
+                continue
+            secret = volume["secret"]["secretName"]
+            keys = [item["key"] for item in volume["secret"]["items"]]
+            token = secret == self.github.credential.secret
+            credentials[secret] = {key: TOKEN if token else _value(key) for key in keys}
+        return credentials
 
 
 @pytest.fixture(scope="module")
@@ -128,13 +138,10 @@ def rendered() -> Rendered:
     rendering = render(
         declared, load_persons_file(PERSONS, declared), SETTINGS.read_text(encoding="utf-8")
     )
-    patch = yaml.safe_load(rendering.routes_template)
     github = declared.tool_servers["github"]
     assert isinstance(github, HttpServer)
     return Rendered(
-        template=patch["spec"]["template"]["data"]["config.yaml"],
-        values=yaml.safe_load(rendering.routes_values),
-        github=github,
+        routes=rendering.routes, values=yaml.safe_load(rendering.routes_values), github=github
     )
 
 
@@ -155,9 +162,9 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
         gateway = Gateway(url="", container="", volume=volume)
         settings = {"config": {**rendered.values["config"]["config"], "adminAddr": "off"}}
         gateway.write("settings", {"config.yaml": yaml.safe_dump(settings)})
-        gateway.write("routes", {"config.yaml": _routes_file(rendered.template)})
-        credential = github.credential
-        gateway.write(f"credentials/{credential.secret}", {credential.key: TOKEN})
+        gateway.write("routes", {"config.yaml": rendered.routes})
+        for secret, files in rendered.credentials().items():
+            gateway.write(f"credentials/{secret}", files)
         containers.append(
             _docker(
                 "run",
@@ -196,6 +203,11 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
             network,
             "-p",
             f"127.0.0.1::{port}",
+            *(
+                option
+                for name, value in rendered.variables().items()
+                for option in ("-e", f"{name}={value}")
+            ),
             "--mount",
             f"type=volume,src={volume},dst={MOUNT},readonly",
             GATEWAY_IMAGE,
@@ -337,12 +349,12 @@ def test_github_answers_through_its_route_with_the_attached_token(
     assert not any(name.startswith(("create_", "update_", "merge_")) for name in tools)
 
 
-def test_a_resealed_key_reaches_the_bridge_without_a_restart(
+def test_a_renewed_credential_reaches_an_open_session_without_a_restart(
     gateway: Gateway, rendered: Rendered
 ) -> None:
-    """kubelet swaps the routes file in; the harness's open session carries the new key next.
+    """kubelet swaps a credential's Secret in; the harness's open session carries it next.
 
-    The same holds for the token the github route reads from its file.
+    A bridge client's key is renewed here, the way the GitHub token is every 30 minutes.
     """
     started = gateway.started_at()
     session = _open(gateway, "lares", _value("lares-gateway-key"))
@@ -350,9 +362,8 @@ def test_a_resealed_key_reaches_the_bridge_without_a_restart(
         f"Bearer {_value('lares-agent')}"
     )
 
-    gateway.write(
-        "routes", {"config.yaml": _routes_file(rendered.template, {"lares-agent": "new"})}
-    )
+    keys = rendered.credentials()["agentgateway-keys"]
+    gateway.write("credentials/agentgateway-keys", {**keys, "lares-agent": "new"})
 
     deadline = time.monotonic() + 30
     seen = ""
