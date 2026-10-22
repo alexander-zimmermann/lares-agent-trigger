@@ -728,14 +728,25 @@ def test_one_sampling_ratio_is_rendered_for_every_service_of_the_platform(
 
 
 def test_a_schedule_use_case_becomes_one_managed_cron_job(tmp_path: Path) -> None:
-    assert _jobs(tmp_path) == [
+    assert _jobs(tmp_path)[0] == {
+        "name": "lares:propose-faults",
+        "schedule": "0 3 * * 0",
+        "skills": ["lares-propose"],
+        "prompt": "Answer in English. Stay within 80 tool calls and 20 minutes.",
+        # The trigger delivers; the harness keeps the output to itself.
+        "deliver": "local",
+    }
+
+
+def test_a_script_becomes_one_managed_cron_job_without_a_model(tmp_path: Path) -> None:
+    """The harness runs the script and delivers its output; a dormant script renders nothing."""
+    assert _jobs(tmp_path)[1:] == [
         {
-            "name": "lares:propose-faults",
-            "schedule": "0 3 * * 0",
-            "skills": ["lares-propose"],
-            "prompt": "Answer in English. Stay within 80 tool calls and 20 minutes.",
-            # The trigger delivers; the harness keeps the output to itself.
-            "deliver": "local",
+            "name": "lares:skill-digest",
+            "schedule": "0 18 * * 0",
+            "script": "skill-digest.py",
+            "no_agent": True,
+            "deliver": "discord",
         }
     ]
 
@@ -846,7 +857,8 @@ def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> Non
     assert toolsets["api_server"] == ["no_mcp"]
     # The chat's read servers stay readable for a job made by hand; its request server does not.
     assert toolsets["cron"] == ["hermes-cron", "lares", "github"]
-    assert _jobs(tmp_path, only_chat) == []
+    # No agent job is left; the script's, which needs no model, stays.
+    assert [job["name"] for job in _jobs(tmp_path, only_chat)] == ["lares:skill-digest"]
 
     only_control = only_chat.replace(
         "    tools: [lares, lares-control, github]\n", "    tools: [lares-control]\n"

@@ -5,10 +5,10 @@ configuration from the same models, which is why schema and loader sit in this
 package rather than in the generator alone. Beside the use cases it declares
 the tool servers they may name, the gateway every one of them sits behind, the
 connectors a person signs in to on the gateway's public address, where the
-harness reports every finished turn, and the share of traces every service of
-the platform keeps. A file
-that does not validate is refused at startup — a half-read catalogue would
-start runs nobody declared.
+harness reports every finished turn, the share of traces every service of
+the platform keeps, and the scripts the harness's cron runs without a model.
+A file that does not validate is refused at startup — a half-read catalogue
+would start runs nobody declared.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 
 import yaml
 from pydantic import (
@@ -31,7 +31,7 @@ from pydantic import (
 from .events import EventKind
 
 # The harness mints cron job ids itself, so a job the trigger manages carries
-# its use case in the name: `lares:propose-faults`.
+# its use case or script in the name: `lares:propose-faults`.
 MANAGED_JOB_PREFIX = "lares:"
 
 # Where a completed run's output is delivered; `deliveries.py` holds one delivery
@@ -116,11 +116,41 @@ class Budget(_Strict):
     runs_per_day: int = Field(gt=0)
 
 
-class UseCase(_Strict):
-    """One declared entry: what starts it, what it may see, and what it costs."""
+class _Declared(_Strict):
+    """An entry that either runs or says why it does not."""
+
+    # What a refusal calls the entry: `use case` or `script`.
+    _noun: ClassVar[str]
 
     name: str = Field(min_length=1)
     sentence: str = Field(min_length=1)
+    # `enabled: false` is not a state: switching an entry off is a dormant one with a reason.
+    enabled: bool | None = None
+    dormant: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _state_is_declared(self) -> _Declared:
+        noun = self._noun
+        if self.enabled is None and self.dormant is None:
+            raise ValueError(
+                f"{noun} {self.name}: exactly one of `enabled: true` or `dormant: <reason>`"
+            )
+        if self.enabled is not None and self.dormant is not None:
+            raise ValueError(f"{noun} {self.name}: exactly one of `enabled` or `dormant`, not both")
+        if self.enabled is False:
+            raise ValueError(f"{noun} {self.name}: switching a {noun} off is `dormant: <reason>`")
+        return self
+
+    @property
+    def is_enabled(self) -> bool:
+        return self.enabled is True
+
+
+class UseCase(_Declared):
+    """One declared entry: what starts it, what it may see, and what it costs."""
+
+    _noun = "use case"
+
     trigger: Trigger
     # What an event or schedule run is told to run. A chat names none: the
     # person's message is the assignment.
@@ -134,26 +164,6 @@ class UseCase(_Strict):
     language: str = Field(min_length=2, max_length=2)
     memory: bool
     model: str | None = None
-    # A use case either runs or says why it does not. `enabled: false` is not a
-    # state: switching one off is a dormant entry with a reason.
-    enabled: bool | None = None
-    dormant: str | None = Field(default=None, min_length=1)
-
-    @model_validator(mode="after")
-    def _state_is_declared(self) -> UseCase:
-        if self.enabled is None and self.dormant is None:
-            raise ValueError(
-                f"use case {self.name}: exactly one of `enabled: true` or `dormant: <reason>`"
-            )
-        if self.enabled is not None and self.dormant is not None:
-            raise ValueError(
-                f"use case {self.name}: exactly one of `enabled` or `dormant`, not both"
-            )
-        if self.enabled is False:
-            raise ValueError(
-                f"use case {self.name}: switching a use case off is `dormant: <reason>`"
-            )
-        return self
 
     @model_validator(mode="after")
     def _skill_is_named(self) -> UseCase:
@@ -178,10 +188,6 @@ class UseCase(_Strict):
         return self
 
     @property
-    def is_enabled(self) -> bool:
-        return self.enabled is True
-
-    @property
     def event_trigger(self) -> EventTrigger | None:
         """The event trigger of an enabled use case, or None for every other one."""
         if self.is_enabled and isinstance(self.trigger, EventTrigger):
@@ -202,6 +208,23 @@ class UseCase(_Strict):
     def is_schedule(self) -> bool:
         """True for an enabled use case the harness's cron starts."""
         return self.is_enabled and isinstance(self.trigger, ScheduleTrigger)
+
+
+class Script(_Declared):
+    """A script the harness's cron runs without a model, its output the job's.
+
+    The harness delivers the output itself, so a script has no tool list, no
+    budget and no row in the ledger; it is a managed job like a schedule use
+    case's, named `lares:<name>`.
+    """
+
+    _noun = "script"
+
+    trigger: ScheduleTrigger
+    # The file under the default profile's `scripts/` directory.
+    script: str = Field(min_length=1)
+    # Where the harness posts the output: `discord` for its home channel.
+    deliver: str = Field(min_length=1)
 
 
 class Credential(_Strict):
@@ -292,15 +315,17 @@ class _File(_Strict):
     tool_servers: list[ToolServer] = Field(min_length=1)
     connectors: list[Connector] = []
     use_cases: list[UseCase] = Field(min_length=1)
+    scripts: list[Script] = []
 
 
 @dataclass(frozen=True)
 class UseCaseFile:
-    """The whole declaration: use cases, tool servers and connectors by name, in file order."""
+    """The whole declaration by name in file order: use cases, tool servers, connectors, scripts."""
 
     use_cases: dict[str, UseCase]
     tool_servers: dict[str, ToolServer]
     connectors: dict[str, Connector]
+    scripts: dict[str, Script]
     ledger_hook: LedgerHook
     tracing: Tracing
     gateway: Gateway
@@ -317,6 +342,14 @@ def scheduled_use_case(use_cases: Mapping[str, UseCase], job_name: str) -> UseCa
         return None
     use_case = use_cases.get(job_name.removeprefix(MANAGED_JOB_PREFIX))
     return use_case if use_case is not None and use_case.is_schedule else None
+
+
+def scheduled_script(scripts: Mapping[str, Script], job_name: str) -> Script | None:
+    """The script a cron job runs, known by the job's managed name."""
+    if not job_name.startswith(MANAGED_JOB_PREFIX):
+        return None
+    script = scripts.get(job_name.removeprefix(MANAGED_JOB_PREFIX))
+    return script if script is not None and script.is_enabled else None
 
 
 def load_use_cases(path: Path) -> dict[str, UseCase]:
@@ -373,10 +406,20 @@ def load_use_case_file(path: Path) -> UseCaseFile:
     if len(chats) > 1:
         raise ValueError(f"{path}: only one enabled message use case, not {', '.join(chats)}")
     _check_shared_memory(path, by_name, servers)
+
+    # A script's job carries the same prefix as a use case's, so the names share one space.
+    scripts: dict[str, Script] = {}
+    for script in parsed.scripts:
+        if script.name in by_name:
+            raise ValueError(f"{path}: script {script.name}: the name is already a use case's")
+        if script.name in scripts:
+            raise ValueError(f"{path}: script {script.name} is declared twice")
+        scripts[script.name] = script
     return UseCaseFile(
         use_cases=by_name,
         tool_servers=servers,
         connectors=connectors,
+        scripts=scripts,
         ledger_hook=parsed.ledger_hook,
         tracing=parsed.tracing,
         gateway=parsed.gateway,

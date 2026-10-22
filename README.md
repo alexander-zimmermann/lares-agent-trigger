@@ -45,6 +45,20 @@ use_cases:
 
 A use case either runs (`enabled: true`) or says why it does not (`dormant: <reason>`). There is no `enabled: false` — switching one off without a reason turns the catalogue into a guessing game. A file that does not validate stops the process at startup rather than running a half-read catalogue.
 
+Beside the use cases, the file may declare `scripts`: jobs of the harness's cron that run a file without a model, the file's stdout being the output, which the harness delivers itself. A script runs or is dormant like a use case, and shares the use cases' name space, since both become `lares:<name>` jobs:
+
+```yaml
+scripts:
+  - name: skill-digest
+    sentence: Posts the week's skill names per profile to the home channel.
+    trigger:
+      kind: schedule
+      cron: "0 18 * * 0"
+    script: skill-digest.py   # under the default profile's scripts/ directory
+    deliver: discord          # the harness's home channel
+    enabled: true
+```
+
 `tools` names tool servers, which the same file declares beside the use cases, together with where the harness reports every finished turn, the share of traces every service of the platform keeps, the gateway every tool server sits behind, and the connectors a person signs in to on it:
 
 ```yaml
@@ -182,7 +196,7 @@ lares-agent-trigger generate \
 | `profiles/<handle>/config.yaml` | each enabled person's: `settings.yaml` copied whole, then `model`, `fallback_providers` and `terminal` from their source and profile directory, then their tool servers on `discord` and `api_server`, Hermes's own `skills` toolset first on `api_server` (Discord's composite holds it already), the same hook, and their `mcp_servers` |
 | `profiles/kustomization.yaml` | the ConfigMap `hermes-profiles`, one key per person's config, named by the handle |
 | `profiles/profiles.values.yaml` | an additional values file of Hermes's chart: per person a read-only subPath mount of their config, their `.env`, the persons' `SOUL.md`, `AGENTS.md` and `.no-bundled-skills` into `/opt/data/profiles/<handle>/`, and a container `agent-log-<handle>` that streams the profile's `logs/agent.log` for Loki, beside the default profile's `agent-log`; its image is the name `agent-log`, which lares's kustomization pins to the image every log container runs |
-| `cron-jobs.yaml`   | one job per enabled schedule use case, named `lares:<use case>`, with its schedule, skill, prompt and delivery     |
+| `cron-jobs.yaml`   | one job per enabled schedule use case, named `lares:<use case>`, with its schedule, skill, prompt and delivery; and one per enabled script, `lares:<script>`, with its schedule, script, `no_agent: true` and delivery |
 | `tracing.env`      | `TRACING_SAMPLING_RATIO`, the declared `tracing.sampling_ratio`, which the trigger, the bridge and the engine's CronJobs read |
 | `env-template.yaml` | a patch of the harness's SealedSecret `hermes-credentials`: `default.env` and each person's `<handle>.env`, as templates of its sealed keys |
 | `routes.yaml` | the gateway's routes file, a key of the ConfigMap `agentgateway-routes`; it names every key as a variable and every credential as a file, and holds none (see [The gateway's routes](#the-gateways-routes)) |
@@ -259,14 +273,14 @@ The harness runs the schedules; its own cron ledger, incidents and overdue gauge
 | In the harness                              | What the reconcile does                                                  |
 | ------------------------------------------- | ------------------------------------------------------------------------ |
 | a declared job is missing                   | creates it                                                               |
-| a declared job's schedule, prompt, skills or delivery differ | updates those fields in place; the job keeps its id     |
+| a declared job's schedule, prompt, skills, script or delivery differ | updates those fields in place; the job keeps its id |
 | a declared job is as declared               | nothing — rewriting a schedule drops an occurrence not yet run           |
 | a `lares:` job nothing declares, or a second job of one managed name | deletes it                                      |
 | any other job, and whether a managed job is paused | nothing: pausing a job is a person's lever                        |
 
 The pod rolls when the rendering changes, so startup is the only moment the set changes. The harness rolls on the same commit, so a reconcile the harness does not answer is tried again every `RECONCILE_RETRY_SECONDS` until one goes through. One it answers with a refusal — a schedule it cannot parse, say — is logged as an error and counted as `refused`, and not tried again: the declaration changes only with a new commit, which rolls the pod. A job set rendered from another declaration than the mounted use-case file stops the pod at startup.
 
-The Jobs API creates a job from its name, schedule, prompt, skills and delivery, and takes no tool list and no model per job. Every managed job therefore sees the cron surface — every read server in use and the memory servers the schedule use cases name — and runs on the harness's default model. The loader refuses an enabled schedule use case that would need more: one naming a writing server, or pinning a model. Such a use case stays dormant until the harness can carry it. A memory server on the cron surface reaches every job, so the loader also refuses an enabled schedule use case without `memory: true` beside one that names it.
+The Jobs API creates a job from its name, schedule, prompt, skills and delivery, or from its name, schedule, script, `no_agent` and delivery for a script job, and takes no tool list and no model per job. A harness whose Jobs API does not take `script` and `no_agent` yet refuses a script job as one with nothing to run, which the reconcile counts as `refused` and gives up on; a script stays dormant until the harness is one that takes them. Every managed job therefore sees the cron surface — every read server in use and the memory servers the schedule use cases name — and runs on the harness's default model. The loader refuses an enabled schedule use case that would need more: one naming a writing server, or pinning a model. Such a use case stays dormant until the harness can carry it. A memory server on the cron surface reaches every job, so the loader also refuses an enabled schedule use case without `memory: true` beside one that names it.
 
 ## Starting a use case from chat
 

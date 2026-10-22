@@ -169,6 +169,16 @@ tool_servers:
     access: read
     tools: [list_*, get_*, query_*]
 
+scripts:
+  - name: skill-digest
+    sentence: Posts the week's skill names per profile to the home channel.
+    trigger:
+      kind: schedule
+      cron: "0 18 * * 0"
+    script: skill-digest.py
+    deliver: discord
+    enabled: true
+
 use_cases:
   - name: explain-episode
     sentence: Explains a new or escalated episode on its own event.
@@ -270,7 +280,7 @@ model_sources:
         price: {input: 0.10, cached_input: 0.01, output: 0.50}
 """
 
-# The job set the generator renders from USE_CASES: one job per enabled schedule.
+# The job set the generator renders from USE_CASES: one job per enabled schedule and script.
 CRON_JOBS = """
 jobs:
   - name: lares:propose-faults
@@ -283,6 +293,11 @@ jobs:
     skills: [lares-restore-probe]
     prompt: Answer in English. Stay within 30 tool calls and 10 minutes.
     deliver: local
+  - name: lares:skill-digest
+    schedule: 0 18 * * 0
+    script: skill-digest.py
+    no_agent: true
+    deliver: discord
 """
 
 # Two entries copied from the engine's faults.yaml: one sentence with a dash
@@ -670,7 +685,8 @@ async def service(
     github = github_app(settings)
     deliveries = build_deliveries(settings, use_cases, metrics, github)
     closer = Closer(ledger, deliveries, alertmanager, metrics)
-    persons = load_persons_file(settings.persons_file, load_use_case_file(settings.use_cases_file))
+    declared = load_use_case_file(settings.use_cases_file)
+    persons = load_persons_file(settings.persons_file, declared)
     pricing = Pricing(persons, metrics)
     turns = TurnRuns(
         use_cases,
@@ -694,7 +710,7 @@ async def service(
         turn_wait_seconds=settings.turn_wait_seconds,
     )
     schedules = Schedules(
-        load_cron_jobs(settings.cron_jobs_file, use_cases),
+        load_cron_jobs(settings.cron_jobs_file, declared),
         hermes,
         turns,
         metrics,

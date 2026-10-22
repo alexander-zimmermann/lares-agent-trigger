@@ -14,7 +14,8 @@ settings in, one text per rendered file out.
   the configs, the ConfigMap that holds them and the chart values that mount
   each person's config, `.env` and shared files into their profile, and run a
   container that streams the profile's log for Loki.
-- The cron job set: one managed job per enabled schedule use case.
+- The cron job set: one managed job per enabled schedule use case, and one per
+  enabled script, which the harness runs without a model.
 - The sampling ratio, one variable every service of the platform reads: the
   trigger, the bridge and the engine's CronJobs.
 - Every profile's `.env`: one line per key its config reads, naming the key it
@@ -84,6 +85,7 @@ from .use_cases import (
     Credential,
     Gateway,
     ScheduleTrigger,
+    Script,
     ToolAccess,
     ToolServer,
     UseCase,
@@ -310,10 +312,14 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# streams the profile's agent.log for Loki.\n"
         f"{_dump(_profiles_values(profiles))}"
     )
-    jobs = [_cron_job(use_case) for use_case in enabled if use_case.is_schedule]
+    jobs = [
+        *(_cron_job(use_case) for use_case in enabled if use_case.is_schedule),
+        *(_script_job(script) for script in declared.scripts.values() if script.is_enabled),
+    ]
     cron_jobs = (
         f"{GENERATED_LINE}\n"
-        "# The cron jobs the harness runs, one per enabled schedule use case.\n"
+        "# The cron jobs the harness runs, one per enabled schedule use case and one per enabled "
+        "script.\n"
         f"{_dump(dump_cron_jobs(jobs))}"
     )
     tracing = (
@@ -1013,7 +1019,7 @@ def _cron_job(use_case: UseCase) -> CronJob:
     assert use_case.skill is not None
     budget = use_case.budget
     return CronJob(
-        name=job_name(use_case),
+        name=job_name(use_case.name),
         schedule=trigger.cron,
         skills=(use_case.skill,),
         prompt=(
@@ -1022,6 +1028,17 @@ def _cron_job(use_case: UseCase) -> CronJob:
         ),
         # The trigger delivers; the harness keeps the output to itself.
         deliver="local",
+    )
+
+
+def _script_job(script: Script) -> CronJob:
+    """A script's job: the harness runs the file without a model and delivers its output."""
+    return CronJob(
+        name=job_name(script.name),
+        schedule=script.trigger.cron,
+        script=script.script,
+        no_agent=True,
+        deliver=script.deliver,
     )
 
 

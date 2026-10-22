@@ -72,6 +72,25 @@ connectors:
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     tools: ["*"]
 
+scripts:
+  - name: skill-digest
+    sentence: Posts the week's skill names per profile to the home channel.
+    trigger:
+      kind: schedule
+      cron: "0 18 * * 0"
+    script: skill-digest.py
+    deliver: discord
+    enabled: true
+
+  - name: volume-report
+    sentence: Reports how full the data volume is.
+    trigger:
+      kind: schedule
+      cron: "0 7 * * 1"
+    script: volume-report.sh
+    deliver: discord
+    dormant: Waits for its script.
+
 use_cases:
   - name: messenger
     sentence: Answers a message from the phone.

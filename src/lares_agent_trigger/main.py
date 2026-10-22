@@ -57,7 +57,7 @@ async def _amain() -> int:
         declared = load_use_case_file(settings.use_cases_file)
         use_cases = declared.use_cases
         persons = load_persons_file(settings.persons_file, declared)
-        cron_jobs = load_cron_jobs(settings.cron_jobs_file, use_cases)
+        cron_jobs = load_cron_jobs(settings.cron_jobs_file, declared)
         github = github_app(settings)
         deliveries = build_deliveries(settings, use_cases, metrics, github)
     except ValueError as exc:
