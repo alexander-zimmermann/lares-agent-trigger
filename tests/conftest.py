@@ -154,11 +154,15 @@ ledger_hook:
 tracing:
   sampling_ratio: 1.0
 
+gateway:
+  url: http://agentgateway.test:8080
+  otlp_endpoint: http://alloy-receiver.test:4318
+
 tool_servers:
   - name: lares
     url: http://lares-mcp-bridge.test:8080/mcp
     client: lares-agent
-    key_env: LARES_MCP_KEY
+    key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [list_*, get_*, query_*]

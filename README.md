@@ -45,7 +45,7 @@ use_cases:
 
 A use case either runs (`enabled: true`) or says why it does not (`dormant: <reason>`). There is no `enabled: false` — switching one off without a reason turns the catalogue into a guessing game. A file that does not validate stops the process at startup rather than running a half-read catalogue.
 
-`tools` names tool servers, which the same file declares beside the use cases, together with where the harness reports every finished turn and the share of traces every service of the platform keeps:
+`tools` names tool servers, which the same file declares beside the use cases, together with where the harness reports every finished turn, the share of traces every service of the platform keeps, and the gateway every tool server sits behind:
 
 ```yaml
 ledger_hook:
@@ -53,19 +53,23 @@ ledger_hook:
   secret_env: LARES_AGENT_TRIGGER_HOOK_SECRET
 
 tracing:
-  sampling_ratio: 1.0     # one number for the trigger, the bridge and the engine
+  sampling_ratio: 1.0     # one number for the trigger, the bridge, the engine and the gateway
+
+gateway:
+  url: http://agentgateway.agents.svc.cluster.local:8080                  # where the harness reaches it
+  otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318  # where it sends a span of every call
 
 tool_servers:
   - name: lares
-    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-agent       # the bridge's machine client the key maps to
-    key_env: LARES_MCP_KEY    # where the harness holds that key
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp  # the bridge, which the gateway calls
+    client: lares-agent         # the bridge's machine client the gateway signs in as
+    key_env: LARES_GATEWAY_KEY  # where the harness holds its key for the route
     timeout_seconds: 60
     access: read
     tools: [list_*, get_*, query_*, correlate_events, search_wiki]
 ```
 
-A tool server is the bridge under one machine-client key; `tools` is both the bridge's allowlist for that client and the harness's include list on top of it. `access` is where it may be granted, and the loader refuses an enabled use case that names a server it may not hold:
+Every tool server is an HTTP endpoint behind a route of its own on one gateway, [agentgateway](https://agentgateway.dev). The harness calls the route with a key valid there only; the gateway serves the server's `tools` and nothing else, and attaches the credential the server expects. The harness holds no server's credential. A bridge server is the bridge under one machine client: `tools` is the bridge's allowlist for that client, the route's tool list and the harness's include list on top. `access` is where it may be granted, and the loader refuses an enabled use case that names a server it may not hold:
 
 | `access`  | Granted to                                                                         |
 | --------- | ---------------------------------------------------------------------------------- |
@@ -76,22 +80,23 @@ A tool server is the bridge under one machine-client key; `tools` is both the br
 
 A tool sits on one server only: the loader refuses a declaration where an entry of one bridge server matches an entry of another, so `get_*` on the read server and `get_write_request` on the gate's request server cannot stand side by side — the read server then lists its `get_` tools by name.
 
-One more kind of server reads GitHub: the official [GitHub MCP server](https://github.com/github/github-mcp-server), which the harness starts as a process of its own, not the bridge:
+Any other MCP server is `kind: http`, an endpoint of its own behind its route, such as the official [GitHub MCP server](https://github.com/github/github-mcp-server):
 
 ```yaml
   - name: github
-    kind: github                                      # a bridge entry needs no kind
-    command: /opt/github-mcp/github-mcp-server        # the binary, inside the harness container
-    app_id: 1234567                                   # the GitHub App it signs in as
-    installation_id: 89012345
-    private_key_file: /etc/github-reader/private-key  # the App's key, mounted from a secret
-    toolsets: [repos, issues, pull_requests]          # the server's own --toolsets
+    kind: http                              # a bridge entry needs no kind
+    url: http://github-mcp-server.agents.svc.cluster.local:8082/mcp
+    credential:                             # what the gateway attaches on every call
+      secret: github-mcp-server-token       # a Secret beside the gateway
+      key: token
+      header: Authorization                 # a bearer token; any other header takes the value as it is
+    key_env: GITHUB_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [get_*, list_*, search_*, issue_read, pull_request_read]
 ```
 
-It has no bridge client and no allowlist on the bridge. It signs in as a GitHub App that may only read, minting and renewing the installation tokens itself, runs `--read-only`, and `tools` is the harness's include list on top. Its `access` is `read` and nothing else — a GitHub write is a delivery of the trigger, never a tool the model holds.
+Its `access` is `read` and nothing else — a GitHub write is a delivery of the trigger, never a tool the model holds. No two servers share a `key_env`.
 
 A dormant use case may name tool servers and event sources (`alert`, `pull_request`, `ets_export`, `new_device`) that are not built yet; enabling it is refused until they are.
 
@@ -149,6 +154,7 @@ The loader refuses the file at pre-commit and at startup when:
 
 - two persons share a handle, a handle is no Hermes profile name of lower-case letters, digits and `-` up to 32 characters (it names the profile's volumes too), it is one Hermes keeps (`hermes`, `test`, `tmp`, `root`, `sudo`), or it is `default`, which belongs to the machines;
 - a handle is the `client` of a bridge server: a person's own client is named by the handle;
+- a person's own route for a read server they hold, `<server>-<handle>`, takes the name of another route;
 - an enabled person names a tool the chat use case does not hold, or no chat use case is enabled;
 - an enabled person's source is not declared, has no `bound`, or names `anthropic` in any step: Hermes keeps that provider's login state in the default profile's credentials;
 - more than one enabled person runs on a `shared-with-default` source;
@@ -166,7 +172,7 @@ lares-agent-trigger generate \
   --use-cases use-cases.yaml --persons persons.yaml --settings settings.yaml \
   --hermes-config config.yaml --cron-jobs cron-jobs.yaml --client-tools client-tools.env \
   --tracing tracing.env --env-template env-template.yaml --clients-template clients-template.yaml \
-  --profiles profiles
+  --routes-template routes-template.yaml --routes-values routes.values.yaml --profiles profiles
 ```
 
 | Output             | What it holds                                                                                                     |
@@ -180,6 +186,8 @@ lares-agent-trigger generate \
 | `tracing.env`      | `TRACING_SAMPLING_RATIO`, the declared `tracing.sampling_ratio`, which the trigger, the bridge and the engine's CronJobs read |
 | `env-template.yaml` | a patch of the harness's SealedSecret `hermes-credentials`: `default.env` and each person's `<handle>.env`, as templates of its sealed keys |
 | `clients-template.yaml` | a patch of the bridge's SealedSecret `lares-mcp-bridge-auth-clients`: `clients.json`, the bridge's clients and their keys, as a template of its sealed keys |
+| `routes-template.yaml` | a patch of the gateway's SealedSecret `agentgateway-routes`: its routes file, `config.yaml`, as a template of its sealed keys (see [The gateway's routes](#the-gateways-routes)) |
+| `routes.values.yaml` | an additional values file of the gateway's chart: `config.localXdsPath`, the routes file, and each http server's credential Secret, mounted whole and read-only under `/etc/agentgateway/` |
 
 Every file opens with ``# generated by `task agents:create-harness-config`, do not edit`` and is written whole; a person not rendered has no `profiles/<handle>/`. The settings file may not carry a key the generator owns, nor a key it renders into the settings' `discord` or `gateway` block. A dormant use case renders nothing, and neither does a dormant person, a tool server only dormant use cases name or a model source no profile runs on.
 
@@ -192,11 +200,11 @@ Without a person on Discord, the default profile serves the chat. With one, the 
 - gives the `discord: admin` persons every slash command (`allow_admin_from`, `group_allow_admin_from`) and everyone else `reset`, `stop`, `retry` and `undo` beside Hermes's `/help` and `/whoami` (`user_allowed_commands`, `group_user_allowed_commands`);
 - holds no tool server on `discord`: the chat is the persons'.
 
-A person reads through a bridge client of their own, named by the handle, which may call the tools of the read servers they hold; a request server they hold they reach through its machine client.
+A person reads the bridge through a client of their own, named by the handle, which may call the tools of the read servers they hold: the gateway attaches that client's key on a route of the person's own. Every other server they hold they reach on the server's one route, a request server through its machine client.
 
 ### The keys
 
-The harness reads every key from its profile's `.env`, never from the pod's environment, and the bridge reads its clients' keys from `clients.json`. Each value is sealed once, under its own key, and the two templates compose the files from those keys: kubeseal rewrites a SealedSecret whole, so each template is a patch beside it. A variable's value is sealed under the variable's name in lower case and dashed (`LARES_MCP_KEY` under `lares-mcp-key`), a person's own value under the handle and that name (`kim-lares-mcp-key`), a client's under the client's name (`lares-agent`, `kim`):
+The harness reads every key from its profile's `.env`, never from the pod's environment, the bridge its clients' keys from `clients.json`, and the gateway its routes' keys from its routes file. Each value is sealed once per SealedSecret, under its own key, and the three templates compose the files from those keys: kubeseal rewrites a SealedSecret whole, so each template is a patch beside it. A variable's value is sealed under the variable's name in lower case and dashed (`LARES_GATEWAY_KEY` under `lares-gateway-key`), a person's own value under the handle and that name (`kim-lares-gateway-key`), a client's under the client's name (`lares-agent`, `kim`):
 
 ```yaml
 spec:
@@ -214,10 +222,10 @@ The default profile's `.env` names, once each and in this order:
 - `DISCORD_BOT_TOKEN`, when a chat use case is enabled;
 - `DISCORD_USER_<HANDLE>` of each enabled person on Discord;
 - the hook's `secret_env`;
-- the `key_env` of each bridge server the profile holds;
+- the `key_env` of each tool server the profile holds: its key for the server's route;
 - the key variable of each provider its source and their fallbacks run on.
 
-A person's `<handle>.env` names their own `API_SERVER_KEY`, the shared hook secret, the `key_env` of each bridge server they hold, their own for a read server and the machine client's for a request server, and their own key of each provider their source runs on. A person's bridge key is sealed twice: in the harness's namespace under `<handle>-<variable>`, in the bridge's under the handle.
+A person's `<handle>.env` names their own `API_SERVER_KEY`, the shared hook secret, their own key for the route of each tool server they hold, and their own key of each provider their source runs on. No `.env` holds a server's credential. A profile's key for a route is sealed twice, under the same name: in the harness's SealedSecret and in the gateway's. So is a bridge client's key: in the gateway's and in the bridge's, under the client's name.
 
 Sealed Secrets renders a key the SealedSecret lacks as empty, without an error. lares therefore checks in pre-commit that every key a template names is sealed (`task k8s:validate-sealed-templates`).
 
@@ -231,7 +239,18 @@ What each surface may hold follows how Hermes resolves its toolsets:
 
 A list that would name no server is `no_mcp`: Hermes reads a list without a server name as "every server".
 
-The GitHub server's entry starts the binary with `stdio --read-only` and the declared toolsets, and hands it the App in `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY_PATH`. A key file that is missing stops the server before it serves; signed in as an App, it never falls back to an interactive login. Its prompts and resources stay off: the prompts walk the model towards writes it does not hold.
+Every `mcp_servers` entry has the same shape: the profile's route on the gateway as `url`, `Authorization: Bearer ${env:<key_env>}`, the `timeout`, and the server's `tools` as `include`, with resources and prompts off — the gateway serves tools only.
+
+### The gateway's routes
+
+The routes file holds one route per tool server a profile holds, at `/mcp/<server>`, and one per person reading the bridge through their own client, at `/mcp/<server>-<handle>`. Each route:
+
+- takes the key of each profile that reaches the server there (`apiKey`, strict) and no other;
+- lets through only its server's `tools`, one `mcpAuthorization` rule per entry: a name by itself, a trailing glob by its prefix, any other `*` and `?` as an anchored pattern; an entry with `[` is refused;
+- attaches the bridge client's key, or the http server's credential from `/etc/agentgateway/credentials/<secret>/<key>`;
+- keeps no session upstream (`statefulMode: stateless`): a session would keep the credential it started with past a renewal.
+
+The gateway watches the routes file and every credential file, and kubelet swaps a changed Secret in whole, so a resealed key or a renewed token reaches the next call without a restart. Every call is a span to `gateway.otlp_endpoint`, kept at `tracing.sampling_ratio`.
 
 ## The cron jobs
 
@@ -612,7 +631,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 ## Tests
 
-The generator is pure and tested apart: the declarations and settings in `tests/rendering/` go in, and every rendered file must equal its expected file in `tests/rendering/expected/`. After a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review. The rendered GitHub entry is also run as the harness would run it: the real server binary, copied out of its image, starts in a container with a key file in place, answers MCP over stdio with the network off, and offers read tools only; without the key it never starts.
+The generator is pure and tested apart: the declarations and settings in `tests/rendering/` go in, and every rendered file must equal its expected file in `tests/rendering/expected/`. After a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review. The rendered routes are also run as the harness runs them: agentgateway in a container, started as its chart starts it, the routes file filled the way Sealed Secrets fills it and laid into a volume the way kubelet lays a Secret, with the real GitHub server and a stand-in bridge behind it under the names the declaration gives them. A key opens its own route only, a tool outside a server's `tools` is neither listed nor callable, each bridge route signs in as its client, GitHub answers only with the attached token, and a resealed key reaches a session the harness keeps open without a restart.
 
 Everything else meets one seam, at the service's edges. An episode event goes in on a real NATS container with a real durable consumer, and a hook delivery or an API request goes in over HTTP to the app in process, signed or keyed as the harness and the bridge send it; the ledger rows land in a real TimescaleDB container and the spans in an in-memory exporter, sampled at a ratio a test may set; the harness, Alertmanager, Discord, Wiki.js and GitHub are fakes over `respx` — the harness because a run is a model call, its Jobs API keeping a job list with the harness's rules (it mints the ids, takes a create's five fields and an update's whitelist, refuses what the harness refuses, resumes a paused job it runs, hides paused jobs from a plain list), the others so the alert, the message, the page and the pull request are asserted as they would arrive; GitHub keeps its own rules on the App's JWT and tokens, refs, contents writes, pull requests and labels — and the mail lands at an SMTP server in the test process that keeps the relay's one rule, its accepted sender. The failure classes have a table test of their own against the harness's error texts, and so has the diff a pull request carries against the file it changes.
 

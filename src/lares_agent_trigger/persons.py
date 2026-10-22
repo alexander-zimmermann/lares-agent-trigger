@@ -24,12 +24,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeIs
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from .use_cases import BridgeServer, UseCaseFile, chat_use_case
+from .use_cases import BridgeServer, ToolServer, UseCaseFile, chat_use_case
 
 # How a source's spend is bounded: a flat plan, or metered use under a hard limit.
 Bound = Literal["subscription", "capped"]
@@ -282,11 +282,41 @@ def load_persons_file(path: Path, declared: UseCaseFile) -> PersonsFile:
                 f"{path}: person {person.name}: model: no model source named {person.model}"
             )
         _check_person_source(path, person, sources[person.model])
+    _check_own_routes(path, enabled, declared)
     _check_one_shares_the_default_account(path, enabled, sources)
     _check_discord_admin(path, enabled)
     return PersonsFile(
         model_sources=sources, default_profile=parsed.default_profile, persons=persons
     )
+
+
+def reads_through_own_client(server: ToolServer) -> TypeIs[BridgeServer]:
+    """True for a bridge server a person reads through a client of their own, named by the handle.
+
+    Any other server a person holds the gateway calls as the server's own client.
+    """
+    return isinstance(server, BridgeServer) and server.access == "read"
+
+
+def own_route(server: str, handle: str) -> str:
+    """The gateway route of a person's own client on a server: the server's name and the handle."""
+    return f"{server}-{handle}"
+
+
+def _check_own_routes(path: Path, enabled: Iterable[Person], declared: UseCaseFile) -> None:
+    """Refuse a person's own route that takes the name of another route."""
+    routes = {name: f"the route of tool server {name}" for name in declared.tool_servers}
+    for person in enabled:
+        for name in person.tools:
+            if not reads_through_own_client(declared.tool_servers[name]):
+                continue
+            route = own_route(name, person.name)
+            if route in routes:
+                raise ValueError(
+                    f"{path}: person {person.name}: their own route for {name}, {route}, is "
+                    f"already {routes[route]}"
+                )
+            routes[route] = f"{person.name}'s own route for {name}"
 
 
 def _check_tools(path: Path, person: Person, declared: UseCaseFile) -> None:

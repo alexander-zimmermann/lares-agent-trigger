@@ -7,9 +7,9 @@
   ],
   "customManagers": [
     {
-      // The GitHub server test runs the server lares deploys, in a shell image
+      // The gateway test runs the gateway and the GitHub server lares deploys
       "customType": "regex",
-      "managerFilePatterns": ["/^tests/test_github_server\\.py$/"],
+      "managerFilePatterns": ["/^tests/test_gateway\\.py$/"],
       "matchStrings": ["_IMAGE = \"(?<depName>[^\":]+):(?<currentValue>[^\"]+)\""],
       "datasourceTemplate": "docker",
     },

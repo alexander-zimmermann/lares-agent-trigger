@@ -8,7 +8,7 @@ import pytest
 
 from lares_agent_trigger.use_cases import (
     BridgeServer,
-    GitHubServer,
+    HttpServer,
     ScheduleTrigger,
     load_use_case_file,
     load_use_cases,
@@ -22,11 +22,15 @@ ledger_hook:
 tracing:
   sampling_ratio: 1.0
 
+gateway:
+  url: http://agentgateway.agents.svc.cluster.local:8080
+  otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318
+
 tool_servers:
   - name: lares
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-agent
-    key_env: LARES_MCP_KEY
+    key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [list_*, get_episode, query_*]
@@ -34,7 +38,7 @@ tool_servers:
   - name: lares-control
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-control
-    key_env: LARES_CONTROL_KEY
+    key_env: LARES_CONTROL_GATEWAY_KEY
     timeout_seconds: 60
     access: request
     tools: [request_knx_write, get_write_request]
@@ -42,7 +46,7 @@ tool_servers:
   - name: lares-memory
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-memory
-    key_env: LARES_MEMORY_KEY
+    key_env: LARES_MEMORY_GATEWAY_KEY
     timeout_seconds: 30
     access: memory
     tools: [get_memory, append_memory]
@@ -50,18 +54,19 @@ tool_servers:
   - name: lares-wiki
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-wiki
-    key_env: LARES_WIKI_KEY
+    key_env: LARES_WIKI_GATEWAY_KEY
     timeout_seconds: 60
     access: write
     tools: [update_wiki_page]
 
   - name: github
-    kind: github
-    command: /opt/github-mcp/github-mcp-server
-    app_id: 1234567
-    installation_id: 89012345
-    private_key_file: /etc/github-reader/private-key
-    toolsets: [repos, issues, pull_requests]
+    kind: http
+    url: http://github-mcp-server.agents.svc.cluster.local:8082/mcp
+    credential:
+      secret: github-mcp-server-token
+      key: token
+      header: Authorization
+    key_env: GITHUB_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [get_*, list_*, search_*, issue_read, pull_request_read]
@@ -238,7 +243,7 @@ def test_every_field_of_a_tool_server_and_the_ledger_hook(tmp_path: Path) -> Non
     assert isinstance(lares, BridgeServer)
     assert lares.url == "http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp"
     assert lares.client == "lares-agent"
-    assert lares.key_env == "LARES_MCP_KEY"
+    assert lares.key_env == "LARES_GATEWAY_KEY"
     assert lares.timeout_seconds == 60
     assert lares.access == "read"
     assert lares.tools == ("list_*", "get_episode", "query_*")
@@ -439,16 +444,16 @@ def test_one_tool_named_by_two_servers_is_refused(tmp_path: Path) -> None:
         load_use_cases(_write(tmp_path, broken))
 
 
-def test_every_field_of_the_github_server(tmp_path: Path) -> None:
-    """The official server, signing in as a read-only App: no bridge client."""
+def test_every_field_of_an_http_server(tmp_path: Path) -> None:
+    """An MCP server of its own: the gateway attaches its credential from a Secret, no client."""
     github = load_use_case_file(_write(tmp_path, VALID)).tool_servers["github"]
 
-    assert isinstance(github, GitHubServer)
-    assert github.command == "/opt/github-mcp/github-mcp-server"
-    assert github.app_id == 1234567
-    assert github.installation_id == 89012345
-    assert github.private_key_file == "/etc/github-reader/private-key"
-    assert github.toolsets == ("repos", "issues", "pull_requests")
+    assert isinstance(github, HttpServer)
+    assert github.url == "http://github-mcp-server.agents.svc.cluster.local:8082/mcp"
+    assert github.credential.secret == "github-mcp-server-token"
+    assert github.credential.key == "token"
+    assert github.credential.header == "Authorization"
+    assert github.key_env == "GITHUB_GATEWAY_KEY"
     assert github.timeout_seconds == 60
     assert github.access == "read"
     assert github.tools == ("get_*", "list_*", "search_*", "issue_read", "pull_request_read")
@@ -459,26 +464,58 @@ def test_every_field_of_the_github_server(tmp_path: Path) -> None:
     )
 
 
-def test_the_github_server_only_reads(tmp_path: Path) -> None:
+@pytest.mark.parametrize("access", ["write", "request", "memory"])
+def test_an_http_server_only_reads(tmp_path: Path, access: str) -> None:
     """A GitHub write is a delivery of the trigger, never a tool the model holds."""
     broken = VALID.replace(
         "    access: read\n    tools: [get_*, list_*",
-        "    access: write\n    tools: [get_*, list_*",
+        f"    access: {access}\n    tools: [get_*, list_*",
         1,
     )
 
-    with pytest.raises(ValueError, match="tool server github: the GitHub server only reads"):
+    with pytest.raises(ValueError, match="tool server github: an http server only reads"):
         load_use_cases(_write(tmp_path, broken))
 
 
-def test_the_github_server_takes_no_bridge_client(tmp_path: Path) -> None:
+def test_an_http_server_takes_no_bridge_client(tmp_path: Path) -> None:
     broken = VALID.replace(
-        "    installation_id: 89012345\n",
-        "    installation_id: 89012345\n    client: lares-github\n",
+        "    key_env: GITHUB_GATEWAY_KEY\n",
+        "    key_env: GITHUB_GATEWAY_KEY\n    client: lares-github\n",
         1,
     )
 
     with pytest.raises(ValueError, match="client"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_two_tool_servers_on_one_gateway_key_are_refused(tmp_path: Path) -> None:
+    """One variable per route in every profile's .env: two servers on one would share a key."""
+    broken = VALID.replace(
+        "    key_env: GITHUB_GATEWAY_KEY\n", "    key_env: LARES_GATEWAY_KEY\n", 1
+    )
+
+    with pytest.raises(ValueError, match="github: key_env LARES_GATEWAY_KEY is already"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_the_gateway_is_read_beside_the_ledger_hook(tmp_path: Path) -> None:
+    declared = load_use_case_file(_write(tmp_path, VALID))
+
+    assert declared.gateway.url == "http://agentgateway.agents.svc.cluster.local:8080"
+    assert declared.gateway.otlp_endpoint == (
+        "http://alloy-alloy-receiver.alloy.svc.cluster.local:4318"
+    )
+
+
+def test_a_file_without_the_gateway_is_refused(tmp_path: Path) -> None:
+    broken = VALID.replace(
+        "gateway:\n  url: http://agentgateway.agents.svc.cluster.local:8080\n", ""
+    )
+    broken = broken.replace(
+        "  otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318\n", ""
+    )
+
+    with pytest.raises(ValueError, match="gateway"):
         load_use_cases(_write(tmp_path, broken))
 
 
@@ -491,7 +528,7 @@ def test_the_one_server_rule_holds_among_the_bridge_servers_only(tmp_path: Path)
 
 
 def test_an_unknown_kind_of_tool_server_is_refused(tmp_path: Path) -> None:
-    broken = VALID.replace("    kind: github\n", "    kind: gitlab\n", 1)
+    broken = VALID.replace("    kind: http\n", "    kind: gitlab\n", 1)
 
     with pytest.raises(ValueError, match="gitlab"):
         load_use_cases(_write(tmp_path, broken))

@@ -310,6 +310,18 @@ def test_a_handle_that_is_a_bridge_client_is_refused(tmp_path: Path) -> None:
         _load(tmp_path, text)
 
 
+def test_a_handle_naming_a_persons_route_like_another_route_is_refused(tmp_path: Path) -> None:
+    """lou's own route for lares would be `lares-<handle>`; `control` makes it lares-control's."""
+    text = (VALID + PERSONS).replace("  - name: lou", "  - name: control")
+
+    with pytest.raises(
+        ValueError,
+        match="person control: their own route for lares, lares-control, is already "
+        "the route of tool server lares-control",
+    ):
+        _load(tmp_path, text)
+
+
 def test_a_tool_the_chat_does_not_hold_is_refused(tmp_path: Path) -> None:
     text = (VALID + PERSONS).replace(
         "    tools: [lares]\n    model: free-account\n    enabled:",
