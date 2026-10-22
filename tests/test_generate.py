@@ -108,7 +108,7 @@ def _files(rendered: Rendering) -> dict[str, str]:
         "tracing.env": rendered.tracing,
         "env-template.yaml": rendered.env_template,
         "clients-template.yaml": rendered.clients_template,
-        "routes-template.yaml": rendered.routes_template,
+        "routes.yaml": rendered.routes,
         "routes.values.yaml": rendered.routes_values,
         "profiles/kustomization.yaml": rendered.profiles_kustomization,
         "profiles/profiles.values.yaml": rendered.profiles_values,
@@ -409,21 +409,15 @@ def test_a_person_reads_the_bridge_on_a_route_of_their_own(tmp_path: Path) -> No
     }
 
 
-def _gateway(tmp_path: Path, persons: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    """The gateway's routes file as the controller renders it, each sealed key as `<key>`; and
-    the patch around it."""
-    patch: dict[str, Any] = yaml.safe_load(_render(tmp_path, persons=persons).routes_template)
-    template: str = patch["spec"]["template"]["data"]["config.yaml"]
-    filled = re.sub(
-        r'{{ index \. "([^"]+)" \| toJson }}', lambda m: json.dumps(f"<{m[1]}>"), template
-    )
-    assert "{{" not in filled
-    config: dict[str, Any] = yaml.safe_load(filled)
-    return config, patch
+def _gateway(tmp_path: Path, persons: str | None = None, use_cases: str | None = None) -> Any:
+    """The gateway's routes file, as the gateway reads it before expanding its variables."""
+    return yaml.safe_load(_render(tmp_path, use_cases, persons=persons).routes)
 
 
-def _routes(tmp_path: Path, persons: str | None = None) -> dict[str, dict[str, Any]]:
-    config, _ = _gateway(tmp_path, persons)
+def _routes(
+    tmp_path: Path, persons: str | None = None, use_cases: str | None = None
+) -> dict[str, dict[str, Any]]:
+    config = _gateway(tmp_path, persons, use_cases)
     return {route["name"]: route for route in config["binds"][0]["listeners"][0]["routes"]}
 
 
@@ -444,26 +438,26 @@ def test_the_gateway_holds_one_route_per_tool_server_and_one_per_persons_own_cli
 def test_each_route_takes_the_keys_of_the_profiles_holding_it_and_no_other(
     tmp_path: Path,
 ) -> None:
-    """Each key sealed under the name the profile's .env reads it from."""
+    """Each key a variable named after its sealed key, the one the profile's .env reads."""
     keys = {
         name: [key["key"] for key in route["policies"]["apiKey"]["keys"]]
         for name, route in _routes(tmp_path).items()
     }
 
     assert keys == {
-        "lares": ["<lares-gateway-key>"],
-        "lares-kim": ["<kim-lares-gateway-key>"],
-        "lares-lou": ["<lou-lares-gateway-key>"],
-        "lares-control": ["<kim-lares-control-gateway-key>"],
-        "lares-memory": ["<lares-memory-gateway-key>"],
-        "github": ["<kim-github-gateway-key>"],
+        "lares": ["${LARES_GATEWAY_KEY}"],
+        "lares-kim": ["${KIM_LARES_GATEWAY_KEY}"],
+        "lares-lou": ["${LOU_LARES_GATEWAY_KEY}"],
+        "lares-control": ["${KIM_LARES_CONTROL_GATEWAY_KEY}"],
+        "lares-memory": ["${LARES_MEMORY_GATEWAY_KEY}"],
+        "github": ["${KIM_GITHUB_GATEWAY_KEY}"],
     }
     assert all(
         route["policies"]["apiKey"]["mode"] == "strict" for route in _routes(tmp_path).values()
     )
     # Without persons, the default profile holds the chat's servers on the same routes.
     assert _routes(tmp_path, NO_PERSONS)["github"]["policies"]["apiKey"]["keys"] == [
-        {"key": "<github-gateway-key>"}
+        {"key": "${GITHUB_GATEWAY_KEY}"}
     ]
 
 
@@ -489,10 +483,15 @@ def test_a_bridge_route_signs_in_as_its_client(tmp_path: Path) -> None:
             }
         }
     ]
-    assert routes["lares"]["policies"]["backendAuth"] == {"key": {"value": "<lares-agent>"}}
-    assert routes["lares-kim"]["policies"]["backendAuth"] == {"key": {"value": "<kim>"}}
+    keys = "/etc/agentgateway/credentials/agentgateway-keys"
+    assert routes["lares"]["policies"]["backendAuth"] == {
+        "key": {"value": {"file": f"{keys}/lares-agent"}}
+    }
+    assert routes["lares-kim"]["policies"]["backendAuth"] == {
+        "key": {"value": {"file": f"{keys}/kim"}}
+    }
     assert routes["lares-control"]["policies"]["backendAuth"] == {
-        "key": {"value": "<lares-control>"}
+        "key": {"value": {"file": f"{keys}/lares-control"}}
     }
 
 
@@ -516,13 +515,7 @@ def test_a_credential_in_another_header_goes_as_it_is(tmp_path: Path) -> None:
     text = USE_CASES.read_text(encoding="utf-8").replace(
         "      header: Authorization\n", "      header: X-Api-Key\n"
     )
-    declared = load_use_case_file(_write_use_cases(tmp_path, text))
-    rendered = render(declared, load_persons_file(PERSONS, declared), SETTINGS.read_text())
-    patch = yaml.safe_load(rendered.routes_template)
-    template = patch["spec"]["template"]["data"]["config.yaml"]
-    filled = re.sub(r'{{ index \. "([^"]+)" \| toJson }}', '"x"', template)
-    routes = yaml.safe_load(filled)["binds"][0]["listeners"][0]["routes"]
-    github = next(route for route in routes if route["name"] == "github")
+    github = _routes(tmp_path, use_cases=text)["github"]
 
     assert github["policies"]["backendAuth"]["key"]["location"] == {"header": {"name": "X-Api-Key"}}
 
@@ -550,12 +543,7 @@ def test_a_glob_inside_a_name_becomes_an_anchored_pattern(tmp_path: Path) -> Non
     text = USE_CASES.read_text(encoding="utf-8").replace(
         "[get_memory, append_memory]", '[get_memory, append_memory, fetch_*_runs, "get_?ag"]'
     )
-    declared = load_use_case_file(_write_use_cases(tmp_path, text))
-    rendered = render(declared, load_persons_file(PERSONS, declared), SETTINGS.read_text())
-    template = yaml.safe_load(rendered.routes_template)["spec"]["template"]["data"]["config.yaml"]
-    filled = re.sub(r'{{ index \. "([^"]+)" \| toJson }}', '"x"', template)
-    routes = yaml.safe_load(filled)["binds"][0]["listeners"][0]["routes"]
-    memory = next(route for route in routes if route["name"] == "lares-memory")
+    memory = _routes(tmp_path, use_cases=text)["lares-memory"]
 
     assert memory["policies"]["mcpAuthorization"]["rules"][2:] == [
         'mcp.tool.name.matches("^fetch_.*_runs$")',
@@ -564,7 +552,7 @@ def test_a_glob_inside_a_name_becomes_an_anchored_pattern(tmp_path: Path) -> Non
 
 
 def test_the_gateway_traces_every_call_at_the_platforms_ratio(tmp_path: Path) -> None:
-    config, _ = _gateway(tmp_path)
+    config = _gateway(tmp_path)
 
     assert config["frontendPolicies"] == {
         "tracing": {
@@ -577,42 +565,82 @@ def test_the_gateway_traces_every_call_at_the_platforms_ratio(tmp_path: Path) ->
     assert config["binds"][0]["port"] == 8080
 
 
-def test_the_routes_file_is_a_template_of_the_gateways_sealed_keys(tmp_path: Path) -> None:
-    _, patch = _gateway(tmp_path)
-
-    assert patch["apiVersion"] == "bitnami.com/v1alpha1"
-    assert patch["kind"] == "SealedSecret"
-    assert patch["metadata"] == {"name": "agentgateway-routes", "namespace": "agents"}
-    assert list(patch["spec"]["template"]["data"]) == ["config.yaml"]
+def _secret_items(volumes: list[dict[str, Any]], secret: str) -> list[str]:
+    volume = next(v for v in volumes if v.get("secret", {}).get("secretName") == secret)
+    return [item["key"] for item in volume["secret"]["items"]]
 
 
-def test_the_gateway_mounts_its_routes_and_each_credential_it_attaches(tmp_path: Path) -> None:
-    """Whole directories, never a subPath: kubelet swaps a renewed Secret in, and it reloads."""
+def test_every_key_the_routes_name_is_a_variable_or_file_the_values_provide(
+    tmp_path: Path,
+) -> None:
+    """The routes file holds no key: each one is a variable from a sealed key, or a mounted file."""
+    rendered = _render(tmp_path)
+    values = yaml.safe_load(rendered.routes_values)
+    variables = {entry["name"] for entry in values["extraEnv"]}
+    credentials = [mount for mount in values["extraVolumeMounts"] if mount["name"] != "routes"]
+    files = {
+        f"{mount['mountPath']}/{key}"
+        for mount in credentials
+        for key in _secret_items(values["extraVolumes"], mount["name"])
+    }
+
+    named = set(re.findall(r"\$\{(\w+)\}", rendered.routes))
+    read = set(re.findall(r"file: (\S+)", rendered.routes))
+    assert named == variables
+    assert read == files
+
+
+def test_the_gateway_reads_its_keys_and_mounts_its_routes_and_credentials(tmp_path: Path) -> None:
+    """Whole directories, never a subPath: kubelet swaps a renewed Secret in, and it reloads.
+
+    A key is an environment variable, read at start, so a resealed one rolls
+    the gateway; a renewed token does not.
+    """
     values = yaml.safe_load(_render(tmp_path).routes_values)
 
+    def key(variable: str, sealed: str) -> dict[str, Any]:
+        reference = {"name": "agentgateway-keys", "key": sealed}
+        return {"name": variable, "valueFrom": {"secretKeyRef": reference}}
+
+    def items(*keys: str) -> list[dict[str, str]]:
+        return [{"key": k, "path": k} for k in keys]
+
+    credentials = "/etc/agentgateway/credentials"
     assert values == {
         "config": {"config": {"localXdsPath": "/etc/agentgateway/routes/config.yaml"}},
+        "podAnnotations": {"secret.reloader.stakater.com/reload": "agentgateway-keys"},
+        "extraEnv": [
+            key("LARES_GATEWAY_KEY", "lares-gateway-key"),
+            key("KIM_LARES_GATEWAY_KEY", "kim-lares-gateway-key"),
+            key("LOU_LARES_GATEWAY_KEY", "lou-lares-gateway-key"),
+            key("KIM_LARES_CONTROL_GATEWAY_KEY", "kim-lares-control-gateway-key"),
+            key("LARES_MEMORY_GATEWAY_KEY", "lares-memory-gateway-key"),
+            key("KIM_GITHUB_GATEWAY_KEY", "kim-github-gateway-key"),
+        ],
         "extraVolumes": [
+            {"name": "routes", "configMap": {"name": "agentgateway-routes"}},
             {
-                "name": "routes",
+                "name": "agentgateway-keys",
                 "secret": {
-                    "secretName": "agentgateway-routes",
-                    "items": [{"key": "config.yaml", "path": "config.yaml"}],
+                    "secretName": "agentgateway-keys",
+                    "items": items("lares-agent", "kim", "lou", "lares-control", "lares-memory"),
                 },
             },
             {
                 "name": "github-mcp-server-token",
-                "secret": {
-                    "secretName": "github-mcp-server-token",
-                    "items": [{"key": "token", "path": "token"}],
-                },
+                "secret": {"secretName": "github-mcp-server-token", "items": items("token")},
             },
         ],
         "extraVolumeMounts": [
             {"name": "routes", "mountPath": "/etc/agentgateway/routes", "readOnly": True},
             {
+                "name": "agentgateway-keys",
+                "mountPath": f"{credentials}/agentgateway-keys",
+                "readOnly": True,
+            },
+            {
                 "name": "github-mcp-server-token",
-                "mountPath": "/etc/agentgateway/credentials/github-mcp-server-token",
+                "mountPath": f"{credentials}/github-mcp-server-token",
                 "readOnly": True,
             },
         ],
@@ -937,8 +965,8 @@ def _cli(tmp_path: Path, use_cases: Path = USE_CASES, persons: Path = PERSONS) -
             str(tmp_path / "out" / "env-template.yaml"),
             "--clients-template",
             str(tmp_path / "out" / "clients-template.yaml"),
-            "--routes-template",
-            str(tmp_path / "out" / "routes-template.yaml"),
+            "--routes",
+            str(tmp_path / "out" / "routes.yaml"),
             "--routes-values",
             str(tmp_path / "out" / "routes.values.yaml"),
             "--profiles",

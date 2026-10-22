@@ -26,14 +26,15 @@ settings in, one text per rendered file out.
 - The gateway's routes file: one route per tool server a profile holds and
   one per person reading the bridge through their own client, each taking the
   keys of the profiles holding it, serving the server's tools and attaching its
-  credential, as a template of the gateway's SealedSecret; beside it, the chart
-  values that mount the routes and each credential's Secret.
+  credential. It holds no key: a route's keys are variables the gateway expands,
+  a credential a file. Beside it, the chart values that set those variables from
+  the gateway's SealedSecret and mount the routes and every credential.
 
 Every value is sealed once per SealedSecret, under its own key: a variable's key
 is its name in lower case and dashed, prefixed by the handle where the value is a
 person's own; a bridge client's key is its name.
 Sealed Secrets renders a key the SealedSecret lacks as empty without an error;
-lares checks every template against the sealed keys in pre-commit.
+lares checks every template and every reference against the sealed keys in pre-commit.
 
 With a person on Discord, the bot answers through the default profile, which
 routes each person's messages to their profile by the sender's id and keeps
@@ -136,10 +137,12 @@ class SealedSecret(NamedTuple):
 HARNESS_KEYS = SealedSecret("hermes-credentials", "agents")
 # The bridge's clients and their keys, as `clients.json`.
 BRIDGE_KEYS = SealedSecret("lares-mcp-bridge-auth-clients", "lares-mcp-bridge")
-# The gateway's routes, with every profile's key and every bridge client's, as its config.
-GATEWAY_KEYS = SealedSecret("agentgateway-routes", "agents")
+# The gateway's keys: every profile's key for its routes and every bridge client's.
+GATEWAY_KEYS = SealedSecret("agentgateway-keys", "agents")
+# The routes file, a key of this ConfigMap.
+_GATEWAY_ROUTES = "agentgateway-routes"
 
-# Where the gateway reads its routes, and the Secret of each credential it attaches.
+# Where the gateway reads its routes, and each credential it attaches as a file.
 _GATEWAY_ROUTES_DIR = "/etc/agentgateway/routes"
 _GATEWAY_CREDENTIALS_DIR = "/etc/agentgateway/credentials"
 
@@ -195,9 +198,9 @@ class Rendering:
     tracing: str
     env_template: str
     clients_template: str
-    # The gateway's routes as a template of its sealed keys, and the chart
-    # values that mount them and each credential the routes attach.
-    routes_template: str
+    # The gateway's routes, and the chart values that give it their keys and
+    # mount them and each credential the routes attach.
+    routes: str
     routes_values: str
 
 
@@ -343,17 +346,17 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         {"clients.json": _clients_json(allowlists)},
     )
     routes = _routes(declared, in_use, persons, holdings)
-    routes_template = _template(
-        GATEWAY_KEYS,
-        "# The gateway's routes, composed from the keys sealed one by one in\n"
-        "# sealed-secret.yaml: each profile's key under the name its .env reads it from,\n"
-        "# each bridge client's under the client's name.\n",
-        {_CONFIG_FILE: _gateway_config(declared, routes)},
+    routes_file = (
+        f"{GENERATED_LINE}\n"
+        "# The gateway's routes. A key is a variable the gateway expands at start, set from\n"
+        f"# {GATEWAY_KEYS.name}; a credential is a file it reads and watches.\n"
+        f"{_dump(_gateway_config(declared, routes))}"
     )
     routes_values = (
         f"{GENERATED_LINE}\n"
-        "# An additional values file of the gateway's chart: its routes and the Secret of each\n"
-        "# credential they attach, mounted whole so a renewed one reaches the gateway.\n"
+        "# An additional values file of the gateway's chart: the routes' keys as variables, and\n"
+        "# the routes and every credential they attach, mounted whole so a renewed one\n"
+        "# reaches the gateway; a resealed key rolls it.\n"
         f"{_dump(_routes_values(routes))}"
     )
     return Rendering(
@@ -366,7 +369,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         tracing=tracing,
         env_template=env_template,
         clients_template=clients_template,
-        routes_template=routes_template,
+        routes=routes_file,
         routes_values=routes_values,
     )
 
@@ -736,11 +739,7 @@ def _routes(
     return routes
 
 
-# A sealed key's value in the routes file, replaced by its template action after dumping.
-_SEALED = "__sealed__"
-
-
-def _gateway_config(declared: UseCaseFile, routes: Sequence[_Route]) -> str:
+def _gateway_config(declared: UseCaseFile, routes: Sequence[_Route]) -> dict[str, Any]:
     """The routes file: one route per entry, each a span of the trace it starts.
 
     A route's backend keeps no session: an upstream session would keep the
@@ -748,7 +747,7 @@ def _gateway_config(declared: UseCaseFile, routes: Sequence[_Route]) -> str:
     """
     gateway = declared.gateway
     collector = urlsplit(gateway.otlp_endpoint)
-    config = {
+    return {
         "frontendPolicies": {
             "tracing": {
                 "host": collector.netloc,
@@ -763,12 +762,11 @@ def _gateway_config(declared: UseCaseFile, routes: Sequence[_Route]) -> str:
             }
         ],
     }
-    text = _dump(config)
-    filled = re.sub(
-        rf"{_SEALED}([a-z0-9-]+)", lambda match: f'{{{{ index . "{match[1]}" | toJson }}}}', text
-    )
-    assert _SEALED not in filled
-    return filled
+
+
+def _variable(sealed: str) -> str:
+    """The gateway's variable holding a sealed key: its name, upper case and underscored."""
+    return sealed.upper().replace("-", "_")
 
 
 def _route_config(route: _Route) -> dict[str, Any]:
@@ -779,7 +777,7 @@ def _route_config(route: _Route) -> dict[str, Any]:
         "policies": {
             "apiKey": {
                 "mode": "strict",
-                "keys": [{"key": f"{_SEALED}{key}"} for key in route.keys],
+                "keys": [{"key": f"${{{_variable(key)}}}"} for key in route.keys],
             },
             "mcpAuthorization": {"rules": [_tool_rule(pattern) for pattern in server.tools]},
             "backendAuth": _backend_auth(route),
@@ -795,21 +793,22 @@ def _route_config(route: _Route) -> dict[str, Any]:
     }
 
 
+def _attached(route: _Route) -> tuple[str, str]:
+    """The Secret and key of what the route attaches: the bridge client's key, or the credential."""
+    if isinstance(route.server, BridgeServer):
+        assert route.client is not None
+        return GATEWAY_KEYS.name, route.client
+    return route.server.credential.secret, route.server.credential.key
+
+
 def _backend_auth(route: _Route) -> dict[str, Any]:
-    """The bridge client's key, or the http server's credential from its mounted Secret."""
+    """What the route attaches, read from its mounted file; on Authorization a bearer token."""
+    secret, name = _attached(route)
+    key: dict[str, Any] = {"value": {"file": f"{_GATEWAY_CREDENTIALS_DIR}/{secret}/{name}"}}
     server = route.server
-    if isinstance(server, BridgeServer):
-        return {"key": {"value": f"{_SEALED}{route.client}"}}
-    credential = server.credential
-    key: dict[str, Any] = {"value": {"file": _credential_file(server)}}
-    if credential.header.lower() != "authorization":
-        key["location"] = {"header": {"name": credential.header}}
+    if isinstance(server, HttpServer) and server.credential.header.lower() != "authorization":
+        key["location"] = {"header": {"name": server.credential.header}}
     return {"key": key}
-
-
-def _credential_file(server: HttpServer) -> str:
-    credential = server.credential
-    return f"{_GATEWAY_CREDENTIALS_DIR}/{credential.secret}/{credential.key}"
 
 
 def _tool_rule(pattern: str) -> str:
@@ -828,31 +827,45 @@ def _tool_rule(pattern: str) -> str:
 
 
 def _routes_values(routes: Sequence[_Route]) -> dict[str, Any]:
-    """The routes file and each credential's Secret, every one mounted whole and read-only."""
-    secrets = {
-        route.server.credential.secret: route.server.credential.key
-        for route in routes
-        if isinstance(route.server, HttpServer)
-    }
-    volumes = [
+    """The gateway's keys as variables, its routes and every credential as whole mounts.
+
+    A variable is read at start, so a resealed key rolls the gateway through
+    the reloader; a renewed credential is a file the gateway watches.
+    """
+    variables = [
         {
-            "name": "routes",
-            "secret": {"secretName": GATEWAY_KEYS.name, **_item(_CONFIG_FILE, _CONFIG_FILE)},
-        },
+            "name": _variable(key),
+            "valueFrom": {"secretKeyRef": {"name": GATEWAY_KEYS.name, "key": key}},
+        }
+        for route in routes
+        for key in route.keys
+    ]
+    attached: dict[str, list[str]] = {}
+    for route in routes:
+        secret, name = _attached(route)
+        if name not in attached.setdefault(secret, []):
+            attached[secret].append(name)
+    volumes = [
+        {"name": "routes", "configMap": {"name": _GATEWAY_ROUTES}},
         *(
-            {"name": secret, "secret": {"secretName": secret, **_item(key, key)}}
-            for secret, key in secrets.items()
+            {
+                "name": secret,
+                "secret": {"secretName": secret, "items": [{"key": k, "path": k} for k in keys]},
+            }
+            for secret, keys in attached.items()
         ),
     ]
     mounts = [
         {"name": "routes", "mountPath": _GATEWAY_ROUTES_DIR, "readOnly": True},
         *(
             {"name": secret, "mountPath": f"{_GATEWAY_CREDENTIALS_DIR}/{secret}", "readOnly": True}
-            for secret in secrets
+            for secret in attached
         ),
     ]
     return {
         "config": {"config": {"localXdsPath": f"{_GATEWAY_ROUTES_DIR}/{_CONFIG_FILE}"}},
+        "podAnnotations": {"secret.reloader.stakater.com/reload": GATEWAY_KEYS.name},
+        "extraEnv": variables,
         "extraVolumes": volumes,
         "extraVolumeMounts": mounts,
     }
@@ -976,7 +989,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--tracing", type=Path, required=True)
     parser.add_argument("--env-template", type=Path, required=True)
     parser.add_argument("--clients-template", type=Path, required=True)
-    parser.add_argument("--routes-template", type=Path, required=True)
+    parser.add_argument("--routes", type=Path, required=True)
     parser.add_argument("--routes-values", type=Path, required=True)
     # Written whole: each person's config, the ConfigMap of them and the chart values.
     parser.add_argument("--profiles", type=Path, required=True)
@@ -1005,7 +1018,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         (args.tracing, rendered.tracing),
         (args.env_template, rendered.env_template),
         (args.clients_template, rendered.clients_template),
-        (args.routes_template, rendered.routes_template),
+        (args.routes, rendered.routes),
         (args.routes_values, rendered.routes_values),
         (profiles / "kustomization.yaml", rendered.profiles_kustomization),
         (profiles / "profiles.values.yaml", rendered.profiles_values),
