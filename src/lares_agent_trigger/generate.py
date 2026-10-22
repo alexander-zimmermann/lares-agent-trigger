@@ -22,9 +22,10 @@ settings in, one text per rendered file out.
 - The gateway's routes file: one route per tool server a profile holds, taking
   the keys of the profiles holding it, a person's carrying their handle; and one
   per connector a person signs in to, on its public path, through Authentik.
-  Each serves its tools, attaches its credential and names the caller to the
-  server: the route in `X-Client-Id`, the person in `X-Enduser-Id`, set by the
-  gateway over whatever the caller sent. It holds no key: a route's keys are
+  Each serves its tools, attaches its credential and names the caller to a
+  server in the cluster: the route in `X-Client-Id`, the person in
+  `X-Enduser-Id`, set by the gateway over whatever the caller sent; a server
+  outside the cluster is told nobody. It holds no key: a route's keys are
   variables the gateway expands, a credential a file. Beside it, the chart values
   that set those variables from the gateway's SealedSecret and mount the routes
   and every credential.
@@ -132,9 +133,11 @@ _GATEWAY_ROUTES = "agentgateway-routes"
 _GATEWAY_ROUTES_DIR = "/etc/agentgateway/routes"
 _GATEWAY_CREDENTIALS_DIR = "/etc/agentgateway/credentials"
 
-# The headers the gateway names the caller in to the server it calls.
+# The headers the gateway names the caller in to a server in the cluster,
+# whose Services all end in this domain.
 _CLIENT_HEADER = "X-Client-Id"
 _ENDUSER_HEADER = "X-Enduser-Id"
+_CLUSTER_DOMAIN = ".svc.cluster.local"
 # Where a person's handle sits on their key, and on a connector's Authentik token.
 _KEY_ENDUSER = "enduser_id"
 _TOKEN_ENDUSER = "jwt.preferred_username"
@@ -836,25 +839,17 @@ def _connector_config(route: _ConnectorRoute) -> dict[str, Any]:
 
 
 def _backend(name: str, url: str, enduser: str) -> dict[str, Any]:
-    """The server behind a route, told the route and the person; no session kept.
+    """The server behind a route, told the route and the person when it runs in the cluster.
 
     The headers are set on the call to the server, after the caller's own
     are copied over: a value the caller sent is overwritten, and one the
-    expression does not yield is removed.
+    expression does not yield is removed. No session is kept.
     """
-    naming = {_CLIENT_HEADER: json.dumps(name), _ENDUSER_HEADER: enduser}
-    return {
-        "mcp": {
-            "statefulMode": "stateless",
-            "targets": [
-                {
-                    "name": name,
-                    "mcp": {"host": url},
-                    "policies": {"transformations": {"request": {"set": naming}}},
-                }
-            ],
-        }
-    }
+    target: dict[str, Any] = {"name": name, "mcp": {"host": url}}
+    if (urlsplit(url).hostname or "").endswith(_CLUSTER_DOMAIN):
+        naming = {_CLIENT_HEADER: json.dumps(name), _ENDUSER_HEADER: enduser}
+        target["policies"] = {"transformations": {"request": {"set": naming}}}
+    return {"mcp": {"statefulMode": "stateless", "targets": [target]}}
 
 
 def _backend_auth(credential: Credential) -> dict[str, Any]:

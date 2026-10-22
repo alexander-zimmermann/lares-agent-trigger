@@ -216,12 +216,13 @@ class Credential(_Strict):
 
 
 class ToolServer(_Strict):
-    """An MCP endpoint behind its gateway route: the bridge's and GitHub's alike.
+    """An MCP endpoint behind its gateway route: the bridge's and a vendor's alike.
 
     The gateway attaches `credential`; the harness holds a key for the route
     only. `tools` (names or `*`/`?` globs) is the route's tool list and the
-    harness's include list on top. The gateway names the caller to the server:
-    the route, and the person behind the key.
+    harness's include list on top. The gateway names the caller to a server
+    in the cluster: the route, and the person behind the key; a server
+    outside it, such as a vendor's hosted one, gets the credential only.
     """
 
     kind: Literal["http"]

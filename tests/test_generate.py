@@ -499,6 +499,19 @@ def test_each_route_names_the_caller_to_its_server(tmp_path: Path) -> None:
         }, name
 
 
+def test_a_server_outside_the_cluster_is_told_nobody(tmp_path: Path) -> None:
+    """A hosted server gets the credential only: no route, no person."""
+    text = USE_CASES.read_text(encoding="utf-8").replace(
+        "http://github-mcp-server.agents.svc.cluster.local:8082/mcp",
+        "https://mcp.example.com/mcp",
+    )
+    routes = _routes(tmp_path, use_cases=text)
+
+    (target,) = routes["github"]["backends"][0]["mcp"]["targets"]
+    assert target == {"name": "github", "mcp": {"host": "https://mcp.example.com/mcp"}}
+    assert "policies" in routes["lares"]["backends"][0]["mcp"]["targets"][0]
+
+
 def test_every_bridge_route_calls_the_bridge_with_the_gateways_key(tmp_path: Path) -> None:
     """One key for the bridge, whichever route the call came in on."""
     routes = _routes(tmp_path)
