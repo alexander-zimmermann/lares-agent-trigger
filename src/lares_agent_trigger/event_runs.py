@@ -315,6 +315,7 @@ class EventRuns:
                 ended_at=turn.ended_at,
                 calls=turn.calls,
                 tools=turn.tools,
+                failures=turn.failures,
                 error_type=None if turn.completed else TURN_FAILED,
             )
             calls = turn.call_traces

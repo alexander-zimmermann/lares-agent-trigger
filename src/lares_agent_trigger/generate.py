@@ -12,7 +12,8 @@ settings in, one text per rendered file out.
   person's source and directory, their tool servers on Discord and the API
   server, and the same hook. Beside the configs, the ConfigMap that holds them
   and the chart values that mount each person's config, `.env` and shared
-  files into their profile.
+  files into their profile, and run a container that streams the profile's
+  log for Loki.
 - The cron job set: one managed job per enabled schedule use case.
 - The sampling ratio, one variable every service of the platform reads: the
   trigger, the bridge and the engine's CronJobs.
@@ -72,7 +73,7 @@ import yaml
 
 from .cron_jobs import CronJob, dump_cron_jobs, job_name
 from .hermes import language_name
-from .hooks import MODEL_CALL, TOOL_CALL, TURN_ENDED
+from .hooks import CALL_FAILED, MODEL_CALL, TOOL_CALL, TURN_ENDED
 from .persons import ModelSource, Person, PersonsFile, load_persons_file
 from .receiver import HOOK_PATH
 from .use_cases import (
@@ -167,6 +168,14 @@ _SHARED_FILES = (
     # Empty: without it the harness seeds its bundled skills into the profile
     ("no-bundled-skills", ".no-bundled-skills", ".no-bundled-skills"),
 )
+
+# Each person's log container, beside the default profile's `agent-log`.
+_LOG_CONTAINER = "agent-log"
+# A name lares's kustomization pins to the image every log container runs.
+_LOG_IMAGE = "agent-log"
+_DATA_VOLUME = "hermes-data"
+# The harness's own user, which the log container reads the volume as.
+_HERMES_UID = 10000
 
 _HOOK_NAME = "lares-agent-trigger"
 _HOOK_TIMEOUT_SECONDS = 10
@@ -290,7 +299,8 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         f"{GENERATED_LINE}\n"
         "# An additional values file of Hermes's chart: each person's config and .env, the\n"
         "# persons' SOUL.md, AGENTS.md and the marker that keeps the bundled skills out,\n"
-        "# each mounted read-only into the person's profile.\n"
+        "# each mounted read-only into the person's profile, and the container that\n"
+        "# streams the profile's agent.log for Loki.\n"
         f"{_dump(_profiles_values(profiles))}"
     )
     jobs = [_cron_job(use_case) for use_case in enabled if use_case.is_schedule]
@@ -522,13 +532,16 @@ def _profiles_kustomization(handles: Iterable[str]) -> dict[str, Any]:
 
 
 def _profiles_values(handles: Iterable[str]) -> dict[str, Any]:
-    """The volumes and mounts of every person's files, each a read-only subPath mount.
+    """The volumes and mounts of every person's files, each a read-only subPath mount, and
+    the container that streams each person's log.
 
     The chart keys a mount by its volume, so each profile mounts volumes of its own.
     """
     volumes: dict[str, Any] = {}
     mounts: dict[str, Any] = {}
+    containers: dict[str, Any] = {}
     for handle in handles:
+        containers[f"{_LOG_CONTAINER}-{handle}"] = _log_container(handle)
         files = [
             (
                 "env",
@@ -553,7 +566,30 @@ def _profiles_values(handles: Iterable[str]) -> dict[str, Any]:
                 "subPath": file,
                 "readOnly": True,
             }
-    return {"deployment": {"volumes": volumes, "volumeMounts": mounts}}
+    return {
+        "deployment": {
+            "volumes": volumes,
+            "volumeMounts": mounts,
+            "additionalContainers": containers,
+        }
+    }
+
+
+def _log_container(handle: str) -> dict[str, Any]:
+    """Streams the profile's agent.log from its end, reading the volume as the harness's user."""
+    return {
+        "image": _LOG_IMAGE,
+        "command": ["tail", "-n", "0", "-F", f"{_profile_directory(handle)}/logs/agent.log"],
+        "volumeMounts": [{"name": _DATA_VOLUME, "mountPath": _HOME, "readOnly": True}],
+        "securityContext": {
+            "runAsUser": _HERMES_UID,
+            "runAsGroup": _HERMES_UID,
+            "runAsNonRoot": True,
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+        },
+    }
 
 
 def _item(key: str, path: str) -> dict[str, list[dict[str, str]]]:
@@ -639,7 +675,7 @@ def _hooks(declared: UseCaseFile) -> dict[str, Any]:
             {
                 "name": _HOOK_NAME,
                 "url": f"{hook.trigger_url.rstrip('/')}{HOOK_PATH}",
-                "events": [MODEL_CALL, TOOL_CALL, TURN_ENDED],
+                "events": [MODEL_CALL, TOOL_CALL, CALL_FAILED, TURN_ENDED],
                 "secret_env": hook.secret_env,
                 "timeout": _HOOK_TIMEOUT_SECONDS,
             }

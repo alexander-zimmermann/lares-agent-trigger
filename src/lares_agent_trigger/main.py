@@ -81,7 +81,16 @@ async def _amain() -> int:
     alertmanager = Alertmanager(settings, metrics)
     closer = Closer(ledger, deliveries, alertmanager, metrics)
     pricing = Pricing(persons, metrics)
-    turns = TurnRuns(use_cases, persons, ledger, hermes, closer, pricing, metrics)
+    turns = TurnRuns(
+        use_cases,
+        persons,
+        ledger,
+        hermes,
+        closer,
+        pricing,
+        metrics,
+        failed_turn_grace_seconds=settings.failed_turn_grace_seconds,
+    )
     runs = EventRuns(
         use_cases,
         ledger,

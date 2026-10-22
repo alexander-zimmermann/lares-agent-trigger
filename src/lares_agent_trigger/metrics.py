@@ -109,6 +109,14 @@ class Metrics:
             ["use_case", "status", "enduser_id"],
             registry=self.registry,
         )
+        # The person got an error instead of an answer; `error_type` as on the failed call's span.
+        self.failed_chat_turns = Counter(
+            "agent_trigger_failed_chat_turns_total",
+            "Chat turns whose last model call failed for good, by person and the harness's class "
+            "of the failure.",
+            ["enduser_id", "error_type"],
+            registry=self.registry,
+        )
         # A turn that should not have come the way it did: from a profile no
         # person runs on, a Discord turn on the default profile while the
         # chat is the persons', a cron turn on a person's profile.

@@ -6,7 +6,8 @@ once the turn is over: one root `invoke_agent <use case>`, and under it one
 the times they started and ended. Names follow OpenTelemetry's GenAI
 conventions. A span carries names and numbers only: never a prompt, an answer
 or what a tool was asked or returned, and `error.type` is one of a few classes,
-never a reason in the harness's words.
+never a reason in the harness's words. An attempt at a call that failed is a
+`chat <model>` span too, with the harness's class of the failure.
 
 The root is started before the row is written, because the row names the
 trace; it is ended once the row's id is known. A root that is never ended is
@@ -35,7 +36,7 @@ from opentelemetry.trace import Span, SpanKind, StatusCode
 
 if TYPE_CHECKING:
     # The hooks reach the ledger, whose row write is a span: no import at run time.
-    from .hooks import ModelCall, ToolCall
+    from .hooks import FailedCall, ModelCall, ToolCall
     from .ledger import Surface
 
 TRACER = trace.get_tracer("lares_agent_trigger")
@@ -114,9 +115,10 @@ class TurnTrace:
         ended_at: float,
         calls: Sequence[ModelCall],
         tools: Sequence[ToolCall],
+        failures: Sequence[FailedCall] = (),
         error_type: str | None = None,
     ) -> None:
-        """Name the row, add a span per call and tool, and end the root at the turn's end.
+        """Name the row, add a span per call, failure and tool, and end the root at the turn's end.
 
         `run_id` is None for a turn that has no row.
         """
@@ -124,17 +126,25 @@ class TurnTrace:
             self._root.set_attribute("lares.run.id", run_id)
         if error_type is not None:
             failed(self._root, error_type)
-        self.join(calls=calls, tools=tools)
+        self.join(calls=calls, tools=tools, failures=failures)
         self._root.end(end_time=_ns(ended_at))
 
-    def join(self, *, calls: Sequence[ModelCall] = (), tools: Sequence[ToolCall] = ()) -> None:
-        """Add a span per call and tool under the root, at the times the hook reported.
+    def join(
+        self,
+        *,
+        calls: Sequence[ModelCall] = (),
+        tools: Sequence[ToolCall] = (),
+        failures: Sequence[FailedCall] = (),
+    ) -> None:
+        """Add a span per call, failure and tool under the root, at the times the hook reported.
 
         Also after the root has ended: a background review's calls come after its answer's end.
         """
         parent = trace.set_span_in_context(self._root)
         for call in calls:
             _chat_span(call, parent)
+        for failure in failures:
+            _failed_chat_span(failure, parent)
         for tool in tools:
             _tool_span(tool, parent)
 
@@ -175,24 +185,41 @@ def _sampled_id(span: Span) -> str | None:
     return f"{context.trace_id:032x}"
 
 
-def _chat_span(call: ModelCall, parent: Context) -> None:
+def _start_chat(
+    model_source: str | None,
+    model: str | None,
+    started_at: float,
+    parent: Context,
+    usage: dict[str, int] | None = None,
+) -> Span:
     attributes: dict[str, str | int] = {"gen_ai.operation.name": "chat"}
-    if call.model_source is not None:
-        attributes["gen_ai.provider.name"] = call.model_source
-    if call.model is not None:
-        attributes["gen_ai.request.model"] = call.model
-    if call.tokens_in is not None:
-        attributes["gen_ai.usage.input_tokens"] = call.tokens_in
-    if call.tokens_out is not None:
-        attributes["gen_ai.usage.output_tokens"] = call.tokens_out
-    span = TRACER.start_span(
-        f"chat {call.model}" if call.model is not None else "chat",
+    if model_source is not None:
+        attributes["gen_ai.provider.name"] = model_source
+    if model is not None:
+        attributes["gen_ai.request.model"] = model
+    return TRACER.start_span(
+        f"chat {model}" if model is not None else "chat",
         context=parent,
         kind=SpanKind.CLIENT,
-        start_time=_ns(call.started_at),
-        attributes=attributes,
+        start_time=_ns(started_at),
+        attributes={**attributes, **(usage or {})},
     )
+
+
+def _chat_span(call: ModelCall, parent: Context) -> None:
+    usage: dict[str, int] = {}
+    if call.tokens_in is not None:
+        usage["gen_ai.usage.input_tokens"] = call.tokens_in
+    if call.tokens_out is not None:
+        usage["gen_ai.usage.output_tokens"] = call.tokens_out
+    span = _start_chat(call.model_source, call.model, call.started_at, parent, usage)
     span.end(end_time=_ns(call.ended_at))
+
+
+def _failed_chat_span(failure: FailedCall, parent: Context) -> None:
+    span = _start_chat(failure.model_source, failure.model, failure.started_at, parent)
+    failed(span, failure.reason)
+    span.end(end_time=_ns(failure.ended_at))
 
 
 def _tool_span(tool: ToolCall, parent: Context) -> None:

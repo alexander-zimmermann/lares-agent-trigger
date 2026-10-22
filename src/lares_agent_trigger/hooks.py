@@ -2,7 +2,7 @@
 
 Hermes mirrors its lifecycle hooks as POSTs (`hooks.outbound` in its
 configuration, `agent/outbound_webhooks.py` on the other side of this
-contract). The receiver takes three of them:
+contract). The receiver takes four of them:
 
 - `post_api_request`, once per call to the model inside a turn: the tokens,
   the model and its source, when the call started and ended, how many tools
@@ -11,11 +11,16 @@ contract). The receiver takes three of them:
 - `post_tool_call`, once per tool the model asked for, as the tool returns:
   its name, its call id, how long it took and how it ended. What it was asked
   and what it returned come along and are dropped here, unread.
+- `api_request_error`, once per attempt at a call that failed, whether the
+  harness tries again, falls back or gives up: the source and model it asked,
+  the status they answered and the harness's class of the failure. The
+  request it sent and the error in the source's words come along and are
+  dropped here, unread. A turn whose call failed for good sends nothing after.
 - `on_session_end`, which despite its name fires once per turn — every chat
   message answered, every cron execution finished — with the turn's outcome.
 
-A turn's calls and tools all arrive before its end, one delivery after the
-other. `session_id`, a tool's name and its arguments are promoted to the top
+A turn's calls, failures and tools all arrive before its end, one delivery
+after the other. `session_id`, a tool's name and its arguments are promoted to the top
 level of the body; everything else of the hook call sits under `extra`, and
 `timestamp` beside it says when the hook fired.
 
@@ -37,6 +42,7 @@ from .ledger import ToolUse
 
 MODEL_CALL = "post_api_request"
 TOOL_CALL = "post_tool_call"
+CALL_FAILED = "api_request_error"
 TURN_ENDED = "on_session_end"
 
 _SIGNATURE_PREFIX = "sha256="
@@ -100,6 +106,31 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class FailedCall:
+    """One attempt at a call to the model that failed: whom it asked and why, never what."""
+
+    # The harness profile the call ran in: `default` for the machines'.
+    profile: str
+    # Empty for a call the harness made outside a session.
+    session_id: str | None
+    turn_id: str
+    # The task the turn ran under, as for a call that went through.
+    task_id: str | None
+    platform: str
+    # The call's number within its turn; a retry keeps it.
+    number: int
+    model: str | None
+    model_source: str
+    # The HTTP status the source answered; None when it answered with none.
+    status_code: int | None
+    # The harness's class of the failure: `auth`, `rate_limit`, `model_not_found`, …
+    reason: str
+    # When the call's first attempt started, and when this one failed.
+    started_at: float
+    ended_at: float
+
+
+@dataclass(frozen=True, slots=True)
 class CronRun:
     """The job and the execution a cron turn belongs to."""
 
@@ -150,7 +181,7 @@ def verify_signature(secret: str, body: bytes, header: str | None) -> bool:
     return hmac.compare_digest(expected, header.removeprefix(_SIGNATURE_PREFIX))
 
 
-def parse_hook(body: bytes) -> ModelCall | ToolCall | TurnEnded:
+def parse_hook(body: bytes) -> ModelCall | ToolCall | FailedCall | TurnEnded:
     """Parse one verified body; anything that is none of the hooks is a ``ValueError``."""
     try:
         raw = json.loads(body)
@@ -167,9 +198,13 @@ def parse_hook(body: bytes) -> ModelCall | ToolCall | TurnEnded:
         return _model_call(raw, extra)
     if event == TOOL_CALL:
         return _tool_call(raw, extra)
+    if event == CALL_FAILED:
+        return _failed_call(raw, extra)
     if event == TURN_ENDED:
         return _turn_ended(raw, extra)
-    raise ValueError(f"hook event {event!r} is none of {MODEL_CALL}, {TOOL_CALL}, {TURN_ENDED}")
+    raise ValueError(
+        f"hook event {event!r} is none of {MODEL_CALL}, {TOOL_CALL}, {CALL_FAILED}, {TURN_ENDED}"
+    )
 
 
 def _model_call(raw: dict[str, Any], extra: dict[str, Any]) -> ModelCall:
@@ -232,6 +267,26 @@ def _tool_call(raw: dict[str, Any], extra: dict[str, Any]) -> ToolCall:
         seconds=_count(extra, "duration_ms") / 1000,
         ended_at=_fired_at(raw),
         error_type=error_type,
+    )
+
+
+def _failed_call(raw: dict[str, Any], extra: dict[str, Any]) -> FailedCall:
+    # `request`, the whole prompt, and `error`, in the source's words, are never read.
+    status_code = extra.get("status_code")
+    return FailedCall(
+        profile=_text(raw, "profile"),
+        session_id=_optional_text(raw.get("session_id")),
+        turn_id=_text(extra, "turn_id"),
+        task_id=_optional_text(extra.get("task_id")),
+        platform=_text(extra, "platform"),
+        number=_count(extra, "api_call_count"),
+        model=_optional_text(extra.get("model")),
+        model_source=_text(extra, "provider"),
+        # A source that fails inside a 200 answer names its code as a word: no status.
+        status_code=_count(extra, "status_code") if isinstance(status_code, int) else None,
+        reason=_text(extra, "reason"),
+        started_at=_seconds(extra, "started_at"),
+        ended_at=_seconds(extra, "ended_at"),
     )
 
 
