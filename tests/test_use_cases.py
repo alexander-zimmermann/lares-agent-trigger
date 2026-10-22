@@ -82,6 +82,16 @@ connectors:
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     tools: ["*"]
 
+scripts:
+  - name: skill-digest
+    sentence: Posts the week's skill names per profile to the home channel.
+    trigger:
+      kind: schedule
+      cron: "0 18 * * 0"
+    script: skill-digest.py
+    deliver: discord
+    enabled: true
+
 use_cases:
   - name: explain-episode
     sentence: Explains a new or escalated episode on its own event.
@@ -206,6 +216,37 @@ def test_an_unknown_field_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         load_use_cases(_write(tmp_path, broken))
+
+
+def test_every_field_of_a_script(tmp_path: Path) -> None:
+    """A script is a cron job without a model: the file, when it runs, where its output goes."""
+    script = load_use_case_file(_write(tmp_path, VALID)).scripts["skill-digest"]
+
+    assert script.sentence == "Posts the week's skill names per profile to the home channel."
+    assert script.trigger == ScheduleTrigger(kind="schedule", cron="0 18 * * 0")
+    assert script.script == "skill-digest.py"
+    assert script.deliver == "discord"
+    assert script.is_enabled
+
+
+def test_a_script_either_runs_or_says_why_not(tmp_path: Path) -> None:
+    on = "    deliver: discord\n    enabled: true\n"
+    off = VALID.replace(on, "    deliver: discord\n    enabled: false\n")
+    with pytest.raises(ValueError, match="script skill-digest: switching a script off is `dormant"):
+        load_use_case_file(_write(tmp_path, off))
+
+    dormant = VALID.replace(on, "    deliver: discord\n    dormant: Waits for its script.\n")
+    script = load_use_case_file(_write(tmp_path, dormant)).scripts["skill-digest"]
+    assert not script.is_enabled
+    assert script.dormant == "Waits for its script."
+
+
+def test_a_script_named_like_a_use_case_is_refused(tmp_path: Path) -> None:
+    """Both become `lares:<name>` jobs, so the names share one space."""
+    clash = VALID.replace("  - name: skill-digest\n", "  - name: messenger\n")
+
+    with pytest.raises(ValueError, match="script messenger: the name is already a use case's"):
+        load_use_case_file(_write(tmp_path, clash))
 
 
 def test_a_chat_names_no_skill_and_everything_else_does(tmp_path: Path) -> None:
