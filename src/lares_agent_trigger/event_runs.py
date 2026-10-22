@@ -213,7 +213,7 @@ class EventRuns:
     async def _run_with_retry(self, use_case: UseCase, occasion: Occasion, run_id: int) -> None:
         key = ledger_key(use_case.name, "episode", occasion.subject_key)
         for attempt in range(1, _ATTEMPTS + 1):
-            # The gateway replays the run it already holds for a key, failed or
+            # The harness replays the run it already holds for a key, failed or
             # not, so a retry needs a key of its own.
             idempotency_key = key if attempt == 1 else f"{key}/{attempt}"
             # The attempt holds everything it writes and says, the wait for the next one not.
@@ -299,7 +299,7 @@ class EventRuns:
     async def _with_turn(self, use_case: UseCase, run_id: int, outcome: RunOutcome) -> RunOutcome:
         """The outcome with the model calls its turn reported through the hook, priced.
 
-        The trigger starts every run on the gateway's own API server, so it
+        The trigger starts every run on the harness's own API server, so it
         runs on the default profile. Without its calls a run has no cost. The
         turn becomes the span of the run's model and tools, under the attempt.
         """

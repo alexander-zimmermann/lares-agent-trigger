@@ -45,7 +45,7 @@ async def test_an_episode_appearing_at_severity_two_is_explained(
     assert row["language"] == "de"
     assert row["tldr"] == "Die Waschmaschine hängt seit 14:20 im Spülgang."
     assert row["text"] == EXPLANATION
-    # Who actually served the run — never the gateway's own name `hermes-agent`.
+    # Who actually served the run — never the harness's own name `hermes-agent`.
     # The values come from the response, never from this package.
     assert row["model_source"] == "openai-codex"
     assert row["model"] == "gpt-6-sol"

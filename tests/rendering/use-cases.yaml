@@ -9,11 +9,15 @@ ledger_hook:
 tracing:
   sampling_ratio: 0.5
 
+gateway:
+  url: http://agentgateway.agents.svc.cluster.local:8080
+  otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318
+
 tool_servers:
   - name: lares
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-agent
-    key_env: LARES_MCP_KEY
+    key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [list_*, get_current_knx, get_episode, query_*, correlate_events, search_wiki]
@@ -21,7 +25,7 @@ tool_servers:
   - name: lares-control
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-control
-    key_env: LARES_CONTROL_KEY
+    key_env: LARES_CONTROL_GATEWAY_KEY
     timeout_seconds: 30
     access: request
     tools: [request_knx_write, get_write_request]
@@ -29,7 +33,7 @@ tool_servers:
   - name: lares-memory
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-memory
-    key_env: LARES_MEMORY_MCP_KEY
+    key_env: LARES_MEMORY_GATEWAY_KEY
     timeout_seconds: 30
     access: memory
     tools: [get_memory, append_memory]
@@ -37,18 +41,19 @@ tool_servers:
   - name: lares-wiki
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     client: lares-wiki
-    key_env: LARES_WIKI_KEY
+    key_env: LARES_WIKI_GATEWAY_KEY
     timeout_seconds: 60
     access: write
     tools: [update_wiki_page]
 
   - name: github
-    kind: github
-    command: /opt/github-mcp/github-mcp-server
-    app_id: 1234567
-    installation_id: 89012345
-    private_key_file: /etc/github-reader/private-key
-    toolsets: [repos, issues, pull_requests]
+    kind: http
+    url: http://github-mcp-server.agents.svc.cluster.local:8082/mcp
+    credential:
+      secret: github-mcp-server-token
+      key: token
+      header: Authorization
+    key_env: GITHUB_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [get_*, list_*, search_*, issue_read, pull_request_read]

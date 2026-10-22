@@ -3,8 +3,9 @@
 The file lives in lares and is mounted here; the generator renders the harness
 configuration from the same models, which is why schema and loader sit in this
 package rather than in the generator alone. Beside the use cases it declares
-the tool servers they may name, where the harness reports every finished
-turn, and the share of traces every service of the platform keeps. A file
+the tool servers they may name, the gateway every one of them sits behind,
+where the harness reports every finished turn, and the share of traces every
+service of the platform keeps. A file
 that does not validate is refused at startup — a half-read catalogue would
 start runs nobody declared.
 """
@@ -30,7 +31,7 @@ from pydantic import (
 
 from .events import EventKind
 
-# The gateway mints cron job ids itself, so a job the trigger manages carries
+# The harness mints cron job ids itself, so a job the trigger manages carries
 # its use case in the name: `lares:propose-faults`.
 MANAGED_JOB_PREFIX = "lares:"
 
@@ -126,7 +127,7 @@ class UseCase(_Strict):
     # person's message is the assignment.
     skill: str | None = Field(default=None, min_length=1)
     # The tool servers the use case may see; the harness gets them as
-    # `mcp-<name>` and the bridge's own allowlist is the hard ceiling.
+    # `mcp-<name>`, and each server's gateway route serves its tools only.
     tools: tuple[str, ...] = Field(min_length=1)
     output: tuple[OutputTarget, ...] = Field(min_length=1)
     budget: Budget
@@ -205,56 +206,63 @@ class UseCase(_Strict):
 
 
 class BridgeServer(_Strict):
-    """A tool server on the bridge: one machine client, its key and its allowlist.
+    """A tool server on the bridge, behind its gateway route: one machine client and its allowlist.
 
-    `tools` (names or fnmatch globs) is both the bridge's allowlist for the
-    client, the hard ceiling, and the harness's include list on top of it.
+    The gateway signs in to the bridge as `client`, with the client's key from
+    the gateway's Secret. `tools` (names or fnmatch globs) is the bridge's
+    allowlist for the client, the route's tool list and the harness's include
+    list on top of both.
     """
 
     kind: Literal["bridge"] = "bridge"
     name: str = Field(min_length=1)
+    # The bridge's endpoint, which the gateway calls.
     url: str = Field(min_length=1)
-    # The bridge's machine client the key maps to, and where the harness holds the key.
     client: str = Field(min_length=1)
+    # Where the harness holds its key for the route, in every profile's .env.
     key_env: str = Field(min_length=1)
     timeout_seconds: int = Field(gt=0)
     access: ToolAccess
     tools: tuple[str, ...] = Field(min_length=1)
 
 
-class GitHubServer(_Strict):
-    """The official GitHub MCP server, which the harness spawns as a process of its own.
+class Credential(_Strict):
+    """What the gateway attaches on every call: a key of a Secret beside it, in a header.
 
-    It signs in as a GitHub App that may only read, minting and renewing its
-    own installation tokens from the App's key, and runs read-only with the
-    `toolsets` named here; `tools` is the harness's include list on top. A
-    GitHub write is a delivery of the trigger, never a tool, so the server
-    only reads.
+    On `Authorization` the value goes as a bearer token, on any other header as it is.
     """
 
-    kind: Literal["github"]
+    secret: str = Field(min_length=1)
+    key: str = Field(min_length=1)
+    header: str = Field(min_length=1)
+
+
+class HttpServer(_Strict):
+    """An MCP server of its own behind its gateway route.
+
+    The gateway attaches `credential`; the harness holds a key for the route
+    only. `tools` is the route's tool list and the harness's include list on
+    top. A GitHub write is a delivery of the trigger, never a tool, so such a
+    server only reads.
+    """
+
+    kind: Literal["http"]
     name: str = Field(min_length=1)
-    # The server binary and the App's key, as paths inside the harness container.
-    command: str = Field(min_length=1)
-    app_id: int = Field(gt=0)
-    installation_id: int = Field(gt=0)
-    private_key_file: str = Field(min_length=1)
-    toolsets: tuple[str, ...] = Field(min_length=1)
+    url: str = Field(min_length=1)
+    credential: Credential
+    key_env: str = Field(min_length=1)
     timeout_seconds: int = Field(gt=0)
     access: ToolAccess
     tools: tuple[str, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _only_reads(self) -> GitHubServer:
+    def _only_reads(self) -> HttpServer:
         if self.access != "read":
-            raise ValueError(
-                f"tool server {self.name}: the GitHub server only reads; a GitHub write is "
-                "a delivery of the trigger"
-            )
+            raise ValueError(f"tool server {self.name}: an http server only reads")
         return self
 
 
-ToolServer = BridgeServer | GitHubServer
+ToolServer = BridgeServer | HttpServer
 
 
 def _server_kind(value: Any) -> str:
@@ -265,9 +273,20 @@ def _server_kind(value: Any) -> str:
 
 
 _DeclaredServer = Annotated[
-    Annotated[BridgeServer, Tag("bridge")] | Annotated[GitHubServer, Tag("github")],
+    Annotated[BridgeServer, Tag("bridge")] | Annotated[HttpServer, Tag("http")],
     Discriminator(_server_kind),
 ]
+
+
+class Gateway(_Strict):
+    """The one door between the harness and every tool server.
+
+    `url` is where the harness reaches it, `otlp_endpoint` the OTLP/HTTP
+    receiver it sends a span of every call to.
+    """
+
+    url: str = Field(min_length=1)
+    otlp_endpoint: str = Field(min_length=1)
 
 
 class LedgerHook(_Strict):
@@ -292,6 +311,7 @@ class Tracing(_Strict):
 class _File(_Strict):
     ledger_hook: LedgerHook
     tracing: Tracing
+    gateway: Gateway
     tool_servers: list[_DeclaredServer] = Field(min_length=1)
     use_cases: list[UseCase] = Field(min_length=1)
 
@@ -304,6 +324,7 @@ class UseCaseFile:
     tool_servers: dict[str, ToolServer]
     ledger_hook: LedgerHook
     tracing: Tracing
+    gateway: Gateway
 
 
 def chat_use_case(use_cases: Mapping[str, UseCase]) -> UseCase | None:
@@ -346,10 +367,17 @@ def load_use_case_file(path: Path) -> UseCaseFile:
 
     servers: dict[str, ToolServer] = {}
     clients: dict[str, str] = {}
+    keys: dict[str, str] = {}
     for server in parsed.tool_servers:
         if server.name in servers:
             raise ValueError(f"{path}: tool server {server.name} is declared twice")
         servers[server.name] = server
+        if server.key_env in keys:
+            raise ValueError(
+                f"{path}: tool server {server.name}: key_env {server.key_env} is already "
+                f"the key of {keys[server.key_env]}"
+            )
+        keys[server.key_env] = server.name
         if not isinstance(server, BridgeServer):
             continue
         if server.client in clients:
@@ -379,6 +407,7 @@ def load_use_case_file(path: Path) -> UseCaseFile:
         tool_servers=servers,
         ledger_hook=parsed.ledger_hook,
         tracing=parsed.tracing,
+        gateway=parsed.gateway,
     )
 
 

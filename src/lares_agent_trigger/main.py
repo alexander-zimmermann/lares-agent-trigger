@@ -103,7 +103,7 @@ async def _amain() -> int:
     )
 
     async def is_healthy() -> bool:
-        # The harness is deliberately not part of health: a gateway outage is
+        # The harness is deliberately not part of health: a harness outage is
         # a failed run and its own alert, never a restart loop here.
         if not consumer.is_connected or not await ledger.is_reachable():
             return False
@@ -122,7 +122,7 @@ async def _amain() -> int:
     try:
         await ledger.open()
         await consumer.connect()
-        # Beside the consumer: a gateway rolling on the same commit is asked again.
+        # Beside the consumer: a harness rolling on the same commit is asked again.
         reconciling = asyncio.create_task(schedules.keep_reconciling())
         # Before the API takes a request, so nothing it closes is still going.
         await runs.close_abandoned()

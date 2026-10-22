@@ -37,8 +37,8 @@ EXPLANATION = (
 
 DISCORD_MESSAGES = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL}/messages"
 
-# A run record as the live gateway returned one. `run_id`, never `id`; the
-# top-level `model` is the gateway's own name and `runtime` holds the model
+# A run record as the live harness returned one. `run_id`, never `id`; the
+# top-level `model` is the harness's own name and `runtime` holds the model
 # that actually served the run; `created_at`/`updated_at` are unix seconds.
 COMPLETED = {
     "object": "hermes.run",
@@ -61,7 +61,7 @@ COMPLETED = {
 }
 
 # The session record, where cost and the tool count live — wrapped, as the
-# gateway wraps it.
+# harness wraps it.
 SESSION: dict[str, Any] = {
     "object": "hermes.session",
     "session": {
@@ -80,7 +80,7 @@ SESSION: dict[str, Any] = {
 
 
 def start_response(request: httpx.Request, run_id: str = "run_1") -> httpx.Response:
-    """The gateway's own rule on `input`, so a fake can never be laxer than it is.
+    """The harness's own rule on `input`, so a fake can never be laxer than it is.
 
     `api_server_runs.py` reads a string as the user message and takes `content`
     off the last entry of a list; anything else leaves the message empty and is
@@ -108,7 +108,7 @@ def fake_hermes(
 
     `states` is the one run of the common case; `runs` gives every start its
     own run, `run_1`, `run_2`, … in the order the starts arrive — a new
-    idempotency key is a new run, as it is on the gateway.
+    idempotency key is a new run, as it is on the harness.
     """
     per_run = runs or [states or [COMPLETED]]
     numbers = iter(range(1, len(per_run) + 1))
@@ -198,8 +198,8 @@ def sample(metrics: Metrics, name: str, **labels: str) -> float:
     return registry.get_sample_value(name, labels) or 0.0
 
 
-# A Discord turn as the gateway names it: the session is the conversation, the
-# task id of a gateway turn is its session id, and the turn id appends a random
+# A Discord turn as the harness names it: the session is the conversation, the
+# task id of such a turn is its session id, and the turn id appends a random
 # tail — `agent/turn_context.py`.
 CHAT_SESSION = "20260930_101500_a1b2c3"
 CHAT_TURN = "4f9c2e1a"
@@ -209,7 +209,7 @@ ANSWER = (
     "Leistung 92 W im Mittel über 24 h, sonst 61 W."
 )
 
-# A managed cron job: the gateway mints the 12-hex id itself, so the use case
+# A managed cron job: the harness mints the 12-hex id itself, so the use case
 # rides on the name. A cron run's task id is `cron:<job id>:<execution id>`
 # and its session `cron_<job id>_<time>` — `cron/scheduler.py`.
 JOB_ID = "a1b2c3d4e5f6"
@@ -291,7 +291,7 @@ def model_call(
         if usage
         else None
     )
-    # The gateway's `ToolCall` dataclass through `asdict`: flat, `function` is
+    # The harness's `ToolCall` dataclass through `asdict`: flat, `function` is
     # only a property on it — `agent/transports/types.py`.
     calls = [
         {
@@ -435,7 +435,7 @@ def sign(body: bytes, secret: str = HOOK_SECRET) -> dict[str, str]:
 
 
 def fake_job(respx_mock: respx.MockRouter, *, job_id: str = JOB_ID, name: str | None) -> Any:
-    """The Jobs API for one job; `name=None` is a job the gateway no longer has."""
+    """The Jobs API for one job; `name=None` is a job the harness no longer has."""
     route = respx_mock.get(f"{HERMES_URL}/api/jobs/{job_id}")
     if name is None:
         return route.mock(return_value=httpx.Response(404, json={"error": "Job not found"}))
@@ -443,9 +443,9 @@ def fake_job(respx_mock: respx.MockRouter, *, job_id: str = JOB_ID, name: str | 
 
 
 class FakeJobs:
-    """The gateway's Jobs API over a job list it keeps, with the gateway's own rules.
+    """The harness's Jobs API over a job list it keeps, with the harness's own rules.
 
-    `gateway/platforms/api_server.py` and `cron/jobs.py`: the gateway mints a
+    `gateway/platforms/api_server.py` and `cron/jobs.py`: the harness mints a
     12-hex id and ignores one sent along; a create takes name, schedule,
     prompt, skills and deliver and nothing else; a PATCH takes only its
     whitelist and refuses a body without one of them; a name over 200
@@ -455,12 +455,12 @@ class FakeJobs:
     `include_disabled` is asked for; an id that is not 12 hex is a 400, a
     missing job a 404. Every create, update, delete and run is kept in
     `changes` as (method, job id), so a test sees what was touched. The
-    gateway's scan of a prompt for injections is one phrase here, `blocked`,
-    which a prompt holding it is refused for with the gateway's wording.
+    harness's scan of a prompt for injections is one phrase here, `blocked`,
+    which a prompt holding it is refused for with the harness's wording.
     """
 
     _CREATE_FIELDS = ("name", "schedule", "prompt", "skills", "deliver")
-    # `_UPDATE_ALLOWED_FIELDS` of the gateway.
+    # `_UPDATE_ALLOWED_FIELDS` of the harness.
     _UPDATE_FIELDS = frozenset(
         {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
     )
@@ -468,9 +468,9 @@ class FakeJobs:
     def __init__(self, respx_mock: respx.MockRouter) -> None:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.changes: list[tuple[str, str]] = []
-        # How many lists answer 503 before the gateway is up.
+        # How many lists answer 503 before the harness is up.
         self.unavailable = 0
-        # A phrase the gateway's scan blocks in a prompt.
+        # A phrase the harness's scan blocks in a prompt.
         self.blocked: str | None = None
         self._ids = (f"{n:012x}" for n in itertools.count(0xB0B000000001))
         base = f"{HERMES_URL}/api/jobs"
@@ -494,7 +494,7 @@ class FakeJobs:
         deliver: str = "local",
         enabled: bool = True,
     ) -> str:
-        """A job already in the harness; its id, as the gateway minted it."""
+        """A job already in the harness; its id, as the harness minted it."""
         job_id = next(self._ids)
         self.jobs[job_id] = {
             "id": job_id,
@@ -520,7 +520,7 @@ class FakeJobs:
         return {"kind": "cron", "expr": expr, "display": expr}
 
     def _invalid(self, fields: dict[str, Any]) -> httpx.Response | None:
-        """The gateway's 400 for a name, prompt or schedule it does not take."""
+        """The harness's 400 for a name, prompt or schedule it does not take."""
         if len(fields.get("name") or "") > 200:
             return httpx.Response(400, json={"error": "Name must be ≤ 200 characters"})
         if len(fields.get("prompt") or "") > 5000:

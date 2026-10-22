@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 RUNS_PATH = "/api/runs"
 MEMORY_PATH = "/api/memory"
 
-# A request in chat, not an assignment; the gateway takes 5000 for a whole prompt.
+# A request in chat, not an assignment; the harness takes 5000 for a whole prompt.
 FOCUS_LIMIT = 500
 
 _Answer = tuple[int, dict[str, Any]]

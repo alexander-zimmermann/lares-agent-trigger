@@ -32,7 +32,7 @@ pytestmark = pytest.mark.respx(assert_all_called=False)
 
 KEY = "explain-episode/episode/15510:appeared"
 
-# Error texts as the gateway writes them into a failed run record.
+# Error texts as the harness writes them into a failed run record.
 RATE_LIMITED = {"status": "failed", "error": "Error code: 429 - rate limit exceeded, retry later"}
 AUTH_FAILED = {"status": "failed", "error": "⚠️ Provider authentication failed: 401 Unauthorized"}
 NO_CREDITS = {
@@ -68,7 +68,7 @@ async def test_a_transient_failure_is_retried_once_under_a_new_key(
     assert started.call_count == 2
     first, second = (call.request for call in started.calls)
     assert first.headers["Idempotency-Key"] == KEY
-    # The gateway replays a run for a key it has seen, failed or not.
+    # The harness replays a run for a key it has seen, failed or not.
     assert second.headers["Idempotency-Key"] == f"{KEY}/2"
     # The same question both times.
     assert json.loads(first.content) == json.loads(second.content)

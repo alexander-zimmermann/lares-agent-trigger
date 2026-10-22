@@ -392,7 +392,7 @@ async def test_an_event_run_continues_the_trace_of_its_episode_event(
         "UPDATE agent_runs",
         "deliver explain-episode",
     ]
-    # The polling is one span, the requests to the gateway under it.
+    # The polling is one span, the requests to the harness under it.
     assert {span.name for span in _children(spans, steps[1])} == {"GET"}
     assert [span.name for span in _children(spans, turn)] == [
         "chat gpt-6-sol",

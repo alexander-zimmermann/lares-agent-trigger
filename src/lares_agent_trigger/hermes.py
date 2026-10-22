@@ -6,26 +6,26 @@ only) and not here. It takes no skill field either, which is why the use
 case's skill is named in the instructions.
 
 `input` is the user message of the run, so it is a string or a list of
-messages — the gateway reads a string as the message and takes `content` off
+messages — the harness reads a string as the message and takes `content` off
 the last entry of a list, and anything else is a 400. The pointer therefore
 travels as compact JSON inside that string.
 
 What a run reports about itself is split across two endpoints, and the split
-is the gateway's, not ours. The run record carries `run_id`, `status`,
+is the harness's, not ours. The run record carries `run_id`, `status`,
 `session_id`, `output`, `error`, a `usage` block of token counters, and
 `runtime` — which is where the model that actually served the run and its
-provider are, the top-level `model` being the gateway's own name. Its
+provider are, the top-level `model` being the harness's own name. Its
 `created_at` and `updated_at` are unix seconds, and their difference is the
 run's real duration. The tool count lives on the session record
 (`/api/sessions/{id}`), whose payload sits under a `session` key. Its cost
-estimate is the gateway's guess and stays unread: the run's calls are priced
+estimate is the harness's guess and stays unread: the run's calls are priced
 from the declared sources.
 
-Every request to the gateway is a span of the trace it is made in, and the
+Every request to the harness is a span of the trace it is made in, and the
 polling of a run is one `await_run` span around them. A request outside every
 trace — asking whose job a cron turn was, reconciling the jobs — is none.
 
-A cron job's id is minted by the gateway, so what the job runs is read off its
+A cron job's id is minted by the harness, so what the job runs is read off its
 name through the Jobs API (`/api/jobs/{id}`, wrapped under `job`). The same API
 creates, updates, deletes and runs the managed jobs: a create takes the name,
 the schedule, the prompt, the skills and the delivery and ignores everything
@@ -121,7 +121,7 @@ def instructions_for(skill: str, language: str, tool_calls: int, minutes: int) -
 
 
 class HermesClient:
-    """One HTTP client against the gateway's API server."""
+    """One HTTP client against the harness's API server."""
 
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings
@@ -147,7 +147,7 @@ class HermesClient:
 
         The idempotency key is the ledger key, so a retried POST can never
         produce a second run behind one ledger row. A use case that pins a
-        model routes this one request to it; without a pin the gateway's own
+        model routes this one request to it; without a pin the harness's own
         default and its fallback chain decide.
         """
         body: dict[str, Any] = {
@@ -226,9 +226,9 @@ class HermesClient:
         return replace(usage, tool_count=_int_or_none(session.get("tool_call_count")))
 
     async def job_name(self, job_id: str) -> str | None:
-        """The name of a cron job; None when the gateway holds no such job.
+        """The name of a cron job; None when the harness holds no such job.
 
-        A gateway that cannot answer raises: without the name a cron run
+        A harness that cannot answer raises: without the name a cron run
         belongs to no use case, so its delivery is refused and sent again.
         """
         try:
@@ -244,7 +244,7 @@ class HermesClient:
         return str(name) if name else None
 
     async def list_jobs(self) -> list[HarnessJob]:
-        """Every cron job the gateway holds, paused ones included."""
+        """Every cron job the harness holds, paused ones included."""
         payload = await self._send("GET", "/api/jobs", params={"include_disabled": "true"})
         jobs = payload.get("jobs")
         if not isinstance(jobs, list):
@@ -252,7 +252,7 @@ class HermesClient:
         return [_harness_job(job, "GET /api/jobs") for job in jobs]
 
     async def create_job(self, job: CronJob) -> str:
-        """Create a job and return the id the gateway minted for it."""
+        """Create a job and return the id the harness minted for it."""
         payload = await self._send("POST", "/api/jobs", json=job.model_dump(mode="json"))
         return _harness_job(payload.get("job"), "POST /api/jobs").id
 
@@ -261,7 +261,7 @@ class HermesClient:
         await self._send("PATCH", f"/api/jobs/{job_id}", json=fields)
 
     async def delete_job(self, job_id: str) -> None:
-        """Delete a job; one the gateway no longer holds is already where it should be."""
+        """Delete a job; one the harness no longer holds is already where it should be."""
         try:
             await self._send("DELETE", f"/api/jobs/{job_id}")
         except HermesError as exc:
@@ -269,7 +269,7 @@ class HermesClient:
                 raise
 
     async def run_job(self, job_id: str, prompt: str | None = None) -> None:
-        """Have the gateway run a job on its next tick, outside its schedule.
+        """Have the harness run a job on its next tick, outside its schedule.
 
         `prompt` is added to the job's own prompt for that one run; the job keeps its own.
         """
@@ -345,7 +345,7 @@ def _usage(body: dict[str, Any], elapsed: float) -> Usage:
     """What the run record reports about itself.
 
     The model and its provider come from `runtime`: the top-level `model` is
-    the gateway's own name (`hermes-agent`) and says nothing about who served
+    the harness's own name (`hermes-agent`) and says nothing about who served
     the run. Duration is the record's own `updated_at - created_at`; the
     elapsed time we measured stands in only when the record carries neither,
     because a run can finish inside the POST and leave our clock at zero.

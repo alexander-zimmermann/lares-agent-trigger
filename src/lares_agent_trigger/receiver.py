@@ -2,7 +2,7 @@
 
 The trigger's own API (`api.py`) shares the app and the port.
 
-The answer is what the gateway acts on. It sends a delivery at most twice,
+The answer is what the harness acts on. It sends a delivery at most twice,
 once more only after a connection error or a 5xx, so every answer here is
 chosen for that: 2xx for a delivery that is done with — a call or a tool
 counted, a row written, either one already held, a turn that is not ours; 4xx

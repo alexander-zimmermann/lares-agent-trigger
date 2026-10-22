@@ -1,7 +1,7 @@
 """What went wrong with a run, and whether trying once more could help.
 
 The harness reports a failed run as free text, so the class is read off the
-text. The rules follow the gateway's own classifier for cron runs
+text. The rules follow the harness's own classifier for cron runs
 (`agent/monitoring/cron_health.py`, first match wins), with two classes it has
 no use for: credit exhaustion, which has to outrank auth and rate limits
 because xAI sends it as a 403 and OpenAI as a quota, and a spent budget.
@@ -81,7 +81,7 @@ _RULES: tuple[tuple[Callable[[str], bool], FailureClass], ...] = (
         "credits_exhausted",
     ),
     (lambda text: _AUTH_RE.search(text) is not None, "auth_failed"),
-    # The gateway's iteration cap, and our own deadline in `HermesClient.await_run`.
+    # The harness's iteration cap, and our own deadline in `HermesClient.await_run`.
     (
         _contains_any("iteration budget exhausted", "maximum iterations", "did not finish within"),
         "budget_exhausted",

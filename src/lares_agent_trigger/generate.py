@@ -1,4 +1,4 @@
-"""The generator: the declarations rendered into what the harness and the bridge read.
+"""The generator: the declarations rendered into what the harness, the gateway and the bridge read.
 
 Pure: the use-case file, the person declaration and the hand-written harness
 settings in, one text per rendered file out.
@@ -6,9 +6,8 @@ settings in, one text per rendered file out.
 - The harness configuration, the default profile's: the settings copied whole,
   comments and all, then the part this module owns — the profile's model and
   its fallbacks, from its source, its working directory, what each surface may
-  hold, the tool server entries with their include lists, and the hook that
-  reports every turn. The GitHub server is an entry the harness starts itself,
-  signed in as a read-only GitHub App and started with `--read-only`.
+  hold, the tool server entries, each the profile's route on the gateway with
+  its key and include list, and the hook that reports every turn.
 - Each enabled person's profile config: the settings copied whole, then the
   person's source and directory, their tool servers on Discord and the API
   server, and the same hook. Beside the configs, the ConfigMap that holds them
@@ -24,9 +23,15 @@ settings in, one text per rendered file out.
   is sealed under, as templates of the harness's SealedSecret.
 - The bridge's clients file: one entry per client, each key sealed under the
   client's name, as a template of the bridge's.
+- The gateway's routes file: one route per tool server a profile holds and
+  one per person reading the bridge through their own client, each taking the
+  keys of the profiles holding it, serving the server's tools and attaching its
+  credential, as a template of the gateway's SealedSecret; beside it, the chart
+  values that mount the routes and each credential's Secret.
 
-Every value is sealed once, under its own key: a variable's key is its name in
-lower case and dashed, prefixed by the handle where the value is a person's own.
+Every value is sealed once per SealedSecret, under its own key: a variable's key
+is its name in lower case and dashed, prefixed by the handle where the value is a
+person's own; a bridge client's key is its name.
 Sealed Secrets renders a key the SealedSecret lacks as empty without an error;
 lares checks every template against the sealed keys in pre-commit.
 
@@ -61,18 +66,27 @@ import sys
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple, TypeIs, override
+from typing import Any, NamedTuple, override
+from urllib.parse import urlsplit
 
 import yaml
 
 from .cron_jobs import CronJob, dump_cron_jobs, job_name
 from .hermes import language_name
 from .hooks import MODEL_CALL, TOOL_CALL, TURN_ENDED
-from .persons import ModelSource, Person, PersonsFile, load_persons_file
+from .persons import (
+    ModelSource,
+    Person,
+    PersonsFile,
+    load_persons_file,
+    own_route,
+    reads_through_own_client,
+)
 from .receiver import HOOK_PATH
 from .use_cases import (
     BridgeServer,
-    GitHubServer,
+    Gateway,
+    HttpServer,
     ScheduleTrigger,
     ToolAccess,
     ToolServer,
@@ -122,6 +136,12 @@ class SealedSecret(NamedTuple):
 HARNESS_KEYS = SealedSecret("hermes-credentials", "agents")
 # The bridge's clients and their keys, as `clients.json`.
 BRIDGE_KEYS = SealedSecret("lares-mcp-bridge-auth-clients", "lares-mcp-bridge")
+# The gateway's routes, with every profile's key and every bridge client's, as its config.
+GATEWAY_KEYS = SealedSecret("agentgateway-routes", "agents")
+
+# Where the gateway reads its routes, and the Secret of each credential it attaches.
+_GATEWAY_ROUTES_DIR = "/etc/agentgateway/routes"
+_GATEWAY_CREDENTIALS_DIR = "/etc/agentgateway/credentials"
 
 # Every profile serves its API under this key; the default profile chats under the bot token.
 _API_SERVER_KEY = "API_SERVER_KEY"
@@ -175,6 +195,22 @@ class Rendering:
     tracing: str
     env_template: str
     clients_template: str
+    # The gateway's routes as a template of its sealed keys, and the chart
+    # values that mount them and each credential the routes attach.
+    routes_template: str
+    routes_values: str
+
+
+@dataclass(frozen=True)
+class _Route:
+    """One route of the gateway: the server behind it and the profiles' keys it takes."""
+
+    name: str
+    server: ToolServer
+    # The sealed key of each profile's key for the route.
+    keys: list[str]
+    # The bridge client the gateway signs in as, sealed under its name; none for an http server.
+    client: str | None
 
 
 class _Dumper(yaml.SafeDumper):
@@ -216,7 +252,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
     generated = {
         "platform_toolsets": _platform_toolsets(declared, served),
         "hooks": _hooks(declared),
-        "mcp_servers": _mcp_servers(in_use),
+        "mcp_servers": _mcp_servers(declared.gateway, in_use, None),
     }
     hermes_config = _config(
         "The hand-written settings.yaml first, then the parts rendered from persons.yaml\n"
@@ -255,7 +291,9 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
     # A person reads through a client of their own, named by the handle, and
     # places a request through the request server's machine client.
     reading = {
-        handle: [tool for server in servers if _reads(server) for tool in server.tools]
+        handle: [
+            tool for server in servers if reads_through_own_client(server) for tool in server.tools
+        ]
         for handle, servers in holdings.items()
     }
     own = {handle: tools for handle, tools in reading.items() if tools}
@@ -263,7 +301,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         server.name
         for servers in holdings.values()
         for server in servers
-        if isinstance(server, BridgeServer) and not _reads(server)
+        if isinstance(server, BridgeServer) and not reads_through_own_client(server)
     }
     allowlists = {
         **{
@@ -291,7 +329,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# sealed-secret.yaml; Hermes mounts the default's read-only at the home's root,\n"
         "# a person's in their profile's directory.\n",
         {
-            "default.env": _default_env(declared, enabled, bridges, persons, on_discord),
+            "default.env": _default_env(declared, enabled, in_use, persons, on_discord),
             **{
                 f"{person.name}.env": _person_env(declared, persons, person, holdings[person.name])
                 for person in persons.enabled_persons
@@ -304,6 +342,20 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# in sealed-secret.yaml, each under its client's name.\n",
         {"clients.json": _clients_json(allowlists)},
     )
+    routes = _routes(declared, in_use, persons, holdings)
+    routes_template = _template(
+        GATEWAY_KEYS,
+        "# The gateway's routes, composed from the keys sealed one by one in\n"
+        "# sealed-secret.yaml: each profile's key under the name its .env reads it from,\n"
+        "# each bridge client's under the client's name.\n",
+        {_CONFIG_FILE: _gateway_config(declared, routes)},
+    )
+    routes_values = (
+        f"{GENERATED_LINE}\n"
+        "# An additional values file of the gateway's chart: its routes and the Secret of each\n"
+        "# credential they attach, mounted whole so a renewed one reaches the gateway.\n"
+        f"{_dump(_routes_values(routes))}"
+    )
     return Rendering(
         hermes_config=hermes_config,
         profiles=profiles,
@@ -314,6 +366,8 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         tracing=tracing,
         env_template=env_template,
         clients_template=clients_template,
+        routes_template=routes_template,
+        routes_values=routes_values,
     )
 
 
@@ -451,7 +505,7 @@ def _person_config(
             "api_server": _surface(None, held),
         },
         "hooks": _hooks(declared),
-        "mcp_servers": _mcp_servers(held),
+        "mcp_servers": _mcp_servers(declared.gateway, held, person),
     }
     return _config(
         f"{person.name}'s profile: the hand-written settings.yaml first, then the parts\n"
@@ -468,15 +522,6 @@ def _person_config(
 def _held(declared: UseCaseFile, person: Person) -> list[ToolServer]:
     """The tool servers a person holds, in file order."""
     return [server for name, server in declared.tool_servers.items() if name in person.tools]
-
-
-def _reads(server: ToolServer) -> TypeIs[BridgeServer]:
-    """True for a bridge server a person reads through a client of their own.
-
-    Any other bridge server a person holds, one that places requests, they
-    reach through its machine client, under its key.
-    """
-    return isinstance(server, BridgeServer) and server.access == "read"
 
 
 def _profile_directory(handle: str) -> str:
@@ -627,42 +672,189 @@ def _hooks(declared: UseCaseFile) -> dict[str, Any]:
     }
 
 
-def _mcp_servers(in_use: Sequence[ToolServer]) -> dict[str, Any]:
+def _route(server: ToolServer, person: Person | None) -> str:
+    """The gateway route a profile reaches a server on, named like the server.
+
+    A person reads the bridge through a client of their own, so the gateway
+    attaches that client's key on a route of the person's own.
+    """
+    if person is not None and reads_through_own_client(server):
+        return own_route(server.name, person.name)
+    return server.name
+
+
+def _mcp_servers(
+    gateway: Gateway, servers: Sequence[ToolServer], person: Person | None
+) -> dict[str, Any]:
+    """Each server as its gateway route, under the profile's key for it.
+
+    The gateway serves tools only, so the harness asks for no resources or prompts.
+    """
     return {
-        server.name: _bridge_entry(server)
-        if isinstance(server, BridgeServer)
-        else _github_entry(server)
-        for server in in_use
+        server.name: {
+            "url": f"{gateway.url.rstrip('/')}/mcp/{_route(server, person)}",
+            "headers": {"Authorization": f"Bearer ${{env:{server.key_env}}}"},
+            "timeout": server.timeout_seconds,
+            "tools": {"include": list(server.tools), "resources": False, "prompts": False},
+        }
+        for server in servers
     }
 
 
-def _bridge_entry(server: BridgeServer) -> dict[str, Any]:
+def _own_key(person: Person, variable: str) -> str:
+    """The key a person's own value of a variable is sealed under: prefixed by the handle."""
+    return f"{person.name}-{_sealed_key(variable)}"
+
+
+def _routes(
+    declared: UseCaseFile,
+    in_use: Sequence[ToolServer],
+    persons: PersonsFile,
+    holdings: dict[str, list[ToolServer]],
+) -> list[_Route]:
+    """Every route, by server in file order: the server's own route, then each person's.
+
+    A server's route takes the default profile's key when it holds the server,
+    and the key of each person reaching it there; a person's own route, their key.
+    """
+    routes: list[_Route] = []
+    for server in declared.tool_servers.values():
+        keys = [_sealed_key(server.key_env)] if server in in_use else []
+        own: list[_Route] = []
+        for person in persons.enabled_persons:
+            if server not in holdings[person.name]:
+                continue
+            key = _own_key(person, server.key_env)
+            if reads_through_own_client(server):
+                own.append(_Route(_route(server, person), server, [key], person.name))
+            else:
+                keys.append(key)
+        if keys:
+            client = server.client if isinstance(server, BridgeServer) else None
+            routes.append(_Route(server.name, server, keys, client))
+        routes.extend(own)
+    return routes
+
+
+# A sealed key's value in the routes file, replaced by its template action after dumping.
+_SEALED = "__sealed__"
+
+
+def _gateway_config(declared: UseCaseFile, routes: Sequence[_Route]) -> str:
+    """The routes file: one route per entry, each a span of the trace it starts.
+
+    A route's backend keeps no session: an upstream session would keep the
+    credential it started with past a renewal.
+    """
+    gateway = declared.gateway
+    collector = urlsplit(gateway.otlp_endpoint)
+    config = {
+        "frontendPolicies": {
+            "tracing": {
+                "host": collector.netloc,
+                "protocol": "http",
+                "randomSampling": repr(declared.tracing.sampling_ratio),
+            }
+        },
+        "binds": [
+            {
+                "port": urlsplit(gateway.url).port or 80,
+                "listeners": [{"routes": [_route_config(route) for route in routes]}],
+            }
+        ],
+    }
+    text = _dump(config)
+    filled = re.sub(
+        rf"{_SEALED}([a-z0-9-]+)", lambda match: f'{{{{ index . "{match[1]}" | toJson }}}}', text
+    )
+    assert _SEALED not in filled
+    return filled
+
+
+def _route_config(route: _Route) -> dict[str, Any]:
+    server = route.server
     return {
-        "url": server.url,
-        "headers": {"Authorization": f"Bearer ${{env:{server.key_env}}}"},
-        "timeout": server.timeout_seconds,
-        "tools": {"include": list(server.tools)},
+        "name": route.name,
+        "matches": [{"path": {"exact": f"/mcp/{route.name}"}}],
+        "policies": {
+            "apiKey": {
+                "mode": "strict",
+                "keys": [{"key": f"{_SEALED}{key}"} for key in route.keys],
+            },
+            "mcpAuthorization": {"rules": [_tool_rule(pattern) for pattern in server.tools]},
+            "backendAuth": _backend_auth(route),
+        },
+        "backends": [
+            {
+                "mcp": {
+                    "statefulMode": "stateless",
+                    "targets": [{"name": server.name, "mcp": {"host": server.url}}],
+                }
+            }
+        ],
     }
 
 
-def _github_entry(server: GitHubServer) -> dict[str, Any]:
+def _backend_auth(route: _Route) -> dict[str, Any]:
+    """The bridge client's key, or the http server's credential from its mounted Secret."""
+    server = route.server
+    if isinstance(server, BridgeServer):
+        return {"key": {"value": f"{_SEALED}{route.client}"}}
+    credential = server.credential
+    key: dict[str, Any] = {"value": {"file": _credential_file(server)}}
+    if credential.header.lower() != "authorization":
+        key["location"] = {"header": {"name": credential.header}}
+    return {"key": key}
+
+
+def _credential_file(server: HttpServer) -> str:
+    credential = server.credential
+    return f"{_GATEWAY_CREDENTIALS_DIR}/{credential.secret}/{credential.key}"
+
+
+def _tool_rule(pattern: str) -> str:
+    """The CEL rule allowing the tools one entry of `tools` names, as fnmatch reads it."""
+    if "[" in pattern:
+        raise ValueError(f"tools: {pattern}: only `*` and `?` globs reach the gateway")
+    if "*" not in pattern and "?" not in pattern:
+        return f"mcp.tool.name == {json.dumps(pattern)}"
+    head = pattern[:-1]
+    if pattern.endswith("*") and "*" not in head and "?" not in head:
+        return f"mcp.tool.name.startsWith({json.dumps(head)})"
+    expression = "".join(
+        ".*" if char == "*" else "." if char == "?" else re.escape(char) for char in pattern
+    )
+    return f"mcp.tool.name.matches({json.dumps(f'^{expression}$')})"
+
+
+def _routes_values(routes: Sequence[_Route]) -> dict[str, Any]:
+    """The routes file and each credential's Secret, every one mounted whole and read-only."""
+    secrets = {
+        route.server.credential.secret: route.server.credential.key
+        for route in routes
+        if isinstance(route.server, HttpServer)
+    }
+    volumes = [
+        {
+            "name": "routes",
+            "secret": {"secretName": GATEWAY_KEYS.name, **_item(_CONFIG_FILE, _CONFIG_FILE)},
+        },
+        *(
+            {"name": secret, "secret": {"secretName": secret, **_item(key, key)}}
+            for secret, key in secrets.items()
+        ),
+    ]
+    mounts = [
+        {"name": "routes", "mountPath": _GATEWAY_ROUTES_DIR, "readOnly": True},
+        *(
+            {"name": secret, "mountPath": f"{_GATEWAY_CREDENTIALS_DIR}/{secret}", "readOnly": True}
+            for secret in secrets
+        ),
+    ]
     return {
-        "command": server.command,
-        "args": ["stdio", "--read-only", f"--toolsets={','.join(server.toolsets)}"],
-        # The server mints and renews the App's installation tokens itself.
-        "env": {
-            "GITHUB_APP_ID": str(server.app_id),
-            "GITHUB_APP_INSTALLATION_ID": str(server.installation_id),
-            "GITHUB_APP_PRIVATE_KEY_PATH": server.private_key_file,
-        },
-        "timeout": server.timeout_seconds,
-        "tools": {
-            "include": list(server.tools),
-            # Its prompts walk the model towards writes it does not hold; its
-            # resources repeat what the read tools return.
-            "resources": False,
-            "prompts": False,
-        },
+        "config": {"config": {"localXdsPath": f"{_GATEWAY_ROUTES_DIR}/{_CONFIG_FILE}"}},
+        "extraVolumes": volumes,
+        "extraVolumeMounts": mounts,
     }
 
 
@@ -674,7 +866,7 @@ def _sealed_key(variable: str) -> str:
 def _default_env(
     declared: UseCaseFile,
     enabled: Sequence[UseCase],
-    bridges: Sequence[BridgeServer],
+    in_use: Sequence[ToolServer],
     persons: PersonsFile,
     on_discord: Sequence[Person],
 ) -> str:
@@ -688,7 +880,7 @@ def _default_env(
         *([_DISCORD_BOT_TOKEN] if any(use_case.is_chat for use_case in enabled) else []),
         *(_discord_user(person) for person in on_discord),
         declared.ledger_hook.secret_env,
-        *(server.key_env for server in bridges),
+        *(server.key_env for server in in_use),
         *persons.default_source.key_envs,
     ]
     return _env_lines(dict.fromkeys(variables), _sealed_key)
@@ -697,28 +889,23 @@ def _default_env(
 def _person_env(
     declared: UseCaseFile, persons: PersonsFile, person: Person, held: Sequence[ToolServer]
 ) -> str:
-    """Every key a person's config reads: their own, sealed under the handle, and the shared ones.
+    """Every key a person's config reads: their own, sealed under the handle, and the hook secret.
 
-    Their own are the API server's key, the key of their bridge client and
-    the keys of their source's providers; the hook secret and a machine
-    client's key are the ones every holder shares.
+    Their own are the API server's key, their gateway key for each tool
+    server they hold and the keys of their source's providers; the hook
+    secret is the one every profile shares.
     """
     source = persons.source_of(person)
-    own = {
-        _API_SERVER_KEY,
-        *(server.key_env for server in held if _reads(server)),
-        *source.key_envs,
-    }
     variables = [
         _API_SERVER_KEY,
         declared.ledger_hook.secret_env,
-        *(server.key_env for server in held if isinstance(server, BridgeServer)),
+        *(server.key_env for server in held),
         *source.key_envs,
     ]
 
     def sealed(variable: str) -> str:
-        key = _sealed_key(variable)
-        return f"{person.name}-{key}" if variable in own else key
+        shared = variable == declared.ledger_hook.secret_env
+        return _sealed_key(variable) if shared else _own_key(person, variable)
 
     return _env_lines(dict.fromkeys(variables), sealed)
 
@@ -789,6 +976,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--tracing", type=Path, required=True)
     parser.add_argument("--env-template", type=Path, required=True)
     parser.add_argument("--clients-template", type=Path, required=True)
+    parser.add_argument("--routes-template", type=Path, required=True)
+    parser.add_argument("--routes-values", type=Path, required=True)
     # Written whole: each person's config, the ConfigMap of them and the chart values.
     parser.add_argument("--profiles", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -816,6 +1005,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         (args.tracing, rendered.tracing),
         (args.env_template, rendered.env_template),
         (args.clients_template, rendered.clients_template),
+        (args.routes_template, rendered.routes_template),
+        (args.routes_values, rendered.routes_values),
         (profiles / "kustomization.yaml", rendered.profiles_kustomization),
         (profiles / "profiles.values.yaml", rendered.profiles_values),
         *((profiles / handle / _CONFIG_FILE, text) for handle, text in rendered.profiles.items()),
