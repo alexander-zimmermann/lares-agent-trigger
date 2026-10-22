@@ -27,15 +27,18 @@ from .fakes import (
     EXECUTION_ID,
     EXPLANATION,
     JOB_ID,
+    REVIEWED,
     SESSION,
     fake_hermes,
     fake_job,
     model_call,
+    review_call,
     sample,
     sign,
     start_response,
     tool_call,
     turn_ended,
+    until,
 )
 
 Rows = Callable[[], list[dict[str, Any]]]
@@ -504,18 +507,27 @@ async def test_calls_that_come_in_while_the_run_waits_are_kept(
     assert [call["call"] for call in row["tool_trace"]["calls"]] == [1, 2]
 
 
-async def test_calls_of_a_turn_that_never_ended_are_counted_when_dropped(
+async def test_calls_of_a_turn_that_never_ended_are_counted_by_the_sweep(
     receiver: Receiver, rows: Rows, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The harness's own work after an answer reports calls but no turn end; they
-    are spent and in no row, and the counter says so once the tally is given up."""
+    """A turn whose end was lost reports calls and no end: spent, in no row, and
+    counted by the profile's person once the sweep gives the tally up. A
+    background review never ends either and is never counted: it is booked."""
     client, metrics = receiver
-    await _deliver(client, model_call(1, turn="0rphan01"), model_call(2, turn="0rphan01"))
+    await _deliver(
+        client,
+        model_call(1, turn="0rphan01"),
+        model_call(2, turn="0rphan01"),
+        model_call(1, content=ANSWER),
+        turn_ended(),
+        review_call(1, content=REVIEWED),
+    )
 
-    # Every tally is past its hour from here on.
+    # Every tally is past its hour from here on; the sweep comes round on its own.
     monkeypatch.setattr(turn_runs, "_TALLY_LIFETIME_SECONDS", -1.0)
-    await _deliver(client, model_call(1, content=ANSWER), turn_ended())
+    await until(lambda: sample(metrics, "agent_trigger_orphaned_calls_total", enduser_id=""))
 
-    assert sample(metrics, "agent_trigger_orphaned_calls_total") == 2.0
+    assert sample(metrics, "agent_trigger_orphaned_calls_total", enduser_id="") == 2.0
     (row,) = rows()
     assert row["subject_key"] == f"{CHAT_SESSION}:{CHAT_TURN}"
+    assert row["review_text"] == REVIEWED

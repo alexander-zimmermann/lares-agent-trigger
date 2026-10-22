@@ -119,6 +119,7 @@ async def _amain() -> int:
     receiving: asyncio.Task[None] | None = None
     reconciling: asyncio.Task[None] | None = None
     reading: asyncio.Task[None] | None = None
+    sweeping: asyncio.Task[None] | None = None
     try:
         await ledger.open()
         await consumer.connect()
@@ -128,6 +129,7 @@ async def _amain() -> int:
         await runs.close_abandoned()
         # Only once the ledger is open: a delivery before that could not be written.
         receiving = asyncio.create_task(receiver.serve())
+        sweeping = asyncio.create_task(turns.keep_sweeping(settings.sweep_interval_seconds))
         if github is not None:
             read_back = ReadBack(
                 ledger, github, metrics, interval_seconds=settings.read_back_interval_seconds
@@ -140,6 +142,10 @@ async def _amain() -> int:
                 raise RuntimeError("the hook receiver stopped") from receiving.exception()
             if reconciling.done() and (broken := reconciling.exception()) is not None:
                 raise RuntimeError("the cron job reconcile stopped") from broken
+            if sweeping.done():
+                raise RuntimeError("the sweep of turns without an end stopped") from (
+                    sweeping.exception()
+                )
     except Exception:
         logger.exception("fatal error in trigger startup/run")
         return 1
@@ -149,7 +155,7 @@ async def _amain() -> int:
             receiver.should_exit = True
             with contextlib.suppress(Exception):
                 await receiving
-        for task in (reconciling, reading):
+        for task in (reconciling, reading, sweeping):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

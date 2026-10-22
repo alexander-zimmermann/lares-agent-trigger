@@ -12,6 +12,7 @@ asserted as the relay would take it.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import socket
@@ -561,6 +562,8 @@ def settings(
         reconcile_retry_seconds=0.01,
         # An event run waits this long for its calls; the tests deliver them first.
         turn_wait_seconds=0.05,
+        # The sweep comes round often enough to wait on.
+        sweep_interval_seconds=0.01,
         # The poll loop is exercised, not waited on.
         hermes_poll_seconds=0.01,
         alertmanager_url=ALERTMANAGER_URL,
@@ -685,6 +688,7 @@ async def service(
         metrics,
         retry_seconds=settings.reconcile_retry_seconds,
     )
+    sweeping = asyncio.create_task(turns.keep_sweeping(settings.sweep_interval_seconds))
     episode_consumer = EpisodeConsumer(settings, runs, metrics)
     await episode_consumer.connect()
     api = TriggerApi(use_cases, runs, schedules, ledger, closer, settings.api_key, metrics)
@@ -694,6 +698,9 @@ async def service(
     try:
         yield Service(episode_consumer, client, metrics, schedules, runs, hermes, turns)
     finally:
+        sweeping.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweeping
         await runs.aclose()
         await turns.aclose()
         await client.aclose()

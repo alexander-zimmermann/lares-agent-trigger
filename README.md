@@ -472,7 +472,7 @@ A row that a dead pod left `queued` or `running` is not started again when its e
 
 The harness starts two kinds of run on its own: a person's turn in Discord or the web chat, and a cron job coming due. The trigger hears of them as they happen, through the harness's outbound hook (`hooks.outbound` in its configuration), which posts three of its lifecycle hooks to `POST /hooks/hermes`, signed with HMAC-SHA256 over the raw body (`X-Hermes-Signature-256: sha256=<hex>`) under a secret both pods read:
 
-- `post_api_request`, once per call to the model: its tokens, the model and its source, when it started and ended, the tools it asked for with their arguments, and its reply. Each call is added to its turn's tally in memory.
+- `post_api_request`, once per call to the model: its tokens, the model and its source, when it started and ended, the tools it asked for with their arguments, and its reply. Each call is added to its turn's tally in memory; a background review's is booked at once (below).
 - `post_tool_call`, once per tool the model asked for, as the tool returns: its name, its call id, how long it took and whether it failed. The tool's arguments and result come along and are dropped on arrival. A tool joins the tally its model call opened; one of no tally is left alone.
 - `on_session_end`, which despite its name fires once per turn, after that turn's calls: whether it completed, and why it stopped. It writes the turn's row from the tally.
 
@@ -514,11 +514,28 @@ The row holds what the turn's calls added up to: the tokens the model read (cach
 
 Arguments are cut at 300 characters. An event run gets its calls the same way: its turn comes in on the `api_server` platform under the session the Runs API gave the run, and the event path collects them by that session once the run is over, waiting up to `TURN_WAIT_SECONDS` for the turn's end to arrive. Past the wait the row keeps the count alone.
 
+### Background reviews
+
+After a chat answer the harness may review the person's profile notes and skills in the background: the notes every `memory.nudge_interval`-th message of a session, the skills once enough tool rounds have built up. It forks the review into the answer's session, without a task id, so the review's calls run under a task of their own, and the fork never sends `on_session_end`. A chat call whose task is not its session is such a review. Each of its calls is added at once to the session's newest chat row:
+
+| Column              | What it holds                                                                    |
+| ------------------- | -------------------------------------------------------------------------------- |
+| `review_tokens_in`  | What the review's calls read, cache included.                                    |
+| `review_tokens_out` | What they wrote.                                                                 |
+| `review_cost`       | What they cost, each call priced like any other.                                 |
+| `review_text`       | The review's last reply ("Nothing to save."); empty for a person who does not `keep_answers`. |
+
+An unknown part leaves its sum unknown, as on the row's own columns. The row stays one answered message, so the day's runs are unchanged, and a person's spend is `cost + review_cost`. A redelivered call is booked once. A review in a session no row holds, because its answer's end never came through, is in no row, and its calls are counted in `agent_trigger_orphaned_calls_total`.
+
+The web chat has to send its session header (`X-Hermes-Session-Id`): without it an API-server turn runs under a task of its own and reads as a review.
+
+Every `SWEEP_INTERVAL_SECONDS`, a sweep gives up what no end came for within an hour. The calls of a turn that is no review and never ended are counted in `agent_trigger_orphaned_calls_total` by the profile's person, for an alert to fire on.
+
 What the receiver answers is what the harness acts on — it sends a delivery at most twice, the second time only after a connection error or a 5xx:
 
 | Answer | When                                                                                 |
 | ------ | ------------------------------------------------------------------------------------ |
-| `200`  | The call is counted or the row written, either was already (a replay), or the turn is not ours. |
+| `200`  | The call is counted or booked or the row written, either was already (a replay), or the turn is not ours. |
 | `401`  | The signature is missing or wrong. Counted, never parsed.                            |
 | `400`  | The body is none of the three hooks.                                                 |
 | `503`  | The ledger or the Jobs API did not answer; the second try may succeed.              |
@@ -534,7 +551,7 @@ invoke_agent messenger            gen_ai.conversation.id, lares.run.id, enduser.
 └─ chat gpt-6-sol
 ```
 
-The root runs from the first call's start to the turn's end, and is started before the row is written so the row can carry its id. A person's turn names them in `enduser.id` and where they wrote in `lares.surface`, as their row does; a machine's names neither. A cron turn is the same trace under its use case. A turn that never ended is given up after an hour as a trace of its own, failed with `error.type = turn_without_end`; a person's still names them.
+The root runs from the first call's start to the turn's end, and is started before the row is written so the row can carry its id. A person's turn names them in `enduser.id` and where they wrote in `lares.surface`, as their row does; a machine's names neither. A cron turn is the same trace under its use case. A turn that never ended is given up after an hour as a trace of its own, failed with `error.type = turn_without_end`; a person's still names them. A background review's calls and tools join its answer's trace as they come, under the root, after the answer's end; a review that follows a restart is booked, but not traced, as the answer's root is gone with the process.
 
 An event run continues the trace of the engine's run that published the event, from the `traceparent` in the message's NATS headers:
 
@@ -598,6 +615,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `HOOK_SECRET_FILE`                          | —                                                  | The HMAC secret the harness signs deliveries with. |
 | `API_KEY_FILE`                              | —                                                  | The key the API takes, at least 32 characters; the bridge holds it too. |
 | `TURN_WAIT_SECONDS`                         | `5.0`                                              | How long a finished event run waits for its calls. |
+| `SWEEP_INTERVAL_SECONDS`                    | `60.0`                                             | How often the turns whose end never came are given up. |
 | `METRICS_PORT`                              | `9090`                                             | `/metrics` and `/healthz`.                         |
 | `LOG_LEVEL` / `LOG_FORMAT`                  | `INFO` / `json`                                    | Logging.                                           |
 | `TRACING_ENDPOINT`                          | —                                                  | OTLP/HTTP collector base URL; unset keeps it off.  |
@@ -615,13 +633,13 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_capped_total`            | `use_case`         | Events refused because the day's budget was spent.           |
 | `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |
 | `agent_trigger_run_duration_seconds`    | `use_case`         | Wall-clock time from start to terminal state.                |
-| `agent_trigger_hook_events_total`       | `outcome`          | Hook deliveries: `counted` (a model call or a tool), `recorded`, `handed_over` (an event run's turn ended, kept for it), `duplicate`, `ignored`, `refused`, `invalid`, `error`. |
+| `agent_trigger_hook_events_total`       | `outcome`          | Hook deliveries: `counted` (a model call or a tool), `recorded`, `booked` (a background review's call), `handed_over` (an event run's turn ended, kept for it), `duplicate`, `orphaned` (a review's call no row holds), `ignored`, `refused`, `invalid`, `error`. |
 | `agent_trigger_recorded_runs_total`     | `use_case`, `status`, `enduser_id` | Chat and cron runs written from the hook, by the status of their row and the person it answered (empty for the machines). |
 | `agent_trigger_odd_turns_total`         | `kind`, `enduser_id` | Turns that should not have come: `undeclared_profile`, `discord_on_default`, `cron_on_person` (see [Chat and cron runs](#chat-and-cron-runs)). |
-| `agent_trigger_cost_usd_total`          | `use_case`, `source`, `step`, `enduser_id` | USD the runs' calls cost at the declared prices, by model source, step (`primary`, `fallback`) and the person the run answered (empty for the machines). |
+| `agent_trigger_cost_usd_total`          | `use_case`, `source`, `step`, `enduser_id` | USD the runs' calls cost at the declared prices, background reviews' included, by model source, step (`primary`, `fallback`) and the person the run answered (empty for the machines). |
 | `agent_trigger_unpriced_calls_total`    | `use_case`, `provider`, `model`, `reason` | Calls without a cost, `undeclared`, `no_usage` or `no_calls`; their row's cost is NULL. |
 | `agent_trigger_answers_total`           | `use_case`, `source`, `step` | Answered runs, by the step of the model source that gave the answer: `primary`, `fallback`, or `undeclared`. |
-| `agent_trigger_orphaned_calls_total`    | —                  | Model calls of turns that never reported their end within an hour — the harness's own work after an answer, spent and in no row. |
+| `agent_trigger_orphaned_calls_total`    | `enduser_id`       | Model calls spent and in no row: of a turn that never reported its end within an hour, or of a background review in a session no row holds, by the profile's person (empty for the machines). |
 | `agent_trigger_reconciles_total`        | `outcome`          | Reconciles of the cron jobs: `done`, `failed` (not answered, tried again) or `refused`. |
 | `agent_trigger_cron_jobs_total`         | `action`           | Managed jobs the reconcile `created`, `updated` or `deleted`. |
 | `agent_trigger_api_requests_total`      | `route`, `code`    | Requests to the API (`runs`, `memory`), by the status code they were answered. |

@@ -62,15 +62,19 @@ class Metrics:
         self.hook_events = Counter(
             "agent_trigger_hook_events_total",
             "Deliveries of the harness's hook, by what the receiver made of them.",
-            # counted | recorded | handed_over | duplicate | ignored | refused | invalid | error
+            # counted | recorded | booked | handed_over | duplicate | orphaned | ignored
+            # | refused | invalid | error
             ["outcome"],
             registry=self.registry,
         )
-        # Calls of turns that never sent their end, e.g. the harness's own
-        # background work after an answer: spent, and in no row.
+        # Calls spent and in no row: of a turn whose end never came, or of a
+        # background review in a session no row holds. `enduser_id` is the
+        # profile's person; empty for the machines.
         self.orphaned_calls = Counter(
             "agent_trigger_orphaned_calls_total",
-            "Model calls whose turn never reported its end within an hour.",
+            "Model calls in no row: of a turn that never reported its end within an hour, or of "
+            "a background review in a session no row holds, by the profile's person.",
+            ["enduser_id"],
             registry=self.registry,
         )
         # What the model calls of every run cost, by the declared source step

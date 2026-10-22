@@ -35,6 +35,7 @@ from .fakes import (
     sign,
     tool_call,
     turn_ended,
+    until,
 )
 
 Rows = Callable[[], list[dict[str, Any]]]
@@ -278,9 +279,9 @@ async def test_a_turn_that_never_ended_becomes_a_trace_when_it_is_dropped(
         model_call(2, turn="0rphan01", started_at=1790756104.5, seconds=2.0),
     )
 
-    # Every tally is past its hour from here on; the next call drops it.
+    # Every tally is past its hour from here on; the sweep comes round on its own.
     monkeypatch.setattr(turn_runs, "_TALLY_LIFETIME_SECONDS", -1.0)
-    await _deliver(client, model_call(1, content=ANSWER))
+    await until(spans.get_finished_spans)
 
     assert rows() == []
     root = _named(spans, "invoke_agent messenger")

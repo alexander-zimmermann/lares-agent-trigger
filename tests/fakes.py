@@ -6,11 +6,13 @@ never pass against a fake that is laxer than the live side.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import itertools
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -208,6 +210,26 @@ ANSWER = (
     "Der Gefrierschrank läuft seit 17.8. auf Stufe 3.\n"
     "Leistung 92 W im Mittel über 24 h, sonst 61 W."
 )
+
+# A background review after a chat answer: the harness forks it into the
+# answer's session without a task id, so the fork's task is a fresh UUID and
+# its turn id `<session>:<uuid>:<random>` — `agent/background_review.py`,
+# `agent/turn_facade.py`. It never ends: the fork reports no `on_session_end`.
+REVIEW_TASK = "7c1e9a52-3f0d-4b8e-9a61-2d5c8e0f4b13"
+REVIEW_TURN = "d3b07384"
+# What a review that found nothing worth keeping says last.
+REVIEWED = "Nothing to save."
+
+
+def review_call(number: int, **fields: Any) -> bytes:
+    """One `post_api_request` of a background review in the chat session."""
+    return model_call(number, task_id=REVIEW_TASK, turn=REVIEW_TURN, **fields)
+
+
+def review_tool(call: str, **fields: Any) -> bytes:
+    """One `post_tool_call` of a background review in the chat session."""
+    return tool_call(call, task_id=REVIEW_TASK, turn=REVIEW_TURN, **fields)
+
 
 # A managed cron job: the harness mints the 12-hex id itself, so the use case
 # rides on the name. A cron run's task id is `cron:<job id>:<execution id>`
@@ -617,3 +639,59 @@ class FakeJobs:
         )
         self.changes.append(("RUN", job_id))
         return httpx.Response(200, json={"job": job})
+
+
+# The owner on the machines' subscription, one more person on an account of
+# their own, and one who moved out.
+PERSONS = """
+default_profile:
+  model: owner-subscription
+
+model_sources:
+  - name: owner-subscription
+    provider: openai-codex
+    model: gpt-6-sol
+    account: shared-with-default
+    bound: subscription
+    fallback:
+      - provider: openai-api
+        model: gpt-6-luna
+        bound: capped
+        price: {input: 0.10, cached_input: 0.01, output: 0.50}
+  - name: free-account
+    provider: openai-codex
+    model: gpt-6-luna
+    account: per-person
+    bound: subscription
+    fallback:
+      - provider: openai-api
+        model: gpt-6-luna
+        bound: capped
+        price: {input: 0.20, cached_input: 0.02, output: 1.00}
+
+persons:
+  - name: kim
+    discord: admin
+    tools: [lares]
+    model: owner-subscription
+    keep_answers: true
+    enabled: true
+  - name: lou
+    discord: true
+    tools: [lares]
+    model: free-account
+    enabled: true
+  - name: max
+    discord: true
+    tools: [lares]
+    model: free-account
+    dormant: Moved out.
+"""
+
+
+async def until(condition: Callable[[], object], *, seconds: float = 2.0) -> None:
+    """Wait for what a task in the background does, a moment at a time, within a bound."""
+    for _ in range(round(seconds / 0.01)):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
