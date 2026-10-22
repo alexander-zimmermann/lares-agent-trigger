@@ -215,7 +215,8 @@ def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> Non
     assert toolsets["api_server"] == ["no_mcp"]
     # The chat's read servers stay readable for a job made by hand; its request server does not.
     assert toolsets["cron"] == ["hermes-cron", "lares", "github"]
-    assert _jobs(tmp_path, only_chat) == []
+    # No agent job is left; the script's, which needs no model, stays.
+    assert [job["name"] for job in _jobs(tmp_path, only_chat)] == ["lares:skill-digest"]
 
     only_control = only_chat.replace(
         "    tools: [lares, lares-control, github]\n", "    tools: [lares-control]\n"

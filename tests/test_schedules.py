@@ -9,7 +9,7 @@ import respx
 
 from lares_agent_trigger.cron_jobs import CronJob, load_cron_jobs
 from lares_agent_trigger.schedules import Schedules
-from lares_agent_trigger.use_cases import load_use_cases
+from lares_agent_trigger.use_cases import load_use_case_file
 
 from .conftest import CRON_JOBS, USE_CASES, Service
 from .fakes import FakeJobs, sample
@@ -32,9 +32,15 @@ async def test_the_reconcile_brings_the_harness_in_line_with_the_rendering(
     await service.schedules.keep_reconciling()
 
     (probe,) = jobs.named("lares:restore-probe")
-    # In file order: the changed job updated in place, the missing one created,
+    (digest,) = jobs.named("lares:skill-digest")
+    # In file order: the changed job updated in place, the missing ones created,
     # then the managed job nothing declares any more deleted.
-    assert jobs.changes == [("PATCH", stale), ("POST", probe["id"]), ("DELETE", retired)]
+    assert jobs.changes == [
+        ("PATCH", stale),
+        ("POST", probe["id"]),
+        ("POST", digest["id"]),
+        ("DELETE", retired),
+    ]
     assert jobs.jobs[foreign] == before
     (propose,) = jobs.named("lares:propose-faults")
     assert propose["id"] == stale
@@ -43,11 +49,40 @@ async def test_the_reconcile_brings_the_harness_in_line_with_the_rendering(
     assert probe["skills"] == ["lares-restore-probe"]
     assert probe["prompt"] == "Answer in English. Stay within 30 tool calls and 10 minutes."
     assert probe["deliver"] == "local"
+    # The script job: no prompt and no skill, the harness runs the script and delivers.
+    assert digest["schedule"]["expr"] == "0 18 * * 0"
+    assert digest["script"] == "skill-digest.py"
+    assert digest["no_agent"] is True
+    assert digest["prompt"] == ""
+    assert digest["skills"] == []
+    assert digest["deliver"] == "discord"
 
     metrics = service.metrics
-    for action in ("created", "updated", "deleted"):
+    assert sample(metrics, "agent_trigger_cron_jobs_total", action="created") == 2.0
+    for action in ("updated", "deleted"):
         assert sample(metrics, "agent_trigger_cron_jobs_total", action=action) == 1.0
     assert sample(metrics, "agent_trigger_reconciles_total", outcome="done") == 1.0
+
+
+async def test_a_script_jobs_changed_script_is_updated_in_place(
+    service: Service, respx_mock: respx.MockRouter
+) -> None:
+    jobs = FakeJobs(respx_mock)
+    stale = jobs.add(
+        "lares:skill-digest",
+        schedule="0 18 * * 0",
+        prompt="",
+        skills=(),
+        deliver="discord",
+        script="digest.py",
+        no_agent=True,
+    )
+
+    await service.schedules.keep_reconciling()
+
+    assert ("PATCH", stale) in jobs.changes
+    assert jobs.jobs[stale]["script"] == "skill-digest.py"
+    assert jobs.jobs[stale]["no_agent"] is True
 
 
 async def test_a_job_as_declared_is_left_as_it_is(
@@ -61,7 +96,7 @@ async def test_a_job_as_declared_is_left_as_it_is(
     await service.schedules.keep_reconciling()
 
     assert jobs.changes == created
-    assert [method for method, _ in created] == ["POST", "POST"]
+    assert [method for method, _ in created] == ["POST", "POST", "POST"]
 
 
 async def test_a_paused_job_is_found_and_stays_paused(
@@ -140,7 +175,7 @@ def _load(tmp_path: Path, cron_jobs: str) -> None:
     use_cases_file.write_text(USE_CASES, encoding="utf-8")
     cron_jobs_file = tmp_path / "cron-jobs.yaml"
     cron_jobs_file.write_text(cron_jobs, encoding="utf-8")
-    load_cron_jobs(cron_jobs_file, load_use_cases(use_cases_file))
+    load_cron_jobs(cron_jobs_file, load_use_case_file(use_cases_file))
 
 
 def test_the_rendered_job_set_matches_the_declaration(tmp_path: Path) -> None:
@@ -156,10 +191,32 @@ def test_a_job_the_declaration_does_not_enable_is_refused(tmp_path: Path) -> Non
 
 
 def test_a_schedule_use_case_without_its_job_is_refused(tmp_path: Path) -> None:
-    missing = CRON_JOBS[: CRON_JOBS.index("  - name: lares:restore-probe")]
+    probe, digest = (
+        CRON_JOBS.index(f"  - name: {name}")
+        for name in ("lares:restore-probe", "lares:skill-digest")
+    )
+    missing = CRON_JOBS[:probe] + CRON_JOBS[digest:]
 
     with pytest.raises(ValueError, match="no job for the schedule use case restore-probe"):
         _load(tmp_path, missing)
+
+
+def test_a_script_without_its_job_is_refused(tmp_path: Path) -> None:
+    missing = CRON_JOBS[: CRON_JOBS.index("  - name: lares:skill-digest")]
+
+    with pytest.raises(ValueError, match="no job for the script skill-digest"):
+        _load(tmp_path, missing)
+
+
+def test_a_job_with_both_a_skill_and_a_script_is_refused(tmp_path: Path) -> None:
+    """The harness runs either the skills with a model or the script without one."""
+    both = CRON_JOBS.replace(
+        "    script: skill-digest.py\n",
+        "    script: skill-digest.py\n    skills: [lares-propose]\n",
+    )
+
+    with pytest.raises(ValueError, match="neither skills nor prompt"):
+        _load(tmp_path, both)
 
 
 def test_a_job_declared_twice_is_refused(tmp_path: Path) -> None:

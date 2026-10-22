@@ -37,7 +37,8 @@ terminal:
   cwd: /opt/data/profiles/kim
 
 # Rendered from persons.yaml and use-cases.yaml: kim's tool servers on
-# Discord and the API server, and the hook that reports every finished turn.
+# Discord and the API server, the web chat's skill tools, and the hook that
+# reports every finished turn.
 platform_toolsets:
   discord:
     - hermes-discord
@@ -45,6 +46,7 @@ platform_toolsets:
     - lares-control
     - github
   api_server:
+    - skills
     - lares
     - lares-control
     - github

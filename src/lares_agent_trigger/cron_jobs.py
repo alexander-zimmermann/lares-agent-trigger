@@ -1,24 +1,29 @@
 """The managed cron job set: one schema for the rendering and for the reconcile.
 
-The generator renders one job per enabled schedule use case into
-`cron-jobs.yaml`; lares mounts the file, and the trigger reads it back at
-startup and brings the harness's job list in line with it through the Jobs API.
+The generator renders one job per enabled schedule use case and one per enabled
+script into `cron-jobs.yaml`; lares mounts the file, and the trigger reads it
+back at startup and brings the harness's job list in line with it through the
+Jobs API.
 
-A job holds only what the Jobs API takes. The API reads no tool list and no
-model per job, so every managed job sees the cron surface of the harness
-configuration and runs on its default model; the loader of the use-case file
-refuses a schedule use case that would need either.
+A job holds only what the Jobs API takes, and is one of two kinds. An agent
+job names the skills a model runs with and its prompt; the API reads no tool
+list and no model per job, so every such job sees the cron surface of the
+harness configuration and runs on its default model, and the loader of the
+use-case file refuses a schedule use case that would need either. A script job
+names the file the harness runs without a model (`no_agent`), its stdout the
+output the harness delivers itself.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from .use_cases import MANAGED_JOB_PREFIX, UseCase, scheduled_use_case
+from .use_cases import MANAGED_JOB_PREFIX, UseCaseFile, scheduled_script, scheduled_use_case
 
 
 class CronJob(BaseModel):
@@ -26,12 +31,33 @@ class CronJob(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    # `lares:<use case>`: the harness mints the id, so the name is what is matched on.
+    # `lares:<use case or script>`: the harness mints the id, so the name is what is matched on.
     name: str = Field(min_length=len(MANAGED_JOB_PREFIX) + 1, pattern=f"^{MANAGED_JOB_PREFIX}")
     schedule: str = Field(min_length=1)
-    skills: tuple[str, ...] = Field(min_length=1)
-    prompt: str = Field(min_length=1)
+    # An agent job: the skills its model runs with, and what it is told.
+    skills: tuple[str, ...] = ()
+    prompt: str = ""
+    # A script job: the file the harness runs instead of a model.
+    script: str | None = None
+    no_agent: bool = False
     deliver: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _agent_or_script(self) -> CronJob:
+        if self.script is None:
+            if not self.skills or not self.prompt:
+                raise ValueError(f"job {self.name}: an agent job names its skills and its prompt")
+            if self.no_agent:
+                raise ValueError(f"job {self.name}: `no_agent` needs a script")
+        elif not self.no_agent or self.skills or self.prompt:
+            raise ValueError(
+                f"job {self.name}: a script job is `no_agent: true` with neither skills nor prompt"
+            )
+        return self
+
+    def fields(self) -> dict[str, Any]:
+        """The job in the fields of its kind: what the file holds and a create sends."""
+        return self.model_dump(mode="json", exclude_defaults=True)
 
 
 class _File(BaseModel):
@@ -40,7 +66,7 @@ class _File(BaseModel):
     jobs: list[CronJob]
 
 
-def load_cron_jobs(path: Path, use_cases: Mapping[str, UseCase]) -> list[CronJob]:
+def load_cron_jobs(path: Path, declared: UseCaseFile) -> list[CronJob]:
     """Read the rendered job set and check it against the declaration it was rendered from.
 
     A file that does not parse, names a job twice, or disagrees with the
@@ -63,23 +89,36 @@ def load_cron_jobs(path: Path, use_cases: Mapping[str, UseCase]) -> list[CronJob
     for name in names:
         if names.count(name) > 1:
             raise ValueError(f"{path}: job {name} is declared twice")
-        if scheduled_use_case(use_cases, name) is None:
+        if (
+            scheduled_use_case(declared.use_cases, name) is None
+            and scheduled_script(declared.scripts, name) is None
+        ):
             raise ValueError(
-                f"{path}: job {name} runs no enabled schedule use case; render it again"
+                f"{path}: job {name} runs no enabled schedule use case or script; render it again"
             )
-    for use_case in use_cases.values():
-        if use_case.is_schedule and job_name(use_case) not in names:
-            raise ValueError(
-                f"{path}: no job for the schedule use case {use_case.name}; render it again"
-            )
+    expected = {
+        **{
+            job_name(use_case.name): f"the schedule use case {use_case.name}"
+            for use_case in declared.use_cases.values()
+            if use_case.is_schedule
+        },
+        **{
+            job_name(script.name): f"the script {script.name}"
+            for script in declared.scripts.values()
+            if script.is_enabled
+        },
+    }
+    for name, owner in expected.items():
+        if name not in names:
+            raise ValueError(f"{path}: no job for {owner}; render it again")
     return jobs
 
 
-def job_name(use_case: UseCase) -> str:
-    """The name the managed job of a schedule use case carries in the harness."""
-    return f"{MANAGED_JOB_PREFIX}{use_case.name}"
+def job_name(name: str) -> str:
+    """The name the managed job of a schedule use case or a script carries in the harness."""
+    return f"{MANAGED_JOB_PREFIX}{name}"
 
 
 def dump_cron_jobs(jobs: Sequence[CronJob]) -> dict[str, list[dict[str, object]]]:
     """The job set as the file holds it."""
-    return {"jobs": [job.model_dump(mode="json") for job in jobs]}
+    return {"jobs": [job.fields() for job in jobs]}

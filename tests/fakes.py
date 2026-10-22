@@ -524,10 +524,12 @@ def fake_job(respx_mock: respx.MockRouter, *, job_id: str = JOB_ID, name: str | 
 class FakeJobs:
     """The harness's Jobs API over a job list it keeps, with the harness's own rules.
 
-    `gateway/platforms/api_server.py` and `cron/jobs.py`: the harness mints a
-    12-hex id and ignores one sent along; a create takes name, schedule,
-    prompt, skills and deliver and nothing else; a PATCH takes only its
-    whitelist and refuses a body without one of them; a name over 200
+    `gateway/platforms/api_server.py` and `cron/jobs.py`, as of the Jobs API
+    that takes script jobs: the harness mints a 12-hex id and ignores one sent
+    along; a create takes name, schedule, prompt, skills, deliver, script and
+    no_agent and nothing else, and refuses a job with nothing to run or a
+    no_agent that is no boolean; a PATCH takes only its whitelist and refuses
+    a body without one of them, or one that leaves nothing to run; a name over 200
     characters, a prompt over 5000 or a schedule that is no cron expression
     is a 400; a run resumes a paused job and takes an optional `prompt` for
     that one run, kept as `manual_run_prompt`; a list hides paused jobs unless
@@ -538,10 +540,22 @@ class FakeJobs:
     which a prompt holding it is refused for with the harness's wording.
     """
 
-    _CREATE_FIELDS = ("name", "schedule", "prompt", "skills", "deliver")
+    _CREATE_FIELDS = ("name", "schedule", "prompt", "skills", "deliver", "script", "no_agent")
     # `_UPDATE_ALLOWED_FIELDS` of the harness.
     _UPDATE_FIELDS = frozenset(
-        {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
+        {
+            "name",
+            "schedule",
+            "prompt",
+            "deliver",
+            "skills",
+            "skill",
+            "repeat",
+            "enabled",
+            "script",
+            "no_agent",
+            "workdir",
+        }
     )
 
     def __init__(self, respx_mock: respx.MockRouter) -> None:
@@ -572,6 +586,8 @@ class FakeJobs:
         skills: tuple[str, ...] = ("lares-propose",),
         deliver: str = "local",
         enabled: bool = True,
+        script: str | None = None,
+        no_agent: bool = False,
     ) -> str:
         """A job already in the harness; its id, as the harness minted it."""
         job_id = next(self._ids)
@@ -588,6 +604,8 @@ class FakeJobs:
             "deliver": deliver,
             "enabled_toolsets": None,
             "model": None,
+            "script": script,
+            "no_agent": no_agent,
         }
         return job_id
 
@@ -598,8 +616,14 @@ class FakeJobs:
     def _schedule(expr: str) -> dict[str, Any]:
         return {"kind": "cron", "expr": expr, "display": expr}
 
-    def _invalid(self, fields: dict[str, Any]) -> httpx.Response | None:
-        """The harness's 400 for a name, prompt or schedule it does not take."""
+    def _invalid(
+        self, fields: dict[str, Any], merged: dict[str, Any] | None = None
+    ) -> httpx.Response | None:
+        """The harness's 400 for a name, prompt, schedule or job it does not take.
+
+        `merged` is the job an update would leave behind; the harness refuses one
+        with nothing left to run.
+        """
         if len(fields.get("name") or "") > 200:
             return httpx.Response(400, json={"error": "Name must be ≤ 200 characters"})
         if len(fields.get("prompt") or "") > 5000:
@@ -607,6 +631,22 @@ class FakeJobs:
         if self.blocked is not None and self.blocked in (fields.get("prompt") or ""):
             return httpx.Response(
                 400, json={"error": "Blocked: prompt matches threat pattern 'prompt_injection'."}
+            )
+        if "no_agent" in fields and not isinstance(fields["no_agent"], bool):
+            return httpx.Response(400, json={"error": "no_agent must be a boolean"})
+        # A job with nothing to run: no prompt, no skill, no script.
+        job = merged if merged is not None else fields
+        if (
+            not (job.get("prompt") or "").strip()
+            and not job.get("skills")
+            and not job.get("script")
+        ):
+            return httpx.Response(
+                400,
+                json={
+                    "error": "Cron job has nothing to run: the prompt is blank and no script or "
+                    "skill(s) are set. Provide a prompt, a script, or at least one skill."
+                },
             )
         schedule = fields.get("schedule")
         if schedule is not None:
@@ -640,6 +680,8 @@ class FakeJobs:
             prompt=fields.get("prompt", ""),
             skills=tuple(fields.get("skills") or ()),
             deliver=fields.get("deliver", "local"),
+            script=fields.get("script"),
+            no_agent=bool(fields.get("no_agent", False)),
         )
         self.changes.append(("POST", job_id))
         return httpx.Response(200, json={"job": self.jobs[job_id]})
@@ -661,9 +703,9 @@ class FakeJobs:
         fields = {key: value for key, value in body.items() if key in self._UPDATE_FIELDS}
         if not fields:
             return httpx.Response(400, json={"error": "No valid fields to update"})
-        if refused := self._invalid(fields):
-            return refused
         job = self.jobs[job_id]
+        if refused := self._invalid(fields, {**job, **fields}):
+            return refused
         if "schedule" in fields:
             fields["schedule"] = self._schedule(fields["schedule"])
             job["schedule_display"] = fields["schedule"]["display"]

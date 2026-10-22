@@ -6,7 +6,7 @@ the job set: once per pod, it lists the harness's jobs and brings the managed
 ones — named `lares:<use case>` — in line with the rendered `cron-jobs.yaml`.
 
 - a declared job the harness lacks is created;
-- a declared job whose schedule, prompt, skills or delivery differ is updated
+- a declared job whose schedule, prompt, skills, script or delivery differ is updated
   in place, its id kept — an unchanged one is not touched, because rewriting a
   schedule drops an occurrence the harness has not run yet;
 - a managed job nothing declares any more is deleted, and so is the second of
@@ -103,7 +103,7 @@ class Schedules:
         `focus`, what the person asked for, goes into that run's prompt. Its
         next cron turn is then recorded as started by a person.
         """
-        name = job_name(use_case)
+        name = job_name(use_case.name)
         job = next((job for job in await self._hermes.list_jobs() if job.name == name), None)
         if job is None:
             raise MissingJobError(f"the harness holds no job {name} yet")
@@ -157,17 +157,12 @@ def _refusal(exc: HermesError) -> bool:
 
 
 def _changes(job: HarnessJob, declared: CronJob) -> dict[str, Any]:
-    """The fields of a job that differ from its declaration, as the update sends them."""
-    wanted: dict[str, Any] = {
-        "schedule": declared.schedule,
-        "prompt": declared.prompt,
-        "skills": list(declared.skills),
-        "deliver": declared.deliver,
+    """The fields of a job that differ from its declaration, as the update sends them.
+
+    The harness holds every field a declaration has under the same name.
+    """
+    return {
+        field: value
+        for field, value in declared.model_dump(mode="json", exclude={"name"}).items()
+        if getattr(declared, field) != getattr(job, field)
     }
-    held: dict[str, Any] = {
-        "schedule": job.schedule,
-        "prompt": job.prompt,
-        "skills": list(job.skills),
-        "deliver": job.deliver,
-    }
-    return {field: value for field, value in wanted.items() if held[field] != value}

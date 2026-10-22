@@ -28,10 +28,10 @@ trace — asking whose job a cron turn was, reconciling the jobs — is none.
 A cron job's id is minted by the harness, so what the job runs is read off its
 name through the Jobs API (`/api/jobs/{id}`, wrapped under `job`). The same API
 creates, updates, deletes and runs the managed jobs: a create takes the name,
-the schedule, the prompt, the skills and the delivery and ignores everything
-else, an update takes those through a whitelist, and a list leaves paused jobs
-out unless asked for them. A job's `schedule` comes back parsed, the cron
-expression under `expr`.
+the schedule, the prompt, the skills, the script with `no_agent` and the
+delivery and ignores everything else, an update takes those through a
+whitelist, and a list leaves paused jobs out unless asked for them. A job's
+`schedule` comes back parsed, the cron expression under `expr`.
 """
 
 from __future__ import annotations
@@ -100,6 +100,9 @@ class HarnessJob:
     schedule: str | None
     prompt: str
     skills: tuple[str, ...]
+    # The file a script job runs instead of a model; None for an agent job.
+    script: str | None
+    no_agent: bool
     deliver: str | None
     # False for a paused job.
     enabled: bool
@@ -253,7 +256,7 @@ class HermesClient:
 
     async def create_job(self, job: CronJob) -> str:
         """Create a job and return the id the harness minted for it."""
-        payload = await self._send("POST", "/api/jobs", json=job.model_dump(mode="json"))
+        payload = await self._send("POST", "/api/jobs", json=job.fields())
         return _harness_job(payload.get("job"), "POST /api/jobs").id
 
     async def update_job(self, job_id: str, fields: dict[str, Any]) -> None:
@@ -313,6 +316,7 @@ def _harness_job(record: Any, request: str) -> HarnessJob:
     schedule = record.get("schedule")
     expression = schedule.get("expr") if isinstance(schedule, dict) else None
     skills = record.get("skills")
+    script = record.get("script")
     deliver = record.get("deliver")
     return HarnessJob(
         id=str(record["id"]),
@@ -320,6 +324,8 @@ def _harness_job(record: Any, request: str) -> HarnessJob:
         schedule=str(expression) if expression is not None else None,
         prompt=str(record.get("prompt") or ""),
         skills=tuple(str(skill) for skill in skills) if isinstance(skills, list) else (),
+        script=str(script) if script else None,
+        no_agent=record.get("no_agent") is True,
         deliver=str(deliver) if deliver is not None else None,
         enabled=record.get("enabled") is not False,
     )
