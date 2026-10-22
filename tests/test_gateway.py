@@ -1,15 +1,18 @@
-"""The rendered routes run as the gateway runs them: agentgateway, GitHub's server and a bridge.
+"""The rendered routes run as the gateway runs them: agentgateway, GitHub's server, a bridge
+and Authentik.
 
 The gateway starts as its chart starts it with the rendered values: every
 variable they name set from its sealed key, every sealed key a value of its
 own, and the routes and every credential laid into a volume the way kubelet
 lays a Secret into a pod: a timestamped directory behind `..data`, swapped
-whole on a change.
+whole on a change. The cluster's Authentik comes in as the overlay sets it.
 Each upstream answers under the name the declaration gives it, on a network
 of their own. GitHub's server is the real one, started as lares starts it;
 it refuses a call without a token, so a route that lists its tools attached
-one. The bridge is a stand-in that lists a tool beyond every allowlist and
-answers with the key it was called with.
+one. The bridge is a stand-in that lists a tool no route serves and answers
+with the key it was called with and the caller the gateway named. Authentik
+is a stand-in serving one application's discovery and signing keys; the
+test signs the tokens.
 """
 
 from __future__ import annotations
@@ -26,12 +29,14 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+import jwt
 import pytest
 import yaml
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from lares_agent_trigger.generate import render
 from lares_agent_trigger.persons import load_persons_file
-from lares_agent_trigger.use_cases import HttpServer, load_use_case_file
+from lares_agent_trigger.use_cases import ToolServer, load_use_case_file
 
 from .test_generate import PERSONS, SETTINGS, USE_CASES
 
@@ -42,6 +47,10 @@ GITHUB_SERVER_IMAGE = "ghcr.io/github/github-mcp-server:v2.0.3"
 BRIDGE_IMAGE = "python:3.15-slim"
 
 FAKE_BRIDGE = Path(__file__).parent / "fake_bridge.py"
+FAKE_AUTHENTIK = Path(__file__).parent / "fake_authentik.py"
+# The cluster's Authentik, as the gateway's overlay sets it.
+AUTHENTIK_URL = "http://authentik:9000"
+SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 # Where the rendered chart values mount the routes and the credentials.
 MOUNT = "/etc/agentgateway"
 TOKEN = "ghs_not-a-token"
@@ -110,7 +119,7 @@ class Rendered:
     # The routes file and the gateway's chart values.
     routes: str
     values: dict[str, Any]
-    github: HttpServer
+    github: ToolServer
 
     def variables(self) -> dict[str, str]:
         """Each variable the values set, holding its sealed key."""
@@ -139,7 +148,6 @@ def rendered() -> Rendered:
         declared, load_persons_file(PERSONS, declared), SETTINGS.read_text(encoding="utf-8")
     )
     github = declared.tool_servers["github"]
-    assert isinstance(github, HttpServer)
     return Rendered(
         routes=rendering.routes, values=yaml.safe_load(rendering.routes_values), github=github
     )
@@ -165,6 +173,29 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
         gateway.write("routes", {"config.yaml": rendered.routes})
         for secret, files in rendered.credentials().items():
             gateway.write(f"credentials/{secret}", files)
+        issuer = declared.connectors["claude-ai"].issuer.replace("${AUTHENTIK_URL}", AUTHENTIK_URL)
+        jwk = {**jwt.algorithms.RSAAlgorithm.to_jwk(SIGNING_KEY.public_key(), as_dict=True)}
+        jwks = json.dumps({"keys": [{**jwk, "kid": "authentik", "alg": "RS256", "use": "sig"}]})
+        containers.append(
+            _docker(
+                "run",
+                "-d",
+                "--network",
+                network,
+                "--network-alias",
+                "authentik",
+                "-e",
+                f"ISSUER={issuer}",
+                "-e",
+                f"JWKS={jwks}",
+                "-v",
+                f"{FAKE_AUTHENTIK}:/fake_authentik.py:ro",
+                BRIDGE_IMAGE,
+                "python",
+                "-I",
+                "/fake_authentik.py",
+            )
+        )
         containers.append(
             _docker(
                 "run",
@@ -208,6 +239,8 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
                 for name, value in rendered.variables().items()
                 for option in ("-e", f"{name}={value}")
             ),
+            "-e",
+            f"AUTHENTIK_URL={AUTHENTIK_URL}",
             "--mount",
             f"type=volume,src={volume},dst={MOUNT},readonly",
             GATEWAY_IMAGE,
@@ -241,16 +274,25 @@ def _wait_until_serving(gateway: Gateway) -> None:
 class _Session:
     """One client on one route, as the harness holds it: one handshake, then its requests.
 
-    It keeps the session id the gateway hands out, if it hands one out.
+    It keeps the session id the gateway hands out, if it hands one out. `path`
+    is a connector's own; a tool server's route is `/mcp/<route>`.
     """
 
-    def __init__(self, gateway: Gateway, route: str, key: str | None) -> None:
-        self._url = f"{gateway.url}/mcp/{route}"
+    def __init__(
+        self,
+        gateway: Gateway,
+        route: str,
+        key: str | None,
+        headers: dict[str, str] | None = None,
+        path: str | None = None,
+    ) -> None:
+        self._url = f"{gateway.url}{path or f'/mcp/{route}'}"
         self._headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": "2025-11-25",
             **({"Authorization": f"Bearer {key}"} if key is not None else {}),
+            **(headers or {}),
         }
         self._ids = iter(range(1, 1000))
 
@@ -288,26 +330,55 @@ class _Session:
     def call(self, tool: str) -> dict[str, Any]:
         return self.request("tools/call", name=tool, arguments={})
 
+    def caller(self, tool: str) -> dict[str, str | None]:
+        """What the bridge was told about the call: its key, the client and the person."""
+        answer: dict[str, str | None] = json.loads(self.call(tool)["result"]["content"][0]["text"])
+        return answer
+
 
 def _initialize(gateway: Gateway, route: str, key: str | None) -> int:
     return _Session(gateway, route, key).initialize()
 
 
-def _open(gateway: Gateway, route: str, key: str) -> _Session:
-    session = _Session(gateway, route, key)
+def _open(
+    gateway: Gateway, route: str, key: str, headers: dict[str, str] | None = None
+) -> _Session:
+    session = _Session(gateway, route, key, headers)
     assert session.initialize() == 200
     return session
 
 
+def _token(username: str, **claims: Any) -> str:
+    """An access token of the connector's Authentik application for this username."""
+    issuer = f"{AUTHENTIK_URL}/application/o/claude-ai/"
+    now = int(time.time())
+    payload = {
+        "iss": issuer,
+        "aud": "claude-ai",
+        "sub": f"sub-{username}",
+        "preferred_username": username,
+        "iat": now,
+        "exp": now + 600,
+        **claims,
+    }
+    return jwt.encode(payload, SIGNING_KEY, algorithm="RS256", headers={"kid": "authentik"})
+
+
+def _connector(gateway: Gateway, token: str | None) -> _Session:
+    return _Session(gateway, "claude-ai", token, path="/mcp")
+
+
+BRIDGE_KEY = f"Bearer {_value('lares-mcp-bridge')}"
+
+
 def test_a_key_is_refused_on_every_route_but_its_own(gateway: Gateway) -> None:
-    """The machines' key for lares opens lares only; kim's opens kim's own route only."""
+    """The machines' key and kim's open lares; neither opens a route it is no key of."""
     machines, kim = _value("lares-gateway-key"), _value("kim-lares-gateway-key")
 
     assert _initialize(gateway, "lares", machines) == 200
-    assert _initialize(gateway, "lares-kim", kim) == 200
-    assert _initialize(gateway, "lares", kim) == 401
-    assert _initialize(gateway, "lares-kim", machines) == 401
+    assert _initialize(gateway, "lares", kim) == 200
     assert _initialize(gateway, "lares-memory", machines) == 401
+    assert _initialize(gateway, "lares-memory", kim) == 401
     assert _initialize(gateway, "github", machines) == 401
     assert _initialize(gateway, "lares", None) == 401
 
@@ -315,7 +386,7 @@ def test_a_key_is_refused_on_every_route_but_its_own(gateway: Gateway) -> None:
 def test_a_tool_outside_a_servers_tools_is_neither_listed_nor_callable(gateway: Gateway) -> None:
     key = _value("lares-gateway-key")
 
-    # The read server's allowlist: no verdict, no request through the gate, no memory.
+    # The read server's tools: no verdict, no request through the gate, no memory.
     lares = _open(gateway, "lares", key)
     assert lares.tools() == ["list_episodes", "get_episode", "query_timeseries"]
     refused = lares.call("set_verdict")
@@ -325,17 +396,32 @@ def test_a_tool_outside_a_servers_tools_is_neither_listed_nor_callable(gateway: 
     assert memory.tools() == ["get_memory"]
 
 
-def test_each_bridge_route_signs_in_as_its_own_client(gateway: Gateway) -> None:
-    """The caller's key never reaches the bridge; the route's client key does."""
+def test_each_route_names_its_client_and_the_keys_person_to_the_bridge(gateway: Gateway) -> None:
+    """The caller's key never reaches the bridge; the gateway's key does, and who called."""
     calls = {
-        "lares": ("lares-gateway-key", "lares-agent"),
-        "lares-kim": ("kim-lares-gateway-key", "kim"),
-        "lares-control": ("kim-lares-control-gateway-key", "lares-control"),
+        ("lares", "lares-gateway-key", "get_episode"): None,
+        ("lares", "kim-lares-gateway-key", "get_episode"): "kim",
+        ("lares-control", "kim-lares-control-gateway-key", "request_knx_write"): "kim",
+        ("lares-memory", "lares-memory-gateway-key", "get_memory"): None,
     }
-    for route, (key, client) in calls.items():
-        tool = "request_knx_write" if route == "lares-control" else "get_episode"
-        answer = _open(gateway, route, _value(key)).call(tool)
-        assert answer["result"]["content"][0]["text"] == f"Bearer {_value(client)}", route
+    for (route, key, tool), enduser in calls.items():
+        caller = _open(gateway, route, _value(key)).caller(tool)
+        assert caller == {"authorization": BRIDGE_KEY, "client": route, "enduser": enduser}, key
+
+
+def test_a_caller_never_names_itself_to_the_bridge(gateway: Gateway) -> None:
+    """The headers a caller sends are overwritten, or dropped where the key names nobody."""
+    forged = {"X-Client-Id": "github", "X-Enduser-Id": "lou"}
+
+    machines = _open(gateway, "lares", _value("lares-gateway-key"), forged)
+    kim = _open(gateway, "lares", _value("kim-lares-gateway-key"), forged)
+
+    assert machines.caller("get_episode") == {
+        "authorization": BRIDGE_KEY,
+        "client": "lares",
+        "enduser": None,
+    }
+    assert kim.caller("get_episode")["enduser"] == "kim"
 
 
 def test_github_answers_through_its_route_with_the_attached_token(
@@ -354,21 +440,117 @@ def test_a_renewed_credential_reaches_an_open_session_without_a_restart(
 ) -> None:
     """kubelet swaps a credential's Secret in; the harness's open session carries it next.
 
-    A bridge client's key is renewed here, the way the GitHub token is every 30 minutes.
+    The bridge's key is renewed here, the way the GitHub token is every 30 minutes.
     """
     started = gateway.started_at()
     session = _open(gateway, "lares", _value("lares-gateway-key"))
-    assert session.call("get_episode")["result"]["content"][0]["text"] == (
-        f"Bearer {_value('lares-agent')}"
-    )
+    assert session.caller("get_episode")["authorization"] == BRIDGE_KEY
 
     keys = rendered.credentials()["agentgateway-keys"]
-    gateway.write("credentials/agentgateway-keys", {**keys, "lares-agent": "new"})
+    gateway.write("credentials/agentgateway-keys", {**keys, "lares-mcp-bridge": "new"})
 
-    deadline = time.monotonic() + 30
-    seen = ""
-    while time.monotonic() < deadline and seen != "Bearer new":
-        time.sleep(0.5)
-        seen = session.call("get_episode")["result"]["content"][0]["text"]
-    assert seen == "Bearer new"
+    assert _seen(session, "Bearer new") == "Bearer new"
     assert gateway.started_at() == started
+    # The other tests read the key the volume held.
+    gateway.write("credentials/agentgateway-keys", keys)
+    assert _seen(session, BRIDGE_KEY) == BRIDGE_KEY
+
+
+def _seen(session: _Session, key: str) -> str | None:
+    """The key the bridge is called with, once it is `key` or 30 seconds have passed."""
+    deadline = time.monotonic() + 30
+    seen = session.caller("get_episode")["authorization"]
+    while time.monotonic() < deadline and seen != key:
+        time.sleep(0.5)
+        seen = session.caller("get_episode")["authorization"]
+    return seen
+
+
+def test_a_connector_without_a_token_points_the_client_at_its_sign_in(gateway: Gateway) -> None:
+    """A 401 naming the metadata, which names the gateway as the authorization server."""
+    response = httpx.post(f"{gateway.url}/mcp", json={}, timeout=30)
+
+    assert response.status_code == 401
+    metadata = f"{gateway.url}/.well-known/oauth-protected-resource/mcp"
+    assert response.headers["www-authenticate"] == f'Bearer resource_metadata="{metadata}"'
+    resource = httpx.get(metadata, timeout=30).json()
+    assert resource["resource"] == f"{gateway.url}/mcp"
+    assert resource["authorization_servers"] == [f"{gateway.url}/mcp"]
+    assert "offline_access" in resource["scopes_supported"]
+
+
+def test_a_connector_behind_tls_names_its_public_address(gateway: Gateway) -> None:
+    """Behind the ingress, the scheme comes from `X-Forwarded-Proto` and the host from `Host`."""
+    public = {"Host": "mcp.example.org", "X-Forwarded-Proto": "https"}
+
+    response = httpx.post(f"{gateway.url}/mcp", json={}, headers=public, timeout=30)
+    metadata = "https://mcp.example.org/.well-known/oauth-protected-resource/mcp"
+    assert response.headers["www-authenticate"] == f'Bearer resource_metadata="{metadata}"'
+    resource = httpx.get(
+        f"{gateway.url}/.well-known/oauth-protected-resource/mcp", headers=public, timeout=30
+    ).json()
+    assert resource["resource"] == "https://mcp.example.org/mcp"
+    assert resource["authorization_servers"] == ["https://mcp.example.org/mcp"]
+
+
+def test_a_connector_hands_out_authentiks_endpoints_and_its_one_client(gateway: Gateway) -> None:
+    """Authentik registers no clients: the gateway answers with the pre-registered one."""
+    server = httpx.get(
+        f"{gateway.url}/.well-known/oauth-authorization-server/mcp", timeout=30
+    ).json()
+    assert server["authorization_endpoint"] == (
+        f"{AUTHENTIK_URL}/application/o/claude-ai/authorize/"
+    )
+    assert server["registration_endpoint"].endswith("/mcp/client-registration")
+
+    registered = httpx.post(
+        f"{gateway.url}/.well-known/oauth-authorization-server/mcp/client-registration",
+        json={"redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]},
+        timeout=30,
+    )
+    assert registered.json()["client_id"] == "claude-ai"
+
+
+def test_a_connector_serves_a_declared_person_every_tool(gateway: Gateway) -> None:
+    session = _connector(gateway, _token("kim"))
+
+    assert session.initialize() == 200
+    assert len(session.tools()) == 6
+    assert session.caller("set_verdict") == {
+        "authorization": BRIDGE_KEY,
+        "client": "claude-ai",
+        "enduser": "kim",
+    }
+
+
+def test_a_connector_refuses_anyone_else(gateway: Gateway) -> None:
+    """Authentik may sign in someone the declaration does not name: the handshake fails at the
+    gateway, before the call to the bridge."""
+    session = _connector(gateway, _token("stranger"))
+
+    assert session.initialize() == 500
+    refusal = session.request("initialize", protocolVersion="2025-11-25", capabilities={})
+    assert refusal["error"]["message"].endswith("authorization failed")
+
+
+def test_a_connector_caller_never_names_itself_to_the_bridge(gateway: Gateway) -> None:
+    """The person comes from the token, whatever headers the client sends."""
+    forged = {"X-Client-Id": "lares", "X-Enduser-Id": "lou"}
+    session = _Session(gateway, "claude-ai", _token("kim"), forged, path="/mcp")
+
+    assert session.initialize() == 200
+    assert session.caller("get_episode") == {
+        "authorization": BRIDGE_KEY,
+        "client": "claude-ai",
+        "enduser": "kim",
+    }
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [{"aud": "another-application"}, {"iss": "http://authentik:9000/application/o/other/"}],
+)
+def test_a_connector_refuses_a_token_of_another_application(
+    gateway: Gateway, claims: dict[str, str]
+) -> None:
+    assert _connector(gateway, _token("kim", **claims)).initialize() == 401

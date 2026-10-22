@@ -11,8 +11,7 @@ import pytest
 from lares_agent_trigger.persons import PersonsFile, load_persons_file
 from lares_agent_trigger.use_cases import load_use_case_file
 
-# The messenger holds lares, lares-control and github; the bridge's clients are
-# lares-agent, lares-control, lares-memory and lares-wiki.
+# The messenger holds lares, lares-control and github; claude-ai is the connector.
 USE_CASES = Path(__file__).parent / "rendering" / "use-cases.yaml"
 
 VALID = """
@@ -51,6 +50,7 @@ persons:
   - name: kim
     discord: admin
     tools: [lares, lares-control, github]
+    connectors: [claude-ai]
     model: owner-subscription
     keep_answers: true
     enabled: true
@@ -252,7 +252,8 @@ def test_every_field_of_a_person(tmp_path: Path) -> None:
         "owner-subscription",
     )
     assert kim.keep_answers is True
-    assert (lou.discord, lou.keep_answers) == (True, False)
+    assert kim.connectors == ("claude-ai",)
+    assert (lou.discord, lou.keep_answers, lou.connectors) == (True, False, ())
     assert (max_.discord, max_.dormant) == (None, "Waits for their own account.")
     assert declared.source_of(lou).name == "free-account"
 
@@ -272,7 +273,7 @@ def test_a_dormant_person_may_name_what_does_not_exist(tmp_path: Path) -> None:
     """It renders nothing: its tools and its source are checked once it is enabled."""
     text = (VALID + PERSONS).replace(
         "    tools: [lares]\n    model: free-account\n    dormant:",
-        "    tools: [lares-wiki]\n    model: family-plan\n    dormant:",
+        "    tools: [lares-wiki]\n    connectors: [openai]\n    model: family-plan\n    dormant:",
     )
 
     assert _load(tmp_path, text).persons["max"].tools == ("lares-wiki",)
@@ -300,25 +301,10 @@ def test_the_handle_default_is_refused(tmp_path: Path) -> None:
         _load(tmp_path, text)
 
 
-def test_a_handle_that_is_a_bridge_client_is_refused(tmp_path: Path) -> None:
-    """The person's own client is named by the handle, beside the machine clients."""
-    text = (VALID + PERSONS).replace("  - name: lou", "  - name: lares-agent")
+def test_a_connector_nobody_declared_is_refused(tmp_path: Path) -> None:
+    text = (VALID + PERSONS).replace("    connectors: [claude-ai]\n", "    connectors: [openai]\n")
 
-    with pytest.raises(
-        ValueError, match="person lares-agent: the handle is the bridge client of tool server lares"
-    ):
-        _load(tmp_path, text)
-
-
-def test_a_handle_naming_a_persons_route_like_another_route_is_refused(tmp_path: Path) -> None:
-    """lou's own route for lares would be `lares-<handle>`; `control` makes it lares-control's."""
-    text = (VALID + PERSONS).replace("  - name: lou", "  - name: control")
-
-    with pytest.raises(
-        ValueError,
-        match="person control: their own route for lares, lares-control, is already "
-        "the route of tool server lares-control",
-    ):
+    with pytest.raises(ValueError, match="person kim: connectors: no connector named openai"):
         _load(tmp_path, text)
 
 

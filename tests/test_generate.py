@@ -8,7 +8,6 @@ those files: `UPDATE_RENDERING=1 pytest tests/test_generate.py` rewrites them.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
@@ -74,20 +73,6 @@ def _jobs(tmp_path: Path, use_cases: str | None = None) -> list[dict[str, Any]]:
     return loaded
 
 
-def _client_env(
-    tmp_path: Path, use_cases: str | None = None, persons: str | None = None
-) -> dict[str, Any]:
-    """The bridge's client variables, each a JSON value."""
-    lines = _render(tmp_path, use_cases, persons=persons).client_tools.splitlines()
-    pairs = (line.partition("=") for line in lines if not line.startswith("#"))
-    return {name: json.loads(value) for name, _, value in pairs}
-
-
-def _allowlists(tmp_path: Path, use_cases: str | None = None) -> dict[str, list[str]]:
-    loaded: dict[str, list[str]] = _client_env(tmp_path, use_cases)["MCP_AUTH_CLIENT_TOOLS"]
-    return loaded
-
-
 def _env_lines(
     tmp_path: Path,
     use_cases: str | None = None,
@@ -104,10 +89,8 @@ def _files(rendered: Rendering) -> dict[str, str]:
     return {
         "config.yaml": rendered.hermes_config,
         "cron-jobs.yaml": rendered.cron_jobs,
-        "client-tools.env": rendered.client_tools,
         "tracing.env": rendered.tracing,
         "env-template.yaml": rendered.env_template,
-        "clients-template.yaml": rendered.clients_template,
         "routes.yaml": rendered.routes,
         "routes.values.yaml": rendered.routes_values,
         "profiles/kustomization.yaml": rendered.profiles_kustomization,
@@ -180,9 +163,8 @@ def test_a_persons_surfaces_hold_their_own_tool_servers(tmp_path: Path) -> None:
         "discord": ["hermes-discord", "lares"],
         "api_server": ["lares"],
     }
-    # The default profile's entry, on lou's own route.
-    default = _config(tmp_path)["mcp_servers"]["lares"]
-    assert lou["mcp_servers"] == {"lares": {**default, "url": f"{GATEWAY}/mcp/lares-lou"}}
+    # The default profile's entry: one route per server, whoever holds it.
+    assert lou["mcp_servers"] == {"lares": _config(tmp_path)["mcp_servers"]["lares"]}
 
 
 def _values(tmp_path: Path, persons: str | None = None) -> dict[str, Any]:
@@ -395,11 +377,11 @@ def test_every_tool_server_entry_is_its_gateway_route_under_the_profiles_key(
     }
 
 
-def test_a_person_reads_the_bridge_on_a_route_of_their_own(tmp_path: Path) -> None:
-    """The gateway attaches kim's own client key there; every other route is the one route."""
+def test_a_person_reaches_every_server_on_the_servers_route(tmp_path: Path) -> None:
+    """kim's key names kim to the gateway, so kim needs no route of their own."""
     kim = _profile(tmp_path, "kim")["mcp_servers"]
 
-    assert kim["lares"]["url"] == f"{GATEWAY}/mcp/lares-kim"
+    assert kim["lares"]["url"] == f"{GATEWAY}/mcp/lares"
     assert kim["lares-control"]["url"] == f"{GATEWAY}/mcp/lares-control"
     assert kim["github"] == {
         "url": f"{GATEWAY}/mcp/github",
@@ -421,18 +403,26 @@ def _routes(
     return {route["name"]: route for route in config["binds"][0]["listeners"][0]["routes"]}
 
 
-def test_the_gateway_holds_one_route_per_tool_server_and_one_per_persons_own_client(
+def test_the_gateway_holds_one_route_per_tool_server_and_one_per_connector(
     tmp_path: Path,
 ) -> None:
-    """Every server a profile holds, once; kim and lou read the bridge on routes of their own."""
+    """Every server a profile holds, once, then every connector a person signs in to."""
     assert list(_routes(tmp_path)) == [
         "lares",
-        "lares-kim",
-        "lares-lou",
         "lares-control",
         "lares-memory",
         "github",
+        "claude-ai",
     ]
+
+
+def _keyed(tmp_path: Path, persons: str | None = None) -> dict[str, dict[str, Any]]:
+    """The routes a profile's key opens: every one but the connectors'."""
+    return {
+        name: route
+        for name, route in _routes(tmp_path, persons).items()
+        if "apiKey" in route["policies"]
+    }
 
 
 def test_each_route_takes_the_keys_of_the_profiles_holding_it_and_no_other(
@@ -441,19 +431,17 @@ def test_each_route_takes_the_keys_of_the_profiles_holding_it_and_no_other(
     """Each key a variable named after its sealed key, the one the profile's .env reads."""
     keys = {
         name: [key["key"] for key in route["policies"]["apiKey"]["keys"]]
-        for name, route in _routes(tmp_path).items()
+        for name, route in _keyed(tmp_path).items()
     }
 
     assert keys == {
-        "lares": ["${LARES_GATEWAY_KEY}"],
-        "lares-kim": ["${KIM_LARES_GATEWAY_KEY}"],
-        "lares-lou": ["${LOU_LARES_GATEWAY_KEY}"],
+        "lares": ["${LARES_GATEWAY_KEY}", "${KIM_LARES_GATEWAY_KEY}", "${LOU_LARES_GATEWAY_KEY}"],
         "lares-control": ["${KIM_LARES_CONTROL_GATEWAY_KEY}"],
         "lares-memory": ["${LARES_MEMORY_GATEWAY_KEY}"],
         "github": ["${KIM_GITHUB_GATEWAY_KEY}"],
     }
     assert all(
-        route["policies"]["apiKey"]["mode"] == "strict" for route in _routes(tmp_path).values()
+        route["policies"]["apiKey"]["mode"] == "strict" for route in _keyed(tmp_path).values()
     )
     # Without persons, the default profile holds the chat's servers on the same routes.
     assert _routes(tmp_path, NO_PERSONS)["github"]["policies"]["apiKey"]["keys"] == [
@@ -461,50 +449,58 @@ def test_each_route_takes_the_keys_of_the_profiles_holding_it_and_no_other(
     ]
 
 
-def test_a_bridge_route_signs_in_as_its_client(tmp_path: Path) -> None:
-    """The machine client of the server, or the person's own client on their route."""
+def test_a_persons_key_carries_their_handle(tmp_path: Path) -> None:
+    """The gateway names the person behind the key; the machines' key names nobody."""
+    lares = _routes(tmp_path)["lares"]["policies"]["apiKey"]["keys"]
+
+    assert lares == [
+        {"key": "${LARES_GATEWAY_KEY}"},
+        {"key": "${KIM_LARES_GATEWAY_KEY}", "metadata": {"enduser_id": "kim"}},
+        {"key": "${LOU_LARES_GATEWAY_KEY}", "metadata": {"enduser_id": "lou"}},
+    ]
+
+
+def test_each_route_names_the_caller_to_its_server(tmp_path: Path) -> None:
+    """On the call to the server, over whatever the caller sent: the route, and the key's person."""
+    routes = _routes(tmp_path)
+
+    for name in ("lares", "lares-memory", "github"):
+        (target,) = routes[name]["backends"][0]["mcp"]["targets"]
+        assert target["policies"] == {
+            "transformations": {
+                "request": {
+                    "set": {"X-Client-Id": f'"{name}"', "X-Enduser-Id": "apiKey.enduser_id"}
+                }
+            }
+        }, name
+
+
+def test_every_bridge_route_calls_the_bridge_with_the_gateways_key(tmp_path: Path) -> None:
+    """One key for the bridge, whichever route the call came in on."""
     routes = _routes(tmp_path)
 
     assert routes["lares"]["matches"] == [{"path": {"exact": "/mcp/lares"}}]
-    assert routes["lares"]["backends"] == [
-        {
-            "mcp": {
-                # A session would keep the credential it started with past a renewal.
-                "statefulMode": "stateless",
-                "targets": [
-                    {
-                        "name": "lares",
-                        "mcp": {
-                            "host": "http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local"
-                            ":8080/mcp"
-                        },
-                    }
-                ],
-            }
-        }
+    mcp = routes["lares"]["backends"][0]["mcp"]
+    # A session would keep the credential it started with past a renewal.
+    assert mcp["statefulMode"] == "stateless"
+    assert [(target["name"], target["mcp"]) for target in mcp["targets"]] == [
+        ("lares", {"host": "http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp"})
     ]
-    keys = "/etc/agentgateway/credentials/agentgateway-keys"
-    assert routes["lares"]["policies"]["backendAuth"] == {
-        "key": {"value": {"file": f"{keys}/lares-agent"}}
+    key = {
+        "key": {
+            "value": {"file": "/etc/agentgateway/credentials/agentgateway-keys/lares-mcp-bridge"}
+        }
     }
-    assert routes["lares-kim"]["policies"]["backendAuth"] == {
-        "key": {"value": {"file": f"{keys}/kim"}}
-    }
-    assert routes["lares-control"]["policies"]["backendAuth"] == {
-        "key": {"value": {"file": f"{keys}/lares-control"}}
-    }
+    for name in ("lares", "lares-control", "lares-memory", "claude-ai"):
+        assert routes[name]["policies"]["backendAuth"] == key, name
 
 
 def test_an_http_route_attaches_its_credential_from_the_mounted_secret(tmp_path: Path) -> None:
     github = _routes(tmp_path)["github"]
 
     assert github["matches"] == [{"path": {"exact": "/mcp/github"}}]
-    assert github["backends"][0]["mcp"]["targets"] == [
-        {
-            "name": "github",
-            "mcp": {"host": "http://github-mcp-server.agents.svc.cluster.local:8082/mcp"},
-        }
-    ]
+    (target,) = github["backends"][0]["mcp"]["targets"]
+    assert target["mcp"] == {"host": "http://github-mcp-server.agents.svc.cluster.local:8082/mcp"}
     # On Authorization, the gateway's default: a bearer token.
     assert github["policies"]["backendAuth"] == {
         "key": {"value": {"file": "/etc/agentgateway/credentials/github-mcp-server-token/token"}}
@@ -533,10 +529,6 @@ def test_each_route_serves_only_its_servers_tools(tmp_path: Path) -> None:
             'mcp.tool.name == "pull_request_read"',
         ]
     }
-    assert (
-        routes["lares-kim"]["policies"]["mcpAuthorization"]
-        == (routes["lares"]["policies"]["mcpAuthorization"])
-    )
 
 
 def test_a_glob_inside_a_name_becomes_an_anchored_pattern(tmp_path: Path) -> None:
@@ -586,7 +578,8 @@ def test_every_key_the_routes_name_is_a_variable_or_file_the_values_provide(
 
     named = set(re.findall(r"\$\{(\w+)\}", rendered.routes))
     read = set(re.findall(r"file: (\S+)", rendered.routes))
-    assert named == variables
+    # And the cluster's Authentik in a connector's issuer, which each overlay sets.
+    assert named == variables | {"AUTHENTIK_URL"}
     assert read == files
 
 
@@ -623,7 +616,7 @@ def test_the_gateway_reads_its_keys_and_mounts_its_routes_and_credentials(tmp_pa
                 "name": "agentgateway-keys",
                 "secret": {
                     "secretName": "agentgateway-keys",
-                    "items": items("lares-agent", "kim", "lou", "lares-control", "lares-memory"),
+                    "items": items("lares-mcp-bridge"),
                 },
             },
             {
@@ -710,38 +703,6 @@ LARES_TOOLS = [
 ]
 
 
-def test_each_client_of_a_server_in_use_gets_its_allowlist(tmp_path: Path) -> None:
-    """The machines' clients first, then each person's own, which reads what lares reads.
-
-    kim places requests through the machine client of lares-control.
-    """
-    assert _allowlists(tmp_path) == {
-        "lares-agent": LARES_TOOLS,
-        "lares-control": ["request_knx_write", "get_write_request"],
-        "lares-memory": ["get_memory", "append_memory"],
-        "kim": LARES_TOOLS,
-        "lou": LARES_TOOLS,
-    }
-
-
-def test_a_person_who_reads_no_bridge_server_has_no_client(tmp_path: Path) -> None:
-    """The bridge refuses a person without a key; a GitHub reader needs none of it."""
-    persons = _PERSONS_TEXT.replace(
-        "    tools: [lares]\n    model: free-account\n    enabled:",
-        "    tools: [github]\n    model: free-account\n    enabled:",
-    )
-
-    assert _client_env(tmp_path, persons=persons)["MCP_AUTH_PERSONS"] == ["kim"]
-    assert "lou" not in _client_env(tmp_path, persons=persons)["MCP_AUTH_CLIENT_TOOLS"]
-
-
-def test_the_bridge_knows_each_persons_client_as_a_person(tmp_path: Path) -> None:
-    """Its rows are filtered by the handle; max is dormant."""
-    assert _client_env(tmp_path)["MCP_AUTH_PERSONS"] == ["kim", "lou"]
-    assert _client_env(tmp_path, persons=NO_PERSONS)["MCP_AUTH_PERSONS"] == []
-    # GitHub's server is no bridge client: the token and the server bound it.
-
-
 def test_the_default_profiles_env_names_each_key_its_config_reads(tmp_path: Path) -> None:
     """Each value is one sealed key, named after its variable; the template names keys only."""
     assert _env_lines(tmp_path, persons=NO_PERSONS) == [
@@ -819,35 +780,14 @@ def test_without_a_chat_the_default_profile_holds_no_bot_token(tmp_path: Path) -
     ]
 
 
-def test_the_bridges_clients_file_is_composed_from_one_sealed_key_per_client(
-    tmp_path: Path,
-) -> None:
-    """The bridge's clients of the servers in use, each key sealed under the client's name."""
-    patch = yaml.safe_load(_render(tmp_path).clients_template)
-
-    assert patch["metadata"] == {
-        "name": "lares-mcp-bridge-auth-clients",
-        "namespace": "lares-mcp-bridge",
-    }
-    assert patch["spec"]["template"]["data"]["clients.json"] == (
-        "{\n"
-        """  "lares-agent": {{ index . "lares-agent" | toJson }},\n"""
-        """  "lares-control": {{ index . "lares-control" | toJson }},\n"""
-        """  "lares-memory": {{ index . "lares-memory" | toJson }},\n"""
-        """  "kim": {{ index . "kim" | toJson }},\n"""
-        """  "lou": {{ index . "lou" | toJson }}\n"""
-        "}\n"
-    )
-
-
 def test_a_dormant_use_case_renders_nothing(tmp_path: Path) -> None:
-    """The dormant entry is the only one naming lares-wiki: no entry, no job, no allowlist."""
+    """The dormant entry is the only one naming lares-wiki: no entry, no job, no route."""
     text = USE_CASES.read_text(encoding="utf-8")
     without = text[: text.index("  - name: basalte-prose")]
 
     assert _render(tmp_path, without) == _render(tmp_path)
     assert "lares-wiki" not in _config(tmp_path)["mcp_servers"]
-    assert "lares-wiki" not in _allowlists(tmp_path)
+    assert "lares-wiki" not in _routes(tmp_path)
 
 
 def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> None:
@@ -957,14 +897,10 @@ def _cli(tmp_path: Path, use_cases: Path = USE_CASES, persons: Path = PERSONS) -
             str(tmp_path / "out" / "config.yaml"),
             "--cron-jobs",
             str(tmp_path / "out" / "cron-jobs.yaml"),
-            "--client-tools",
-            str(tmp_path / "out" / "client-tools.env"),
             "--tracing",
             str(tmp_path / "out" / "tracing.env"),
             "--env-template",
             str(tmp_path / "out" / "env-template.yaml"),
-            "--clients-template",
-            str(tmp_path / "out" / "clients-template.yaml"),
             "--routes",
             str(tmp_path / "out" / "routes.yaml"),
             "--routes-values",
@@ -1035,3 +971,48 @@ def test_an_invalid_person_declaration_fails_with_the_field_named(
     assert "persons.yaml" in error
     assert "acount" in error
     assert not any((tmp_path / "out").iterdir())
+
+
+def test_a_connector_signs_its_persons_in_through_authentik(tmp_path: Path) -> None:
+    """Its path and the metadata beside it; Authentik registers no clients, so the gateway hands
+    out the pre-registered one."""
+    claude = _routes(tmp_path)["claude-ai"]
+
+    assert claude["matches"] == [
+        {"path": {"exact": "/mcp"}},
+        {"path": {"exact": "/.well-known/oauth-protected-resource/mcp"}},
+        {"path": {"exact": "/.well-known/oauth-authorization-server/mcp"}},
+        {"path": {"exact": "/.well-known/oauth-authorization-server/mcp/client-registration"}},
+    ]
+    assert claude["policies"]["mcpAuthentication"] == {
+        "issuer": "${AUTHENTIK_URL}/application/o/claude-ai/",
+        "audiences": ["claude-ai"],
+        "provider": {"authentik": {}},
+        "clientId": "claude-ai",
+        "resourceMetadata": {
+            "scopesSupported": ["openid", "profile", "email", "offline_access"],
+            "bearerMethodsSupported": ["header"],
+        },
+    }
+
+
+def test_a_connector_serves_its_tools_to_its_persons_only(tmp_path: Path) -> None:
+    """Anyone else Authentik signs in is refused; the person is named to the server."""
+    claude = _routes(tmp_path)["claude-ai"]
+
+    assert claude["policies"]["mcpAuthorization"] == {"rules": ['mcp.tool.name.startsWith("")']}
+    # On the way to the server, after the sign-in has read the token.
+    assert claude["backends"][0]["policies"] == {
+        "authorization": {"rules": ['jwt.preferred_username in ["kim"]']}
+    }
+    (target,) = claude["backends"][0]["mcp"]["targets"]
+    assert target["policies"]["transformations"]["request"]["set"] == {
+        "X-Client-Id": '"claude-ai"',
+        "X-Enduser-Id": "jwt.preferred_username",
+    }
+
+
+def test_a_connector_nobody_signs_in_to_has_no_route(tmp_path: Path) -> None:
+    persons = _PERSONS_TEXT.replace("    connectors: [claude-ai]\n", "")
+
+    assert "claude-ai" not in _routes(tmp_path, persons)

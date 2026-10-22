@@ -42,6 +42,7 @@ persons:
   - name: kim
     discord: admin
     tools: [lares, lares-control, github]
+    connectors: [claude-ai]
     model: owner-subscription
     keep_answers: true
     enabled: true

@@ -1,6 +1,7 @@
 # Every surface once: a chat with a request server and GitHub's reads, an
 # event, a schedule that reads and keeps its memory through the cron surface,
-# and a dormant schedule naming a writing server nothing else uses.
+# a dormant schedule naming a writing server nothing else uses, and a
+# connector a person signs in to.
 
 ledger_hook:
   trigger_url: http://lares-agent-trigger.agents.svc.cluster.local:8080
@@ -15,32 +16,36 @@ gateway:
 
 tool_servers:
   - name: lares
+    kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-agent
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [list_*, get_current_knx, get_episode, query_*, correlate_events, search_wiki]
 
   - name: lares-control
+    kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-control
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_CONTROL_GATEWAY_KEY
     timeout_seconds: 30
     access: request
     tools: [request_knx_write, get_write_request]
 
   - name: lares-memory
+    kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-memory
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_MEMORY_GATEWAY_KEY
     timeout_seconds: 30
     access: memory
     tools: [get_memory, append_memory]
 
   - name: lares-wiki
+    kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
-    client: lares-wiki
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     key_env: LARES_WIKI_GATEWAY_KEY
     timeout_seconds: 60
     access: write
@@ -57,6 +62,15 @@ tool_servers:
     timeout_seconds: 60
     access: read
     tools: [get_*, list_*, search_*, issue_read, pull_request_read]
+
+connectors:
+  - name: claude-ai
+    path: /mcp
+    issuer: ${AUTHENTIK_URL}/application/o/claude-ai/
+    client_id: claude-ai
+    url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
+    credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
+    tools: ["*"]
 
 use_cases:
   - name: messenger
