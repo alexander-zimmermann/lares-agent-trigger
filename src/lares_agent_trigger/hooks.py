@@ -6,7 +6,8 @@ contract). The receiver takes three of them:
 
 - `post_api_request`, once per call to the model inside a turn: the tokens,
   the model and its source, when the call started and ended, how many tools
-  it asked for, and what it said.
+  it asked for, and what it said. A background review the harness forks
+  after a chat answer reports its calls here too, under a task of its own.
 - `post_tool_call`, once per tool the model asked for, as the tool returns:
   its name, its call id, how long it took and how it ended. What it was asked
   and what it returned come along and are dropped here, unread.
@@ -56,6 +57,9 @@ class ModelCall:
     # Empty for a call the harness made outside a session.
     session_id: str | None
     turn_id: str
+    # The task the turn ran under: a chat turn's session id, a background
+    # review's a fresh one of its own, a cron run's `cron:<job id>:<execution id>`.
+    task_id: str | None
     platform: str
     # The call's number within its turn: what tells a redelivery from the next call.
     number: int
@@ -181,6 +185,7 @@ def _model_call(raw: dict[str, Any], extra: dict[str, Any]) -> ModelCall:
         profile=_text(raw, "profile"),
         session_id=_optional_text(raw.get("session_id")),
         turn_id=_text(extra, "turn_id"),
+        task_id=_optional_text(extra.get("task_id")),
         platform=_text(extra, "platform"),
         number=_count(extra, "api_call_count"),
         model=_optional_text(extra.get("model")),

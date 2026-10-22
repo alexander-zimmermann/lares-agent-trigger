@@ -27,12 +27,14 @@ from .fakes import (
     CRON_SESSION,
     CRON_TASK,
     EXPLANATION,
+    PERSONS,
     fake_hermes,
     fake_job,
     model_call,
     sample,
     sign,
     turn_ended,
+    until,
 )
 
 Rows = Callable[[], list[dict[str, Any]]]
@@ -44,53 +46,6 @@ HOOK = "/hooks/hermes"
 
 # A cron test never reaches the Runs API routes, an event test never the Jobs API.
 pytestmark = pytest.mark.respx(assert_all_called=False)
-
-# The owner on the machines' subscription, one more person on an account of
-# their own, and one who moved out.
-PERSONS = """
-default_profile:
-  model: owner-subscription
-
-model_sources:
-  - name: owner-subscription
-    provider: openai-codex
-    model: gpt-6-sol
-    account: shared-with-default
-    bound: subscription
-    fallback:
-      - provider: openai-api
-        model: gpt-6-luna
-        bound: capped
-        price: {input: 0.10, cached_input: 0.01, output: 0.50}
-  - name: free-account
-    provider: openai-codex
-    model: gpt-6-luna
-    account: per-person
-    bound: subscription
-    fallback:
-      - provider: openai-api
-        model: gpt-6-luna
-        bound: capped
-        price: {input: 0.20, cached_input: 0.02, output: 1.00}
-
-persons:
-  - name: kim
-    discord: admin
-    tools: [lares]
-    model: owner-subscription
-    keep_answers: true
-    enabled: true
-  - name: lou
-    discord: true
-    tools: [lares]
-    model: free-account
-    enabled: true
-  - name: max
-    discord: true
-    tools: [lares]
-    model: free-account
-    dormant: Moved out.
-"""
 
 
 @pytest.fixture
@@ -453,9 +408,9 @@ async def test_a_persons_turn_that_never_ended_is_a_trace_that_names_them(
         model_call(1, profile="lou", session_id="web_7d1e4a", platform="api_server", turn="0rphan"),
     )
 
-    # Every tally is past its hour from here on; the next call drops it.
+    # Every tally is past its hour from here on; the sweep comes round on its own.
     monkeypatch.setattr(turn_runs, "_TALLY_LIFETIME_SECONDS", -1.0)
-    await _deliver(client, model_call(1, profile="kim", content=ANSWER))
+    await until(spans.get_finished_spans)
 
     assert rows() == []
     (root,) = [span for span in spans.get_finished_spans() if span.parent is None]

@@ -47,6 +47,11 @@ discord:
     - retry
     - undo
 
+# Profile notes: a background review every 5th message of a session.
+memory:
+  memory_enabled: true
+  nudge_interval: 5
+
 # Rendered from persons.yaml: the default profile's source, its fallbacks in order,
 # and the profile's directory, where Hermes discovers the context files.
 model:

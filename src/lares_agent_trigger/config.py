@@ -105,6 +105,8 @@ class Settings(NatsSettings):
     # How long an event run waits, once over, for its model calls to arrive
     # through the hook before it is recorded without them.
     turn_wait_seconds: float = 5.0
+    # How often the turns whose end never came are given up and counted.
+    sweep_interval_seconds: float = 60.0
     # The key the trigger's own API takes on the same port: the bridge holds
     # it too and forwards its start_run tool with it.
     api_key: str = Field(default="", repr=False)
