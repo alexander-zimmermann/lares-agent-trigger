@@ -204,10 +204,12 @@ class FakeGitHub:
             ("GET", r"", self._repository),
             ("GET", r"/git/ref/heads/(.+)", self._get_ref),
             ("POST", r"/git/refs", self._create_ref),
+            ("PATCH", r"/git/refs/heads/(.+)", self._update_ref),
             ("GET", r"/contents/(.+)", self._get_contents),
             ("PUT", r"/contents/(.+)", self._put_contents),
             ("GET", r"/labels/([^/]+)", self._get_label),
             ("POST", r"/pulls", self._create_pull),
+            ("GET", r"/pulls", self._list_pulls),
             ("GET", r"/pulls/(\d+)", self._get_pull),
             ("POST", r"/issues", self._create_issue),
             ("GET", r"/issues/(\d+)", self._get_issue),
@@ -305,6 +307,26 @@ class FakeGitHub:
         repo.branches[branch] = sha
         return httpx.Response(201, json={"ref": ref, "object": {"type": "commit", "sha": sha}})
 
+    def _update_ref(
+        self, _request: httpx.Request, repo: FakeRepo, body: Any, branch: str
+    ) -> httpx.Response:
+        """Point a branch at another commit; without `force` only one it already points at.
+
+        GitHub takes a fast-forward without `force`; the fake keeps no history
+        to tell one, so it takes none.
+        """
+        sha = str(body.get("sha", ""))
+        if branch not in repo.branches:
+            return _unprocessable("Reference does not exist")
+        if sha not in repo.commits:
+            return _unprocessable("Object does not exist")
+        if body.get("force") is not True and sha != repo.branches[branch]:
+            return _unprocessable("Update is not a fast forward")
+        repo.branches[branch] = sha
+        return httpx.Response(
+            200, json={"ref": f"refs/heads/{branch}", "object": {"type": "commit", "sha": sha}}
+        )
+
     def _get_contents(
         self, request: httpx.Request, repo: FakeRepo, _body: Any, path: str
     ) -> httpx.Response:
@@ -379,6 +401,19 @@ class FakeGitHub:
             return _unprocessable(
                 "Validation Failed", errors=[{"field": "base", "code": "invalid"}]
             )
+        if any(
+            pull["state"] == "open" and pull.get("head", {}).get("ref") == head
+            for pull in repo.pulls.values()
+        ):
+            return _unprocessable(
+                "Validation Failed",
+                errors=[
+                    {
+                        "message": f"A pull request already exists for {GITHUB_OWNER}:{head}.",
+                        "code": "custom",
+                    }
+                ],
+            )
         if repo.branches[head] == repo.branches[base]:
             return _unprocessable(
                 "Validation Failed",
@@ -400,6 +435,25 @@ class FakeGitHub:
         }
         repo.pulls[number] = pull
         return httpx.Response(201, json=pull)
+
+    def _list_pulls(self, request: httpx.Request, repo: FakeRepo, _body: Any) -> httpx.Response:
+        """The pulls in one state (`open` unless asked), `head` filtering as `<user>:<branch>`.
+
+        GitHub documents `head` in that form only; any other is refused here
+        rather than guessed at.
+        """
+        state = request.url.params.get("state", "open")
+        head = request.url.params.get("head")
+        if head is not None and not head.startswith(f"{GITHUB_OWNER}:"):
+            return _unprocessable(f"head {head!r} names no user; the trigger always names one")
+        branch = head.partition(":")[2] if head is not None else None
+        found = [
+            pull
+            for pull in repo.pulls.values()
+            if state in ("all", pull["state"])
+            and (branch is None or pull.get("head", {}).get("ref") == branch)
+        ]
+        return httpx.Response(200, json=found)
 
     def _get_pull(
         self, _request: httpx.Request, repo: FakeRepo, _body: Any, number: str

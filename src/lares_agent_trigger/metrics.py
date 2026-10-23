@@ -142,6 +142,13 @@ class Metrics:
             ["use_case", "state"],  # open | merged | closed | failed
             registry=self.registry,
         )
+        # The owner's corrections of a repo skill, as pull requests.
+        self.skill_pull_requests = Counter(
+            "agent_trigger_skill_pull_requests_total",
+            "The owner's corrections of a repo skill on GitHub, by what became of them.",
+            ["outcome"],  # opened | committed | failed
+            registry=self.registry,
+        )
         self.run_duration = Histogram(
             "agent_trigger_run_duration_seconds",
             "Wall-clock time from starting a harness run to its terminal state.",

@@ -10,7 +10,10 @@ contract). The receiver takes four of them:
   after a chat answer reports its calls here too, under a task of its own.
 - `post_tool_call`, once per tool the model asked for, as the tool returns:
   its name, its call id, how long it took and how it ended. What it was asked
-  and what it returned come along and are dropped here, unread.
+  and what it returned come along and are dropped here, unread — except for a
+  `skill_manage` write the read-only mount of the repo skills refused: what it
+  asked is kept, for the owner's correction to become a pull request
+  (`skill_corrections.py`).
 - `api_request_error`, once per attempt at a call that failed, whether the
   harness tries again, falls back or gives up: the source and model it asked,
   the status they answered and the harness's class of the failure. The
@@ -52,6 +55,9 @@ _ARGUMENTS_LIMIT = 300
 _CRON_TASK_PREFIX = "cron"
 # How a tool that returned fine ended.
 _TOOL_OK = "ok"
+# The tool that writes skills, and how the read-only mount refuses its write.
+_SKILL_TOOL = "skill_manage"
+_READ_ONLY = "Read-only file system"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +92,17 @@ class ModelCall:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillWrite:
+    """A `skill_manage` call whose write the read-only mount refused: who asked, and what."""
+
+    # The profile that asked: `default` for the machines'.
+    profile: str
+    session_id: str | None
+    # The call's arguments as the harness sent them (`skill_corrections.py` reads them).
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCall:
     """One tool the model asked for, as it returned: never what it was asked or returned."""
 
@@ -99,6 +116,8 @@ class ToolCall:
     ended_at: float
     # What went wrong in the harness's class (`tool_error`, `blocked`, …); None when nothing did.
     error_type: str | None
+    # A skill write the read-only mount refused; the one tool whose arguments are kept.
+    skill_write: SkillWrite | None = None
 
     @property
     def started_at(self) -> float:
@@ -256,17 +275,32 @@ def _tools(calls: Any) -> tuple[ToolUse, ...]:
 
 
 def _tool_call(raw: dict[str, Any], extra: dict[str, Any]) -> ToolCall:
-    # `tool_input`, `result` and `error_message` are never read.
+    # `result` is never read; `tool_input` and `error_message` only for a refused skill write.
     status = _text(extra, "status")
     # A tool that returned fine says `ok`; a block names no error type of its own.
     error_type = None if status == _TOOL_OK else _optional_text(extra.get("error_type")) or status
+    name = _text(raw, "tool_name")
+    arguments = raw.get("tool_input")
+    skill_write = None
+    if (
+        name == _SKILL_TOOL
+        and error_type is not None
+        and _READ_ONLY in str(extra.get("error_message") or "")
+        and isinstance(arguments, dict)
+    ):
+        skill_write = SkillWrite(
+            profile=_text(raw, "profile"),
+            session_id=_optional_text(raw.get("session_id")),
+            arguments=arguments,
+        )
     return ToolCall(
         turn_id=_optional_text(extra.get("turn_id")),
         call_id=_optional_text(extra.get("tool_call_id")),
-        name=_text(raw, "tool_name"),
+        name=name,
         seconds=_count(extra, "duration_ms") / 1000,
         ended_at=_fired_at(raw),
         error_type=error_type,
+        skill_write=skill_write,
     )
 
 

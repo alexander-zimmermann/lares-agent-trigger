@@ -187,6 +187,11 @@ class Person(_Strict):
     def is_enabled(self) -> bool:
         return self.enabled is True
 
+    @property
+    def is_admin(self) -> bool:
+        """Runs every slash command, and may change the house: the owner."""
+        return self.discord == "admin"
+
 
 class _File(_Strict):
     default_profile: DefaultProfile
@@ -331,7 +336,7 @@ def _check_one_shares_the_default_account(
 def _check_discord_admin(path: Path, persons: Iterable[Person]) -> None:
     """Refuse persons on Discord without an admin: nobody could run an admin command."""
     on_discord = [person for person in persons if person.discord is not None]
-    if on_discord and not any(person.discord == "admin" for person in on_discord):
+    if on_discord and not any(person.is_admin for person in on_discord):
         raise ValueError(
             f"{path}: persons {', '.join(person.name for person in on_discord)} are on Discord, "
             "and none is `discord: admin`"

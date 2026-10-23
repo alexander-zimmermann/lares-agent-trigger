@@ -96,6 +96,10 @@ class Settings(NatsSettings):
     github_request_timeout_seconds: float = 30.0
     # How often the open pull requests in the ledger are looked up on GitHub.
     read_back_interval_seconds: float = 86400.0
+    # Where the repo skills live, which the harness mounts read-only: the
+    # owner's corrections of one become pull requests against it.
+    skills_repository: str = "lares"
+    skills_path: str = "kubernetes/applications/hermes/base/skills"
 
     # The receiver the harness's outbound hook posts every finished chat and
     # cron turn to, and the HMAC secret both sides share.

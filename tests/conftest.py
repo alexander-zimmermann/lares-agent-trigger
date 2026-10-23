@@ -65,6 +65,7 @@ from lares_agent_trigger.persons import load_persons_file
 from lares_agent_trigger.pricing import Pricing
 from lares_agent_trigger.receiver import create_app
 from lares_agent_trigger.schedules import Schedules
+from lares_agent_trigger.skill_corrections import SkillCorrections
 from lares_agent_trigger.turn_runs import TurnRuns
 from lares_agent_trigger.use_cases import load_use_case_file, load_use_cases
 
@@ -716,7 +717,10 @@ async def service(
     episode_consumer = EpisodeConsumer(settings, runs, metrics)
     await episode_consumer.connect()
     api = TriggerApi(use_cases, runs, schedules, ledger, closer, settings.api_key, metrics)
-    app = create_app(turns, settings.hook_secret, api, metrics)
+    corrections = SkillCorrections(
+        persons, github, metrics, repository=settings.skills_repository, path=settings.skills_path
+    )
+    app = create_app(turns, settings.hook_secret, api, metrics, corrections)
     # In-process: the ASGI app behind a real HTTP client, no port and no server.
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://trigger")
     try:
@@ -727,6 +731,7 @@ async def service(
             await sweeping
         await runs.aclose()
         await turns.aclose()
+        await corrections.aclose()
         await client.aclose()
         await episode_consumer.close()
         await hermes.aclose()

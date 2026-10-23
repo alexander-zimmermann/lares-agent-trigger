@@ -389,7 +389,7 @@ def _discord_rights(on_discord: Sequence[Person]) -> dict[str, Any]:
     if not on_discord:
         return {}
     ids = {person.name: f"${{env:{_discord_user(person)}}}" for person in on_discord}
-    admins = [ids[person.name] for person in on_discord if person.discord == "admin"]
+    admins = [ids[person.name] for person in on_discord if person.is_admin]
     routes = [
         {"name": handle, "platform": "discord", "user_id": user_id, "profile": handle}
         for handle, user_id in ids.items()

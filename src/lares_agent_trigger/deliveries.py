@@ -708,10 +708,7 @@ class _GitHubTarget[B: _GitHubBlock]:
 
     async def _check_labels(self, repository: str, labels: Sequence[str]) -> None:
         for label in labels:
-            found = await self._github.call(
-                "GET", f"{self._repo(repository)}/labels/{quote(label, safe='')}", expect={200, 404}
-            )
-            if found.status_code == 404:
+            if not await self._github.has_label(repository, label):
                 raise DeliveryError(f"{repository} has no label {label}")
 
 
@@ -753,26 +750,12 @@ class GitHubPullRequestDelivery(_GitHubTarget[_PullRequestBlock]):
         base = str(found.json()["default_branch"])
         ref = await self._github.call("GET", f"{repo}/git/ref/heads/{quote(base)}", expect={200})
         head_sha = str(ref.json()["object"]["sha"])
-        current = await self._github.call(
-            "GET",
-            f"{repo}/contents/{quote(block.path)}",
-            params={"ref": head_sha},
-            expect={200, 404},
-        )
-        original: str | None = None
-        blob_sha: str | None = None
-        if current.status_code == 200:
-            file = current.json()
-            if not isinstance(file, dict) or file.get("type") != "file":
-                raise DeliveryError(
-                    f"block {number}: {block.path} in {block.repository} is no file"
-                )
-            if file.get("encoding") != "base64":
-                raise DeliveryError(
-                    f"block {number}: {block.path} is too large for the contents API"
-                )
-            original = base64.b64decode(file["content"]).decode("utf-8")
-            blob_sha = str(file["sha"])
+        try:
+            current = await self._github.file(block.repository, block.path, head_sha)
+        except GitHubError as exc:
+            raise DeliveryError(f"block {number}: {exc}") from exc
+        original = current.content if current is not None else None
+        blob_sha = current.sha if current is not None else None
         try:
             content = apply_diff(original, block.diff, block.path)
         except PatchError as exc:

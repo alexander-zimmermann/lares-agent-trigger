@@ -28,8 +28,9 @@ from starlette.routing import Route
 
 from .api import TriggerApi
 from .hermes import HermesError
-from .hooks import parse_hook, verify_signature
+from .hooks import ToolCall, parse_hook, verify_signature
 from .metrics import Metrics
+from .skill_corrections import SkillCorrections
 from .turn_runs import Outcome, TurnRuns
 
 logger = logging.getLogger(__name__)
@@ -41,8 +42,18 @@ _SIGNATURE_HEADER = "X-Hermes-Signature-256"
 HookOutcome = Outcome | Literal["refused", "invalid", "error"]
 
 
-def create_app(turns: TurnRuns, secret: str, api: TriggerApi, metrics: Metrics) -> Starlette:
-    """The ASGI app: the route the harness's hook posts to, and the trigger's own API."""
+def create_app(
+    turns: TurnRuns,
+    secret: str,
+    api: TriggerApi,
+    metrics: Metrics,
+    corrections: SkillCorrections,
+) -> Starlette:
+    """The ASGI app: the route the harness's hook posts to, and the trigger's own API.
+
+    A skill write the read-only mount refused goes to the corrections as well,
+    which take it up once the hook is answered.
+    """
 
     async def hermes_hook(request: Request) -> JSONResponse:
         body = await request.body()
@@ -59,6 +70,8 @@ def create_app(turns: TurnRuns, secret: str, api: TriggerApi, metrics: Metrics) 
         except HermesError, httpx.HTTPError, psycopg.Error, OSError:
             logger.exception("could not handle a hook of turn %s", hook.turn_id)
             return _answer(metrics, "error", 503)
+        if isinstance(hook, ToolCall) and hook.skill_write is not None:
+            corrections.start(hook.skill_write)
         return _answer(metrics, outcome, 200)
 
     return Starlette(routes=[Route(HOOK_PATH, hermes_hook, methods=["POST"]), *api.routes()])
