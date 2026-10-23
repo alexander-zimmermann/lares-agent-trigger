@@ -1,64 +1,25 @@
 """The generator: the declarations rendered into what the harness and the gateway read.
 
 Pure: the use-case file, the person declaration and the hand-written harness
-settings in, one text per rendered file out.
+settings in, one text per rendered file out. Which files, and what each
+holds, is the README's "The generator", "The keys" and "The gateway's routes".
+This module keeps the rules the rendering follows:
 
-- The harness configuration, the default profile's: the settings copied whole,
-  comments and all, then the part this module owns — the profile's model and
-  its fallbacks, from its source, its working directory, what each surface may
-  hold, the tool server entries, each the profile's route on the gateway with
-  its key and include list, and the hook that reports every turn.
-- Each enabled person's profile config: the settings copied whole, then the
-  person's source and directory, their tool servers on Discord and the API
-  server, the harness's skill tools on the latter, and the same hook. Beside
-  the configs, the ConfigMap that holds them and the chart values that mount
-  each person's config, `.env` and shared files into their profile, and run a
-  container that streams the profile's log for Loki.
-- The cron job set: one managed job per enabled schedule use case, and one per
-  enabled script, which the harness runs without a model.
-- The sampling ratio, one variable every service of the platform reads: the
-  trigger, the bridge and the engine's CronJobs.
-- Every profile's `.env`: one line per key its config reads, naming the key it
-  is sealed under, as templates of the harness's SealedSecret.
-- The gateway's routes file: one route per tool server a profile holds, taking
-  the keys of the profiles holding it, a person's carrying their handle; and one
-  per connector a person signs in to, on its public path, through Authentik.
-  Each serves its tools, attaches its credential and names the caller to a
-  server in the cluster: the route in `X-Client-Id`, the person in
-  `X-Enduser-Id`, set by the gateway over whatever the caller sent; a server
-  outside the cluster is told nobody. It holds no key: a route's keys are
-  variables the gateway expands, a credential a file. Beside it, the chart values
-  that set those variables from the gateway's SealedSecret and mount the routes
-  and every credential.
-
-Every value is sealed once per SealedSecret, under its own key: a variable's key
-is its name in lower case and dashed, prefixed by the handle where the value is a
-person's own.
-Sealed Secrets renders a key the SealedSecret lacks as empty without an error;
-lares checks every template and every reference against the sealed keys in pre-commit.
-
-With a person on Discord, the bot answers through the default profile, which
-routes each person's messages to their profile by the sender's id and keeps
-the event and cron surfaces only. Those rights and routes join the settings'
-own `discord` and `gateway` blocks.
-
-A dormant use case renders nothing, and neither does a dormant person, a tool
-server only dormant use cases name or a model source no profile runs on. Every
-file is written whole and opens with the generated line; lares's pre-commit
-hook writes them, so a hand edit is overwritten there.
-
-The surfaces follow how the harness resolves them. An explicit platform list
-that names no tool server hands the platform every server, so an empty one is
-the `no_mcp` sentinel. A list for Discord or cron starts with the platform's own
-composite, or the chat would lose memory and skills; an explicit Discord list
-also switches on the harness's `discord` toolset, which the settings keep
-disabled. The API server gets no composite: an event run reads, nothing else.
-A person's API server, where their web chat comes in, starts with the harness's
-own `skills` toolset instead, so what the person's profile learned holds there too.
-The Jobs API takes no list per job, so every managed cron job sees the cron
-surface, which holds every read server in use, the memory servers the schedule
-use cases name, and never a writing one; the loader keeps a memory off a
-shared surface any of its use cases would see without keeping one.
+- a dormant use case, a dormant person, a tool server only dormant use cases
+  name and a model source no profile runs on render nothing;
+- every file is written whole and opens with the generated line, so a hand
+  edit is overwritten by lares's pre-commit hook;
+- the settings are copied as text, comments and all, and may not carry a key
+  the generator owns; the keys rendered into the settings' `discord` and
+  `gateway` blocks are spliced in after the block's own keys;
+- a surface's toolset list follows how the harness resolves it: an explicit
+  list without a server name hands the surface every server, so an empty one
+  is the `no_mcp` sentinel; a list for Discord or cron starts with the
+  platform's composite, the API server gets none;
+- every value is sealed once per SealedSecret under its own key, a variable's
+  key its name lower case and dashed, a person's own prefixed by the handle;
+- a route's keys are variables the gateway expands at start, a credential a
+  file it watches, and a server outside the cluster is told nobody.
 """
 
 from __future__ import annotations
