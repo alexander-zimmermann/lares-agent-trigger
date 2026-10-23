@@ -154,21 +154,36 @@ def test_without_persons_the_profiles_config_map_is_still_generated(tmp_path: Pa
     assert empty["configMapGenerator"] == [{"name": "hermes-profiles", "files": []}]
 
 
-def test_the_rendered_keys_stand_alone_when_the_settings_have_no_such_block(
-    tmp_path: Path,
-) -> None:
-    settings = SETTINGS.read_text(encoding="utf-8")
-    without = settings[: settings.index("# One gateway")]
-    config: dict[str, Any] = yaml.safe_load(_render(tmp_path, settings=without).hermes_config)
+def test_a_profile_config_holds_no_setting(tmp_path: Path) -> None:
+    """The settings are the managed scope over every profile, never part of a profile's file."""
+    settings: dict[str, Any] = yaml.safe_load(SETTINGS.read_text(encoding="utf-8"))
+    rendered = _render(tmp_path)
 
-    assert config["gateway"] == {"profile_routes": _config(tmp_path)["gateway"]["profile_routes"]}
-    assert list(config["discord"]) == [
+    for text in (rendered.hermes_config, *rendered.profiles.values()):
+        config: dict[str, Any] = yaml.safe_load(text)
+        for key, value in settings.items():
+            if isinstance(value, dict):
+                assert not set(value) & set(config.get(key, {})), key
+            else:
+                assert key not in config, key
+    # The default profile's own `discord` and `gateway` keys are the rendered ones only.
+    default: dict[str, Any] = yaml.safe_load(rendered.hermes_config)
+    assert list(default["gateway"]) == ["profile_routes"]
+    assert list(default["discord"]) == [
         "allow_from",
         "allow_admin_from",
         "group_allow_admin_from",
         "user_allowed_commands",
         "group_user_allowed_commands",
     ]
+
+
+def test_the_settings_do_not_change_what_is_rendered(tmp_path: Path) -> None:
+    """Hermes merges them at run time; the files are the same whatever the settings hold."""
+    settings = SETTINGS.read_text(encoding="utf-8")
+    without = settings[: settings.index("# One gateway")]
+
+    assert _render(tmp_path, settings=without) == _render(tmp_path)
 
 
 def test_without_a_discord_person_the_default_profile_renders_as_without_persons(
@@ -367,17 +382,6 @@ def test_settings_carrying_a_rendered_key_of_a_shared_block_are_refused(
     settings = SETTINGS.read_text(encoding="utf-8").replace(f"{block}:\n", f"{block}:\n  {rest}\n")
 
     with pytest.raises(ValueError, match=f"`{block}.{name}` is rendered from persons.yaml"):
-        _render(tmp_path, settings=settings)
-
-
-def test_a_shared_block_in_flow_style_is_refused(tmp_path: Path) -> None:
-    """The rendered keys join the block line by line, which a flow mapping has none of."""
-    settings = SETTINGS.read_text(encoding="utf-8").replace(
-        "discord:\n  # In a channel, only when mentioned.\n  require_mention: true\n",
-        "discord: {require_mention: true}\n",
-    )
-
-    with pytest.raises(ValueError, match="`discord` is written as a block mapping"):
         _render(tmp_path, settings=settings)
 
 
