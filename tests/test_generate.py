@@ -238,9 +238,9 @@ def _routes(
 
 
 def test_without_persons_the_default_profile_holds_the_chats_servers(tmp_path: Path) -> None:
-    """Its key alone opens the routes of the chat's servers, github among them."""
+    """Its one key opens the routes of the chat's servers, github among them."""
     assert _routes(tmp_path, NO_PERSONS)["github"]["policies"]["apiKey"]["keys"] == [
-        {"key": "${GITHUB_GATEWAY_KEY}"}
+        {"key": "${GATEWAY_KEY}"}
     ]
 
 
@@ -325,12 +325,9 @@ def test_the_default_profiles_env_names_each_key_its_config_reads(tmp_path: Path
         # The chat is on
         """DISCORD_BOT_TOKEN='{{ index . "discord-bot-token" }}'""",
         """LARES_AGENT_TRIGGER_HOOK_SECRET='{{ index . "lares-agent-trigger-hook-secret" }}'""",
-        # Its gateway key for each server in use; the dormant lares-wiki is not here,
-        # and no server's own credential is
-        """LARES_GATEWAY_KEY='{{ index . "lares-gateway-key" }}'""",
-        """LARES_CONTROL_GATEWAY_KEY='{{ index . "lares-control-gateway-key" }}'""",
-        """LARES_MEMORY_GATEWAY_KEY='{{ index . "lares-memory-gateway-key" }}'""",
-        """GITHUB_GATEWAY_KEY='{{ index . "github-gateway-key" }}'""",
+        # Its one gateway key, which opens the routes of the servers it holds;
+        # no server's own credential is here
+        """GATEWAY_KEY='{{ index . "gateway-key" }}'""",
         # Both fallbacks run on one API key; the Codex login is on the data volume
         """OPENAI_API_KEY='{{ index . "openai-api-key" }}'""",
     ]
@@ -346,8 +343,7 @@ def test_without_a_chat_the_default_profile_holds_no_bot_token(tmp_path: Path) -
     assert _env_lines(tmp_path, without_chat, NO_PERSONS) == [
         """API_SERVER_KEY='{{ index . "api-server-key" }}'""",
         """LARES_AGENT_TRIGGER_HOOK_SECRET='{{ index . "lares-agent-trigger-hook-secret" }}'""",
-        """LARES_GATEWAY_KEY='{{ index . "lares-gateway-key" }}'""",
-        """LARES_MEMORY_GATEWAY_KEY='{{ index . "lares-memory-gateway-key" }}'""",
+        """GATEWAY_KEY='{{ index . "gateway-key" }}'""",
         """OPENAI_API_KEY='{{ index . "openai-api-key" }}'""",
     ]
 

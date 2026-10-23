@@ -158,13 +158,13 @@ tracing:
 gateway:
   url: http://agentgateway.test:8080
   otlp_endpoint: http://alloy-receiver.test:4318
+  key_env: GATEWAY_KEY
 
 tool_servers:
   - name: lares
     kind: http
     url: http://lares-mcp-bridge.test:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [list_*, get_*, query_*]

@@ -13,13 +13,13 @@ tracing:
 gateway:
   url: http://agentgateway.agents.svc.cluster.local:8080
   otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318
+  key_env: GATEWAY_KEY
 
 tool_servers:
   - name: lares
     kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [list_*, get_current_knx, get_episode, query_*, correlate_events, search_wiki]
@@ -28,7 +28,6 @@ tool_servers:
     kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_CONTROL_GATEWAY_KEY
     timeout_seconds: 30
     access: request
     tools: [request_knx_write, get_write_request]
@@ -37,7 +36,6 @@ tool_servers:
     kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_MEMORY_GATEWAY_KEY
     timeout_seconds: 30
     access: memory
     tools: [get_memory, append_memory]
@@ -46,7 +44,6 @@ tool_servers:
     kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_WIKI_GATEWAY_KEY
     timeout_seconds: 60
     access: write
     tools: [update_wiki_page]
@@ -58,7 +55,6 @@ tool_servers:
       secret: github-mcp-server-token
       key: token
       header: Authorization
-    key_env: GITHUB_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [get_*, list_*, search_*, issue_read, pull_request_read]
