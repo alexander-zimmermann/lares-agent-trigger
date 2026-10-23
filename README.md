@@ -217,7 +217,7 @@ A person reaches every server they hold on the server's one route, under a key o
 
 ### The keys
 
-The harness reads every key from its profile's `.env`, never from the pod's environment, and the gateway its routes' keys from variables set from the same SealedSecret, `hermes-credentials`, which shares its namespace; the credentials it attaches it reads from files. Each value is sealed once per SealedSecret, under its own key, and the template composes the `.env` files from those keys: kubeseal rewrites a SealedSecret whole, so the template is a patch beside it. A variable's value is sealed under the variable's name in lower case and dashed (`GATEWAY_KEY` under `gateway-key`), a person's own value under the handle and that name (`kim-gateway-key`):
+The harness reads every key from its profile's `.env`, never from the pod's environment, and the gateway its routes' keys from variables set from the same SealedSecret, `hermes-credentials`, which shares its namespace; the credentials it attaches it reads from files. Each value is sealed once per SealedSecret, under its own key, and the template composes the `.env` files from those keys: kubeseal rewrites a SealedSecret whole, so the template is a patch beside it. A variable's value is sealed under the variable's name in lower case and dashed (`GATEWAY_KEY` under `gateway-key`), a person's own value under the handle and that name (`kim-gateway-key`), their Discord id under the handle alone (`kim-discord-user`), though the default profile's `.env` reads it:
 
 ```yaml
 spec:
@@ -233,7 +233,7 @@ The default profile's `.env` names, once each and in this order:
 
 - `API_SERVER_KEY`: the Runs and Jobs API and the probes;
 - `DISCORD_BOT_TOKEN`, when a chat use case is enabled;
-- `DISCORD_USER_<HANDLE>` of each enabled person on Discord;
+- `DISCORD_USER_<HANDLE>` of each enabled person on Discord, sealed as `<handle>-discord-user`;
 - the hook's `secret_env`;
 - `gateway.key_env`, its one key for the gateway, when it holds a tool server;
 - the key variable of each provider its source and their fallbacks run on.

@@ -17,8 +17,9 @@ This module keeps the rules the rendering follows:
   is the `no_mcp` sentinel; a list for Discord or cron starts with the
   platform's composite, the API server gets none;
 - every value is sealed once: a variable's key is its name lower case and dashed, a
-  person's own prefixed by the handle, and the gateway reads each profile's key from
-  the harness's SealedSecret, which shares its namespace;
+  person's own prefixed by the handle (their Discord id `<handle>-discord-user`),
+  and the gateway reads each profile's key from the harness's SealedSecret, which
+  shares its namespace;
 - a route's keys are variables the gateway expands at start, a credential a
   file it watches, and a server outside the cluster is told nobody.
 """
@@ -920,16 +921,23 @@ def _default_env(
 
     The bot serves the chat for every profile, so its token stays here as
     long as the chat is on, beside the Discord id of each person it routes.
+    A Discord id is the person's own value, sealed under their handle like
+    every other: `<handle>-discord-user`.
     """
+    discord_ids = {_discord_user(person): f"{person.name}-discord-user" for person in on_discord}
     variables = [
         _API_SERVER_KEY,
         *([_DISCORD_BOT_TOKEN] if any(use_case.is_chat for use_case in enabled) else []),
-        *(_discord_user(person) for person in on_discord),
+        *discord_ids,
         declared.ledger_hook.secret_env,
         *([declared.gateway.key_env] if in_use else []),
         *persons.default_source.key_envs,
     ]
-    return _env_lines(dict.fromkeys(variables), _sealed_key)
+
+    def sealed(variable: str) -> str:
+        return discord_ids.get(variable) or _sealed_key(variable)
+
+    return _env_lines(dict.fromkeys(variables), sealed)
 
 
 def _person_env(
