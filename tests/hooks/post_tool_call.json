@@ -1,0 +1,45 @@
+{
+  "hook_event_name": "post_tool_call",
+  "profile": "default",
+  "tool_name": "skill_manage",
+  "tool_input": {
+    "operations": [
+      {
+        "action": "patch",
+        "name": "lares-explain",
+        "old_string": "of ten tool calls is a ceiling, not a target",
+        "new_string": "of twelve tool calls is a ceiling, not a target"
+      },
+      {
+        "action": "patch",
+        "name": "lares-explain",
+        "old_string": "Four steps, each with one tool call",
+        "new_string": "Four steps, each with one or two tool calls"
+      },
+      {
+        "action": "patch",
+        "name": "lares-explain",
+        "file_path": "references/heating.md",
+        "old_string": "# ",
+        "new_string": "# Heating: "
+      }
+    ]
+  },
+  "session_id": "20261023_101500_a1b2c3",
+  "cwd": "/opt/hermes",
+  "extra": {
+    "result": "{\"error\": \"[TOOL_ERROR] Tool execution failed: OSError: [Errno 30] Read-only file system: '/opt/skills/lares-explain/.tmp_k54u37ut.tmp'\"}",
+    "task_id": "7c1e9a52-3f0d-4b8e-9a61-2d5c8e0f4b13",
+    "tool_call_id": "call_operations",
+    "turn_id": "20261023_101500_a1b2c3:7c1e9a52-3f0d-4b8e-9a61-2d5c8e0f4b13:d3b07384",
+    "api_request_id": "",
+    "duration_ms": 31,
+    "status": "error",
+    "error_type": "tool_error",
+    "error_message": "[TOOL_ERROR] Tool execution failed: OSError: [Errno 30] Read-only file system: '/opt/skills/lares-explain/.tmp_k54u37ut.tmp'",
+    "middleware_trace": [],
+    "telemetry_schema_version": "hermes.observer.v1"
+  },
+  "delivery_id": "bb6143f2d7b44082bb7b859d970f7368",
+  "timestamp": "2026-10-23T19:12:45.464372Z"
+}

@@ -539,6 +539,19 @@ What the receiver answers is what the harness acts on; it sends a delivery at mo
 | `400`  | The body is none of the four hooks.                                                  |
 | `503`  | The ledger or the Jobs API did not answer; the second try may succeed.              |
 
+### The owner's skill corrections
+
+The repo skills, `SKILLS_PATH` in `SKILLS_REPOSITORY`, are read-only to every profile. When the owner corrects one in chat, the hook brings the `skill_manage` call the mount refused, and the trigger makes it a pull request as the write App; `skill_corrections.py` says how a call is applied.
+
+| What came                                                                  | What happens                                                                  |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| the owner's call (a person `discord: admin`)                               | per repo skill a pull request from `agent/skill/<skill>`, labelled `agent/proposal`; while it is open, a further call is another commit on it |
+| a call that does not apply as a whole: a replacement main has moved past, a whole file over the open pull request's correction, a file the skill lacks or one outside it, `delete` or `remove_file` | nothing; one log line says why |
+| a call of any other profile, the machines' included                        | nothing; one log line                                                         |
+| GitHub refuses or does not answer                                          | `agent_trigger_skill_pull_requests_total{outcome="failed"}`, for an alert to fire on |
+
+Every refused write also stands in that profile's own Hermes log, which lares's weekly skill digest reads.
+
 ## Traces
 
 Every turn and every event run is one trace, and its row names it in `trace_id` when the trace was sampled. The harness emits no spans of its own for a turn, so the trigger writes them from the hooks' times once the turn is over (`spans.py`):
@@ -610,6 +623,8 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `GITHUB_API_URL`                            | `https://api.github.com`                           | GitHub's REST API.                                 |
 | `GITHUB_REQUEST_TIMEOUT_SECONDS`            | `30.0`                                             | Per-request timeout against GitHub.                |
 | `READ_BACK_INTERVAL_SECONDS`                | `86400.0`                                          | How often the open pull requests are looked up.    |
+| `SKILLS_REPOSITORY`                         | `lares`                                            | The repository of the repo skills, under `GITHUB_OWNER`. |
+| `SKILLS_PATH`                               | `kubernetes/applications/hermes/base/skills`       | Their directory in it, one directory per skill.    |
 | `HTTP_PORT`                                 | `8080`                                             | The hook receiver and the API.                     |
 | `HOOK_SECRET_FILE`                          | —                                                  | The HMAC secret the harness signs deliveries with. |
 | `API_KEY_FILE`                              | —                                                  | The key the API takes, at least 32 characters; the bridge holds it too. |
@@ -644,6 +659,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_cron_jobs_total`         | `action`           | Managed jobs the reconcile `created`, `updated` or `deleted`. |
 | `agent_trigger_api_requests_total`      | `route`, `code`    | Requests to the API (`runs`, `memory`), by the status code they were answered. |
 | `agent_trigger_read_backs_total`        | `use_case`, `state` | Open pull requests looked up by the read-back: `open`, `merged`, `closed`, or `failed` when GitHub did not answer for one. |
+| `agent_trigger_skill_pull_requests_total` | `outcome`        | The owner's skill corrections on GitHub: a pull request `opened`, a commit `committed` onto the open one, or `failed` when GitHub did not take it. |
 
 `/healthz` is NATS- and ledger-gated. A harness outage is deliberately not part of it: that is a failed run with its own alert, never a restart loop.
 

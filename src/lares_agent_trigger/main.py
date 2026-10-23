@@ -34,6 +34,7 @@ from .pricing import Pricing
 from .read_back import ReadBack
 from .receiver import ReceiverServer, create_app
 from .schedules import Schedules
+from .skill_corrections import SkillCorrections
 from .spans import log_trace_ids
 from .turn_runs import TurnRuns
 from .use_cases import load_use_case_file
@@ -107,8 +108,11 @@ async def _amain() -> int:
     )
     consumer = EpisodeConsumer(settings, runs, metrics)
     api = TriggerApi(use_cases, runs, schedules, ledger, closer, settings.api_key, metrics)
+    corrections = SkillCorrections(
+        persons, github, metrics, repository=settings.skills_repository, path=settings.skills_path
+    )
     receiver = ReceiverServer(
-        create_app(turns, settings.hook_secret, api, metrics), settings.http_port
+        create_app(turns, settings.hook_secret, api, metrics, corrections), settings.http_port
     )
 
     async def is_healthy() -> bool:
@@ -171,6 +175,7 @@ async def _amain() -> int:
                     await task
         await runs.aclose()
         await turns.aclose()
+        await corrections.aclose()
         await consumer.close()
         await hermes.aclose()
         await alertmanager.aclose()

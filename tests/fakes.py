@@ -499,6 +499,26 @@ def tool_call(
     )
 
 
+# Captured from Hermes v0.22.5 as skill_manage, in the operations shape it advertises,
+# patched a repo skill on its read-only mount: the first write failed, the call with it.
+SKILL_WRITE: dict[str, Any] = json.loads(
+    (Path(__file__).parent / "hooks" / "post_tool_call.json").read_text(encoding="utf-8")
+)
+
+
+def refused_skill_write(*, profile: str, operations: list[dict[str, Any]] | None = None) -> bytes:
+    """The captured `post_tool_call` of a refused `skill_manage`, from this profile.
+
+    `operations` replace what the captured call asked for; the error stays as
+    Hermes wrote it.
+    """
+    payload = json.loads(json.dumps(SKILL_WRITE))
+    payload["profile"] = profile
+    if operations is not None:
+        payload["tool_input"] = {"operations": operations}
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
 def sign(body: bytes, secret: str = HOOK_SECRET) -> dict[str, str]:
     """The headers Hermes sends with a signed delivery."""
     digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()

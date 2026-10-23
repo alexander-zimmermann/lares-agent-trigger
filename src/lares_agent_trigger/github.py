@@ -9,11 +9,13 @@ only read, and never holds a token that writes.
 
 from __future__ import annotations
 
+import base64
 import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import jwt
@@ -34,6 +36,14 @@ _ANSWER_LIMIT = 500
 
 class GitHubError(RuntimeError):
     """GitHub did not answer, or answered what the call did not expect."""
+
+
+@dataclass(frozen=True)
+class RepoFile:
+    """A file as GitHub holds it on one ref: its text and its blob."""
+
+    content: str
+    sha: str
 
 
 @dataclass(frozen=True)
@@ -105,6 +115,32 @@ class GitHubApp:
                 f" {response.text[:_ANSWER_LIMIT]}"
             )
         return response
+
+    async def file(self, repository: str, path: str, ref: str) -> RepoFile | None:
+        """The file at this path on this ref; None when the repository holds none there."""
+        found = await self.call(
+            "GET",
+            f"/repos/{self.owner}/{repository}/contents/{quote(path)}",
+            params={"ref": ref},
+            expect={200, 404},
+        )
+        if found.status_code == 404:
+            return None
+        file = found.json()
+        if not isinstance(file, dict) or file.get("type") != "file":
+            raise GitHubError(f"{path} in {repository} is no file")
+        if file.get("encoding") != "base64":
+            raise GitHubError(f"{path} is too large for the contents API")
+        return RepoFile(base64.b64decode(file["content"]).decode("utf-8"), str(file["sha"]))
+
+    async def has_label(self, repository: str, label: str) -> bool:
+        """Whether the repository holds the label; GitHub would create one it lacks on the fly."""
+        found = await self.call(
+            "GET",
+            f"/repos/{self.owner}/{repository}/labels/{quote(label, safe='')}",
+            expect={200, 404},
+        )
+        return found.status_code == 200
 
     async def _installation_token(self) -> str:
         now = self._clock()
