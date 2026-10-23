@@ -23,13 +23,13 @@ tracing:
 gateway:
   url: http://agentgateway.agents.svc.cluster.local:8080
   otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318
+  key_env: GATEWAY_KEY
 
 tool_servers:
   - name: lares
     kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [list_*, get_episode, query_*]
@@ -38,7 +38,6 @@ tool_servers:
     kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_CONTROL_GATEWAY_KEY
     timeout_seconds: 60
     access: request
     tools: [request_knx_write, get_write_request]
@@ -47,7 +46,6 @@ tool_servers:
     kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_MEMORY_GATEWAY_KEY
     timeout_seconds: 30
     access: memory
     tools: [get_memory, append_memory]
@@ -56,7 +54,6 @@ tool_servers:
     kind: http
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
-    key_env: LARES_WIKI_GATEWAY_KEY
     timeout_seconds: 60
     access: write
     tools: [update_wiki_page]
@@ -68,7 +65,6 @@ tool_servers:
       secret: github-mcp-server-token
       key: token
       header: Authorization
-    key_env: GITHUB_GATEWAY_KEY
     timeout_seconds: 60
     access: read
     tools: [get_*, list_*, search_*, issue_read, pull_request_read]
@@ -296,7 +292,6 @@ def test_every_field_of_a_tool_server_and_the_ledger_hook(tmp_path: Path) -> Non
     assert lares.credential.secret == "agentgateway-keys"
     assert lares.credential.key == "lares-mcp-bridge"
     assert lares.credential.header == "Authorization"
-    assert lares.key_env == "LARES_GATEWAY_KEY"
     assert lares.timeout_seconds == 60
     assert lares.access == "read"
     assert lares.tools == ("list_*", "get_episode", "query_*")
@@ -497,7 +492,6 @@ def test_every_tool_server_is_one_kind_whatever_serves_it(tmp_path: Path) -> Non
     assert github.credential.secret == "github-mcp-server-token"
     assert github.credential.key == "token"
     assert github.credential.header == "Authorization"
-    assert github.key_env == "GITHUB_GATEWAY_KEY"
     assert github.timeout_seconds == 60
     assert github.access == "read"
     assert github.tools == ("get_*", "list_*", "search_*", "issue_read", "pull_request_read")
@@ -511,8 +505,8 @@ def test_every_tool_server_is_one_kind_whatever_serves_it(tmp_path: Path) -> Non
 def test_a_tool_server_names_no_client_of_its_own(tmp_path: Path) -> None:
     """The gateway signs the caller in and names it to the server; a server has no client."""
     broken = VALID.replace(
-        "    key_env: GITHUB_GATEWAY_KEY\n",
-        "    key_env: GITHUB_GATEWAY_KEY\n    client: lares-github\n",
+        "      header: Authorization\n    timeout_seconds: 60\n",
+        "      header: Authorization\n    client: lares-github\n    timeout_seconds: 60\n",
         1,
     )
 
@@ -527,16 +521,6 @@ def test_a_tool_server_without_its_kind_is_refused(tmp_path: Path) -> None:
         load_use_cases(_write(tmp_path, broken))
 
 
-def test_two_tool_servers_on_one_gateway_key_are_refused(tmp_path: Path) -> None:
-    """One variable per route in every profile's .env: two servers on one would share a key."""
-    broken = VALID.replace(
-        "    key_env: GITHUB_GATEWAY_KEY\n", "    key_env: LARES_GATEWAY_KEY\n", 1
-    )
-
-    with pytest.raises(ValueError, match="github: key_env LARES_GATEWAY_KEY is already"):
-        load_use_cases(_write(tmp_path, broken))
-
-
 def test_the_gateway_is_read_beside_the_ledger_hook(tmp_path: Path) -> None:
     declared = load_use_case_file(_write(tmp_path, VALID))
 
@@ -544,6 +528,7 @@ def test_the_gateway_is_read_beside_the_ledger_hook(tmp_path: Path) -> None:
     assert declared.gateway.otlp_endpoint == (
         "http://alloy-alloy-receiver.alloy.svc.cluster.local:4318"
     )
+    assert declared.gateway.key_env == "GATEWAY_KEY"
 
 
 def test_a_file_without_the_gateway_is_refused(tmp_path: Path) -> None:

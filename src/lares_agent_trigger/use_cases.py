@@ -241,9 +241,9 @@ class Credential(_Strict):
 class ToolServer(_Strict):
     """An MCP endpoint behind its gateway route: the bridge's and a vendor's alike.
 
-    The gateway attaches `credential`; the harness holds a key for the route
-    only. `tools` (names or `*`/`?` globs) is the route's tool list and the
-    harness's include list on top. The gateway names the caller to a server
+    The gateway attaches `credential`; the harness calls the route with its
+    profile's gateway key. `tools` (names or `*`/`?` globs) is the route's tool
+    list and the harness's include list on top. The gateway names the caller to a server
     in the cluster: the route, and the person behind the key; a server
     outside it, such as a vendor's hosted one, gets the credential only.
     """
@@ -252,8 +252,6 @@ class ToolServer(_Strict):
     name: str = Field(min_length=1)
     url: str = Field(min_length=1)
     credential: Credential
-    # Where the harness holds its key for the route, in every profile's .env.
-    key_env: str = Field(min_length=1)
     timeout_seconds: int = Field(gt=0)
     access: ToolAccess
     tools: tuple[str, ...] = Field(min_length=1)
@@ -282,11 +280,14 @@ class Gateway(_Strict):
     """The one door between the harness and every tool server.
 
     `url` is where the harness reaches it, `otlp_endpoint` the OTLP/HTTP
-    receiver it sends a span of every call to.
+    receiver it sends a span of every call to, and `key_env` the variable
+    every profile holds its gateway key in: one key per profile, which opens
+    the routes of the servers the profile holds and no other.
     """
 
     url: str = Field(min_length=1)
     otlp_endpoint: str = Field(min_length=1)
+    key_env: str = Field(min_length=1)
 
 
 class LedgerHook(_Strict):
@@ -378,17 +379,10 @@ def load_use_case_file(path: Path) -> UseCaseFile:
         raise ValueError(f"{path}: {exc}") from exc
 
     servers: dict[str, ToolServer] = {}
-    keys: dict[str, str] = {}
     for server in parsed.tool_servers:
         if server.name in servers:
             raise ValueError(f"{path}: tool server {server.name} is declared twice")
         servers[server.name] = server
-        if server.key_env in keys:
-            raise ValueError(
-                f"{path}: tool server {server.name}: key_env {server.key_env} is already "
-                f"the key of {keys[server.key_env]}"
-            )
-        keys[server.key_env] = server.name
     _check_one_server_per_tool(path, servers)
     connectors = _connectors(path, parsed.connectors, servers)
 

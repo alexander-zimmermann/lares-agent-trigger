@@ -264,7 +264,7 @@ def _wait_until_serving(gateway: Gateway) -> None:
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         try:
-            if _initialize(gateway, "github", _value("kim-github-gateway-key")) == 200:
+            if _initialize(gateway, "github", _value("kim-gateway-key")) == 200:
                 return
         except httpx.TransportError:
             pass
@@ -372,20 +372,27 @@ def _connector(gateway: Gateway, token: str | None) -> _Session:
 BRIDGE_KEY = f"Bearer {_value('lares-mcp-bridge')}"
 
 
-def test_a_key_is_refused_on_every_route_but_its_own(gateway: Gateway) -> None:
-    """The machines' key and kim's open lares; neither opens a route it is no key of."""
-    machines, kim = _value("lares-gateway-key"), _value("kim-lares-gateway-key")
+def test_a_profiles_key_opens_the_routes_it_holds_and_no_other(gateway: Gateway) -> None:
+    """One key per profile; which routes it opens is the route's list of profiles."""
+    machines, kim, lou = _value("gateway-key"), _value("kim-gateway-key"), _value("lou-gateway-key")
 
+    # The machines hold the event run's and the schedule's servers.
     assert _initialize(gateway, "lares", machines) == 200
-    assert _initialize(gateway, "lares", kim) == 200
-    assert _initialize(gateway, "lares-memory", machines) == 401
-    assert _initialize(gateway, "lares-memory", kim) == 401
+    assert _initialize(gateway, "lares-memory", machines) == 200
+    assert _initialize(gateway, "lares-control", machines) == 401
     assert _initialize(gateway, "github", machines) == 401
+    # kim holds the chat's servers, lou the read server only.
+    assert _initialize(gateway, "lares", kim) == 200
+    assert _initialize(gateway, "lares-control", kim) == 200
+    assert _initialize(gateway, "github", kim) == 200
+    assert _initialize(gateway, "lares-memory", kim) == 401
+    assert _initialize(gateway, "lares", lou) == 200
+    assert _initialize(gateway, "lares-control", lou) == 401
     assert _initialize(gateway, "lares", None) == 401
 
 
 def test_a_tool_outside_a_servers_tools_is_neither_listed_nor_callable(gateway: Gateway) -> None:
-    key = _value("lares-gateway-key")
+    key = _value("gateway-key")
 
     # The read server's tools: no verdict, no request through the gate, no memory.
     lares = _open(gateway, "lares", key)
@@ -393,17 +400,17 @@ def test_a_tool_outside_a_servers_tools_is_neither_listed_nor_callable(gateway: 
     refused = lares.call("set_verdict")
     assert "result" not in refused
     assert "set_verdict" in refused["error"]["message"]
-    memory = _open(gateway, "lares-memory", _value("lares-memory-gateway-key"))
+    memory = _open(gateway, "lares-memory", key)
     assert memory.tools() == ["get_memory"]
 
 
 def test_each_route_names_its_client_and_the_keys_person_to_the_bridge(gateway: Gateway) -> None:
     """The caller's key never reaches the bridge; the gateway's key does, and who called."""
     calls = {
-        ("lares", "lares-gateway-key", "get_episode"): None,
-        ("lares", "kim-lares-gateway-key", "get_episode"): "kim",
-        ("lares-control", "kim-lares-control-gateway-key", "request_knx_write"): "kim",
-        ("lares-memory", "lares-memory-gateway-key", "get_memory"): None,
+        ("lares", "gateway-key", "get_episode"): None,
+        ("lares", "kim-gateway-key", "get_episode"): "kim",
+        ("lares-control", "kim-gateway-key", "request_knx_write"): "kim",
+        ("lares-memory", "gateway-key", "get_memory"): None,
     }
     for (route, key, tool), enduser in calls.items():
         caller = _open(gateway, route, _value(key)).caller(tool)
@@ -414,8 +421,8 @@ def test_a_caller_never_names_itself_to_the_bridge(gateway: Gateway) -> None:
     """The headers a caller sends are overwritten, or dropped where the key names nobody."""
     forged = {"X-Client-Id": "github", "X-Enduser-Id": "lou"}
 
-    machines = _open(gateway, "lares", _value("lares-gateway-key"), forged)
-    kim = _open(gateway, "lares", _value("kim-lares-gateway-key"), forged)
+    machines = _open(gateway, "lares", _value("gateway-key"), forged)
+    kim = _open(gateway, "lares", _value("kim-gateway-key"), forged)
 
     assert machines.caller("get_episode") == {
         "authorization": BRIDGE_KEY,
@@ -427,7 +434,7 @@ def test_a_caller_never_names_itself_to_the_bridge(gateway: Gateway) -> None:
 
 def test_a_route_attaches_its_servers_credential_from_the_mounted_file(gateway: Gateway) -> None:
     """GitHub's route carries the token laid into its Secret's directory, never the caller's key."""
-    caller = _open(gateway, "github", _value("kim-github-gateway-key")).caller("get_episode")
+    caller = _open(gateway, "github", _value("kim-gateway-key")).caller("get_episode")
 
     assert caller == {"authorization": f"Bearer {TOKEN}", "client": "github", "enduser": "kim"}
 
@@ -440,7 +447,7 @@ def test_a_renewed_credential_reaches_an_open_session_without_a_restart(
     The bridge's key is renewed here, the way the GitHub token is every 30 minutes.
     """
     started = gateway.started_at()
-    session = _open(gateway, "lares", _value("lares-gateway-key"))
+    session = _open(gateway, "lares", _value("gateway-key"))
     assert session.caller("get_episode")["authorization"] == BRIDGE_KEY
 
     keys = rendered.credentials()["agentgateway-keys"]

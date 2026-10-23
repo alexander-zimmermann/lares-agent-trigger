@@ -19,11 +19,11 @@ binds:
               apiKey:
                 mode: strict
                 keys:
-                  - key: ${LARES_GATEWAY_KEY}
-                  - key: ${KIM_LARES_GATEWAY_KEY}
+                  - key: ${GATEWAY_KEY}
+                  - key: ${KIM_GATEWAY_KEY}
                     metadata:
                       enduser_id: kim
-                  - key: ${LOU_LARES_GATEWAY_KEY}
+                  - key: ${LOU_GATEWAY_KEY}
                     metadata:
                       enduser_id: lou
               mcpAuthorization:
@@ -59,7 +59,7 @@ binds:
               apiKey:
                 mode: strict
                 keys:
-                  - key: ${KIM_LARES_CONTROL_GATEWAY_KEY}
+                  - key: ${KIM_GATEWAY_KEY}
                     metadata:
                       enduser_id: kim
               mcpAuthorization:
@@ -91,7 +91,7 @@ binds:
               apiKey:
                 mode: strict
                 keys:
-                  - key: ${LARES_MEMORY_GATEWAY_KEY}
+                  - key: ${GATEWAY_KEY}
               mcpAuthorization:
                 rules:
                   - mcp.tool.name == "get_memory"
@@ -121,7 +121,7 @@ binds:
               apiKey:
                 mode: strict
                 keys:
-                  - key: ${KIM_GITHUB_GATEWAY_KEY}
+                  - key: ${KIM_GATEWAY_KEY}
                     metadata:
                       enduser_id: kim
               mcpAuthorization:

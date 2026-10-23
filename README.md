@@ -72,6 +72,7 @@ tracing:
 gateway:
   url: http://agentgateway.agents.svc.cluster.local:8080                  # where the harness reaches it
   otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318  # where it sends a span of every call
+  key_env: GATEWAY_KEY        # the variable every profile holds its one key for the gateway in
 
 tool_servers:
   - name: lares
@@ -81,13 +82,12 @@ tool_servers:
       secret: agentgateway-keys # a Secret beside the gateway
       key: lares-mcp-bridge
       header: Authorization     # a bearer token; any other header takes the value as it is
-    key_env: LARES_GATEWAY_KEY  # where the harness holds its key for the route
     timeout_seconds: 60
     access: read
     tools: [list_*, get_*, query_*, correlate_events, search_wiki]
 ```
 
-Every tool server is an HTTP endpoint behind a route of its own on one gateway, [agentgateway](https://agentgateway.dev): the bridge under each of its servers, and any other MCP server such as the official [GitHub MCP server](https://github.com/github/github-mcp-server). The harness calls the route with a key valid there only; the gateway serves the server's `tools` and nothing else, attaches the credential the server expects, and names the caller to a server in the cluster. The harness holds no server's credential. `tools` is the route's tool list and the harness's include list on top. `access` is where it may be granted, and the loader refuses an enabled use case that names a server it may not hold:
+Every tool server is an HTTP endpoint behind a route of its own on one gateway, [agentgateway](https://agentgateway.dev): the bridge under each of its servers, and any other MCP server such as the official [GitHub MCP server](https://github.com/github/github-mcp-server). The harness calls the route with its profile's one gateway key, which opens the routes of the servers the profile holds and no other; the gateway serves the server's `tools` and nothing else, attaches the credential the server expects, and names the caller to a server in the cluster. The harness holds no server's credential. `tools` is the route's tool list and the harness's include list on top. `access` is where it may be granted, and the loader refuses an enabled use case that names a server it may not hold:
 
 | `access`  | Granted to                                                                         |
 | --------- | ---------------------------------------------------------------------------------- |
@@ -96,7 +96,7 @@ Every tool server is an HTTP endpoint behind a route of its own on one gateway, 
 | `request` | the chat only: what a person asks for in conversation — a write request approved elsewhere, a run started now |
 | `memory`  | use cases with `memory: true` only: their own memory, read and appended through the bridge. A surface the harness shares — all event runs, all cron jobs — carries it only when every enabled use case on it keeps a memory |
 
-A tool sits on one server only: the loader refuses a declaration where an entry of one server matches an entry of another on the same `url`, so `get_*` on the read server and `get_write_request` on the gate's request server cannot stand side by side — the read server then lists its `get_` tools by name. GitHub's `get_*` is GitHub's own. No two servers share a `key_env`.
+A tool sits on one server only: the loader refuses a declaration where an entry of one server matches an entry of another on the same `url`, so `get_*` on the read server and `get_write_request` on the gate's request server cannot stand side by side — the read server then lists its `get_` tools by name. GitHub's `get_*` is GitHub's own.
 
 A connector is a person's own MCP client, such as the claude.ai connector, signed in through Authentik on a public path of the gateway:
 
@@ -217,7 +217,7 @@ A person reaches every server they hold on the server's one route, under a key o
 
 ### The keys
 
-The harness reads every key from its profile's `.env`, never from the pod's environment, and the gateway its routes' keys from variables set from `agentgateway-keys` and the keys it attaches from files. Each value is sealed once per SealedSecret, under its own key, and the template composes the `.env` files from those keys: kubeseal rewrites a SealedSecret whole, so the template is a patch beside it. A variable's value is sealed under the variable's name in lower case and dashed (`LARES_GATEWAY_KEY` under `lares-gateway-key`), a person's own value under the handle and that name (`kim-lares-gateway-key`):
+The harness reads every key from its profile's `.env`, never from the pod's environment, and the gateway its routes' keys from variables set from `agentgateway-keys` and the keys it attaches from files. Each value is sealed once per SealedSecret, under its own key, and the template composes the `.env` files from those keys: kubeseal rewrites a SealedSecret whole, so the template is a patch beside it. A variable's value is sealed under the variable's name in lower case and dashed (`GATEWAY_KEY` under `gateway-key`), a person's own value under the handle and that name (`kim-gateway-key`):
 
 ```yaml
 spec:
@@ -235,10 +235,10 @@ The default profile's `.env` names, once each and in this order:
 - `DISCORD_BOT_TOKEN`, when a chat use case is enabled;
 - `DISCORD_USER_<HANDLE>` of each enabled person on Discord;
 - the hook's `secret_env`;
-- the `key_env` of each tool server the profile holds: its key for the server's route;
+- `gateway.key_env`, its one key for the gateway, when it holds a tool server;
 - the key variable of each provider its source and their fallbacks run on.
 
-A person's `<handle>.env` names their own `API_SERVER_KEY`, the shared hook secret, their own key for the route of each tool server they hold, and their own key of each provider their source runs on. No `.env` holds a server's credential. A profile's key for a route is sealed twice, under the same name: in the harness's SealedSecret and in the gateway's. So is the key the gateway calls the bridge with: in the gateway's and in the bridge's.
+A person's `<handle>.env` names their own `API_SERVER_KEY`, the shared hook secret, their own gateway key, and their own key of each provider their source runs on. No `.env` holds a server's credential. A profile's gateway key is sealed twice, under the same name: in the harness's SealedSecret and in the gateway's. So is the key the gateway calls the bridge with: in the gateway's and in the bridge's.
 
 Sealed Secrets renders a key the SealedSecret lacks as empty, without an error. lares therefore checks in pre-commit that every key a template names is sealed (`task k8s:validate-sealed-templates`).
 
@@ -252,7 +252,7 @@ What each surface may hold follows how Hermes resolves its toolsets:
 
 A list that would name no server is `no_mcp`: Hermes reads a list without a server name as "every server".
 
-Every `mcp_servers` entry has the same shape: the profile's route on the gateway as `url`, `Authorization: Bearer ${env:<key_env>}`, the `timeout`, and the server's `tools` as `include`, with resources and prompts off — the gateway serves tools only.
+Every `mcp_servers` entry has the same shape: the profile's route on the gateway as `url`, `Authorization: Bearer ${env:GATEWAY_KEY}`, the `timeout`, and the server's `tools` as `include`, with resources and prompts off — the gateway serves tools only.
 
 ### The gateway's routes
 
@@ -264,7 +264,7 @@ The routes file holds one route per tool server a profile holds, at `/mcp/<serve
 - names the caller to a server in the cluster (a host under `.svc.cluster.local`) on every call: `X-Client-Id`, the route's name, and `X-Enduser-Id`, the key's `enduser_id` or the token's `preferred_username`. The gateway sets both after copying the caller's headers, so a value the caller sent is overwritten, and one with no person behind it is removed. A server outside the cluster, such as a vendor's hosted one, is told nobody;
 - keeps no session upstream (`statefulMode: stateless`): a session would keep the credential it started with past a renewal.
 
-A route's keys are variables the gateway expands when it loads the file (`${LARES_GATEWAY_KEY}`, the sealed key's name upper case and underscored), set from `agentgateway-keys` at start; a resealed key rolls the gateway through the reloader. A connector's `issuer` is expanded the same way: lares sets the cluster's `AUTHENTIK_URL` beside the rendered values. Every credential is a file the gateway watches, and kubelet swaps a changed Secret in whole, so a renewed token or bridge key reaches the next call without a restart. Every call is a span to `gateway.otlp_endpoint`, kept at `tracing.sampling_ratio`.
+A route's keys are variables the gateway expands when it loads the file (`${KIM_GATEWAY_KEY}`, the sealed key's name upper case and underscored), set from `agentgateway-keys` at start; a resealed key rolls the gateway through the reloader. A connector's `issuer` is expanded the same way: lares sets the cluster's `AUTHENTIK_URL` beside the rendered values. Every credential is a file the gateway watches, and kubelet swaps a changed Secret in whole, so a renewed token or bridge key reaches the next call without a restart. Every call is a span to `gateway.otlp_endpoint`, kept at `tracing.sampling_ratio`.
 
 ## The cron jobs
 

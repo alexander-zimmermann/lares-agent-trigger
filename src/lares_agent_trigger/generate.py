@@ -182,7 +182,7 @@ class Rendering:
 
 
 class _Key(NamedTuple):
-    """A profile's key for a route: the key it is sealed under, and the person it belongs to."""
+    """A profile's gateway key: the key it is sealed under, and the person it belongs to."""
 
     sealed: str
     enduser: str | None
@@ -660,14 +660,14 @@ def _hooks(declared: UseCaseFile) -> dict[str, Any]:
 
 
 def _mcp_servers(gateway: Gateway, servers: Sequence[ToolServer]) -> dict[str, Any]:
-    """Each server as its gateway route, named like the server, under the profile's key for it.
+    """Each server as its gateway route, named like the server, under the profile's gateway key.
 
     The gateway serves tools only, so the harness asks for no resources or prompts.
     """
     return {
         server.name: {
             "url": f"{gateway.url.rstrip('/')}/mcp/{server.name}",
-            "headers": {"Authorization": f"Bearer ${{env:{server.key_env}}}"},
+            "headers": {"Authorization": f"Bearer ${{env:{gateway.key_env}}}"},
             "timeout": server.timeout_seconds,
             "tools": {"include": list(server.tools), "resources": False, "prompts": False},
         }
@@ -692,10 +692,11 @@ def _routes(
     carrying the handle.
     """
     routes: list[_ServerRoute] = []
+    key_env = declared.gateway.key_env
     for server in declared.tool_servers.values():
-        keys = [_Key(_sealed_key(server.key_env), None)] if server in in_use else []
+        keys = [_Key(_sealed_key(key_env), None)] if server in in_use else []
         keys.extend(
-            _Key(_own_key(person, server.key_env), person.name)
+            _Key(_own_key(person, key_env), person.name)
             for person in persons.enabled_persons
             if server in holdings[person.name]
         )
@@ -853,18 +854,18 @@ def _tool_rule(pattern: str) -> str:
 def _routes_values(
     routes: Sequence[_ServerRoute], connectors: Sequence[_ConnectorRoute]
 ) -> dict[str, Any]:
-    """The gateway's keys as variables, its routes and every credential as whole mounts.
+    """Each profile's key as a variable, once, and the routes and every credential as whole mounts.
 
     A variable is read at start, so a resealed key rolls the gateway through
     the reloader; a renewed credential is a file the gateway watches.
     """
+    sealed = dict.fromkeys(key.sealed for route in routes for key in route.keys)
     variables = [
         {
-            "name": _variable(key.sealed),
-            "valueFrom": {"secretKeyRef": {"name": GATEWAY_KEYS.name, "key": key.sealed}},
+            "name": _variable(name),
+            "valueFrom": {"secretKeyRef": {"name": GATEWAY_KEYS.name, "key": name}},
         }
-        for route in routes
-        for key in route.keys
+        for name in sealed
     ]
     credentials = [
         *(route.server.credential for route in routes),
@@ -922,7 +923,7 @@ def _default_env(
         *([_DISCORD_BOT_TOKEN] if any(use_case.is_chat for use_case in enabled) else []),
         *(_discord_user(person) for person in on_discord),
         declared.ledger_hook.secret_env,
-        *(server.key_env for server in in_use),
+        *([declared.gateway.key_env] if in_use else []),
         *persons.default_source.key_envs,
     ]
     return _env_lines(dict.fromkeys(variables), _sealed_key)
@@ -933,15 +934,15 @@ def _person_env(
 ) -> str:
     """Every key a person's config reads: their own, sealed under the handle, and the hook secret.
 
-    Their own are the API server's key, their gateway key for each tool
-    server they hold and the keys of their source's providers; the hook
-    secret is the one every profile shares.
+    Their own are the API server's key, their gateway key when they hold a
+    tool server, and the keys of their source's providers; the hook secret is
+    the one every profile shares.
     """
     source = persons.source_of(person)
     variables = [
         _API_SERVER_KEY,
         declared.ledger_hook.secret_env,
-        *(server.key_env for server in held),
+        *([declared.gateway.key_env] if held else []),
         *source.key_envs,
     ]
 
