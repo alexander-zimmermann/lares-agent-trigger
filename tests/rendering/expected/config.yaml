@@ -41,6 +41,9 @@ discord:
 memory:
   memory_enabled: true
   nudge_interval: 5
+plugins:
+  enabled:
+    - hermes-session-reset-policy
 
 # Rendered from persons.yaml: the default profile's source, its fallbacks in order,
 # and the profile's directory, where Hermes discovers the context files.
