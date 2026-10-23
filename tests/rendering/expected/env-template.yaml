@@ -13,8 +13,8 @@ spec:
       default.env: |
         API_SERVER_KEY='{{ index . "api-server-key" }}'
         DISCORD_BOT_TOKEN='{{ index . "discord-bot-token" }}'
-        DISCORD_USER_KIM='{{ index . "discord-user-kim" }}'
-        DISCORD_USER_LOU='{{ index . "discord-user-lou" }}'
+        DISCORD_USER_KIM='{{ index . "kim-discord-user" }}'
+        DISCORD_USER_LOU='{{ index . "lou-discord-user" }}'
         LARES_AGENT_TRIGGER_HOOK_SECRET='{{ index . "lares-agent-trigger-hook-secret" }}'
         GATEWAY_KEY='{{ index . "gateway-key" }}'
         OPENAI_API_KEY='{{ index . "openai-api-key" }}'
