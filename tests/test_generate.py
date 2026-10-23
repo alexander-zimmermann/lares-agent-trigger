@@ -154,8 +154,8 @@ def test_without_persons_the_profiles_config_map_is_still_generated(tmp_path: Pa
     assert empty["configMapGenerator"] == [{"name": "hermes-profiles", "files": []}]
 
 
-def test_a_profile_config_holds_no_setting(tmp_path: Path) -> None:
-    """The settings are the managed scope over every profile, never part of a profile's file."""
+def test_every_profile_config_carries_the_settings(tmp_path: Path) -> None:
+    """Hermes reads parts of a profile's file raw, so the settings stand in every one of them."""
     settings: dict[str, Any] = yaml.safe_load(SETTINGS.read_text(encoding="utf-8"))
     rendered = _render(tmp_path)
 
@@ -163,27 +163,27 @@ def test_a_profile_config_holds_no_setting(tmp_path: Path) -> None:
         config: dict[str, Any] = yaml.safe_load(text)
         for key, value in settings.items():
             if isinstance(value, dict):
-                assert not set(value) & set(config.get(key, {})), key
+                assert {k: config[key][k] for k in value} == value, key
             else:
-                assert key not in config, key
-    # The default profile's own `discord` and `gateway` keys are the rendered ones only.
-    default: dict[str, Any] = yaml.safe_load(rendered.hermes_config)
-    assert list(default["gateway"]) == ["profile_routes"]
-    assert list(default["discord"]) == [
-        "allow_from",
-        "allow_admin_from",
-        "group_allow_admin_from",
-        "user_allowed_commands",
-        "group_user_allowed_commands",
-    ]
+                assert config[key] == value, key
 
 
-def test_the_settings_do_not_change_what_is_rendered(tmp_path: Path) -> None:
-    """Hermes merges them at run time; the files are the same whatever the settings hold."""
+def test_the_rendered_discord_keys_join_the_settings_own_blocks(tmp_path: Path) -> None:
+    """The settings' own keys first, the rendered rights and routes after; a block the
+    settings do not hold stands on its own."""
     settings = SETTINGS.read_text(encoding="utf-8")
-    without = settings[: settings.index("# One gateway")]
+    parsed: dict[str, Any] = yaml.safe_load(settings)
+    config = _config(tmp_path)
 
-    assert _render(tmp_path, settings=without) == _render(tmp_path)
+    assert list(config["discord"])[: len(parsed["discord"])] == list(parsed["discord"])
+    assert config["discord"]["require_mention"] is True
+    assert config["discord"]["allow_from"] == ["${env:DISCORD_USER_KIM}", "${env:DISCORD_USER_LOU}"]
+    assert config["gateway"]["multiplex_profiles"] is True
+    assert [route["profile"] for route in config["gateway"]["profile_routes"]] == ["kim", "lou"]
+
+    without = settings[: settings.index("# One gateway")]
+    bare: dict[str, Any] = yaml.safe_load(_render(tmp_path, settings=without).hermes_config)
+    assert bare["gateway"] == {"profile_routes": config["gateway"]["profile_routes"]}
 
 
 def test_without_a_discord_person_the_default_profile_renders_as_without_persons(
