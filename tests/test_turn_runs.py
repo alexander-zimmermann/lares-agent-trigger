@@ -514,7 +514,8 @@ async def test_calls_of_a_turn_that_never_ended_are_counted_by_the_sweep(
 ) -> None:
     """A turn whose end was lost reports calls and no end: spent, in no row, and
     counted by the profile's person once the sweep gives the tally up. A
-    background review never ends either and is never counted: it is booked."""
+    background review never ends either and is never orphaned: its calls are
+    counted as they come."""
     client, metrics = receiver
     await _deliver(
         client,
@@ -532,4 +533,3 @@ async def test_calls_of_a_turn_that_never_ended_are_counted_by_the_sweep(
     assert sample(metrics, "agent_trigger_orphaned_calls_total", enduser_id="") == 2.0
     (row,) = rows()
     assert row["subject_key"] == f"{CHAT_SESSION}:{CHAT_TURN}"
-    assert row["review_text"] == REVIEWED

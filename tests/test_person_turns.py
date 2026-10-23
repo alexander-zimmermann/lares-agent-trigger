@@ -28,9 +28,11 @@ from .fakes import (
     CRON_TASK,
     EXPLANATION,
     PERSONS,
+    REVIEWED,
     fake_hermes,
     fake_job,
     model_call,
+    review_call,
     sample,
     sign,
     turn_ended,
@@ -221,75 +223,84 @@ async def test_a_person_who_keeps_no_answers_gets_a_row_of_numbers_and_tool_name
     assert row["tool_trace"]["calls"][0]["tools"] == [{"name": "list_episodes", "arguments": ""}]
 
 
-def _odd_turns(metrics: Metrics, kind: str, enduser_id: str) -> float:
-    return sample(metrics, "agent_trigger_odd_turns_total", kind=kind, enduser_id=enduser_id)
-
-
 @pytest.mark.parametrize(
-    ("profile", "platform", "surface"),
-    [("rex", "discord", "discord"), ("max", "discord", "discord"), ("rex", "api_server", "web")],
-    ids=["undeclared", "dormant", "undeclared-web"],
+    ("profile", "platform"),
+    [
+        ("rex", "discord"),
+        ("max", "discord"),
+        ("rex", "api_server"),
+        ("default", "discord"),
+        ("kim", "cron"),
+        ("rex", "cron"),
+    ],
+    ids=[
+        "undeclared",
+        "dormant",
+        "undeclared-web",
+        "machines-on-discord",
+        "cron-on-person",
+        "cron-undeclared",
+    ],
 )
-async def test_a_turn_of_a_profile_no_person_runs_on_is_numbers_under_its_name(
-    receiver: Receiver, rows: Rows, profile: str, platform: str, surface: str
+async def test_a_turn_no_use_case_owns_is_left_alone(
+    receiver: Receiver, rows: Rows, profile: str, platform: str
 ) -> None:
-    """A profile left on the volume, or someone who reached it without a declaration."""
+    """A profile left on the volume, a message that slipped past the routes to the machines'
+    profile, a cron job on a person's profile: no row, one log line."""
+    client, metrics = receiver
+    cron = platform == "cron"
+    session = CRON_SESSION if cron else CHAT_SESSION
+    task = CRON_TASK if cron else None
+
+    await _deliver(
+        client,
+        model_call(
+            1, profile=profile, platform=platform, session_id=session, task_id=task, content=ANSWER
+        ),
+        turn_ended(profile=profile, platform=platform, session_id=session, task_id=task),
+    )
+
+    assert rows() == []
+    assert sample(metrics, "agent_trigger_hook_events_total", outcome="ignored") == 1.0
+
+
+async def test_a_background_reviews_calls_are_counted_by_person_and_land_in_no_row(
+    receiver: Receiver, rows: Rows
+) -> None:
+    """The harness forks the review into the answer's session under a task of its own and
+    never ends it: its calls are the person's spend and nothing on any row."""
     client, metrics = receiver
 
     await _deliver(
         client,
-        model_call(1, profile=profile, platform=platform, tool_calls=1),
-        model_call(2, profile=profile, platform=platform, content=ANSWER),
-        turn_ended(profile=profile, platform=platform),
+        model_call(1, profile="lou", content=ANSWER, model="gpt-6-luna"),
+        turn_ended(profile="lou", model="gpt-6-luna"),
+        review_call(
+            1,
+            profile="lou",
+            content=REVIEWED,
+            model="gpt-6-luna",
+            provider="openai-api",
+            input_tokens=10000,
+            cache_read_tokens=4000,
+            output_tokens=500,
+        ),
     )
 
     (row,) = rows()
-    assert row["use_case"] == "messenger"
-    assert row["enduser_id"] == profile
-    assert row["surface"] == surface
-    assert row["text"] is None
-    assert row["tool_trace"]["calls"][0]["tools"] == [{"name": "list_episodes", "arguments": ""}]
-    assert row["tokens_in"] == 2 * 42000
-    assert _odd_turns(metrics, "undeclared_profile", profile) == 1.0
-
-
-async def test_a_discord_turn_on_the_default_profile_is_numbers_of_nobody(
-    receiver: Receiver, rows: Rows
-) -> None:
-    """With persons on Discord the bot routes every message to a profile; this one slipped by."""
-    client, metrics = receiver
-
-    await _deliver(client, model_call(1, content=ANSWER), turn_ended())
-
-    (row,) = rows()
-    assert row["use_case"] == "messenger"
-    assert row["enduser_id"] is None
-    assert row["surface"] == "discord"
-    assert row["text"] is None
-    assert row["tokens_in"] == 42000
-    assert _odd_turns(metrics, "discord_on_default", "") == 1.0
-
-
-@pytest.mark.parametrize(
-    ("profile", "kind"),
-    [("kim", "cron_on_person"), ("rex", "undeclared_profile")],
-    ids=["person", "undeclared"],
-)
-async def test_a_cron_turn_on_a_profile_of_no_machine_gets_no_row(
-    receiver: Receiver, rows: Rows, profile: str, kind: str
-) -> None:
-    """Only the default profile runs the declared jobs; no use case owns this one."""
-    client, metrics = receiver
-    calls = model_call(
-        1, profile=profile, session_id=CRON_SESSION, platform="cron", task_id=CRON_TASK
-    )
-    end = turn_ended(profile=profile, session_id=CRON_SESSION, platform="cron", task_id=CRON_TASK)
-
-    await _deliver(client, calls, end)
-
-    assert rows() == []
-    assert _odd_turns(metrics, kind, profile) == 1.0
-    assert sample(metrics, "agent_trigger_hook_events_total", outcome="ignored") == 1.0
+    # The answer's own numbers, on the subscription.
+    assert (row["tokens_in"], row["cost"]) == (42000, Decimal(0))
+    # lou's fallback at its own price: 10k fresh at 0.20, 4k cached at 0.02, 500 out at 1.00.
+    assert sample(
+        metrics,
+        "agent_trigger_cost_usd_total",
+        use_case="messenger",
+        source="free-account",
+        step="fallback",
+        enduser_id="lou",
+    ) == pytest.approx(0.00258)
+    assert sample(metrics, "agent_trigger_hook_events_total", outcome="counted") == 2.0
+    assert sample(metrics, "agent_trigger_orphaned_calls_total", enduser_id="lou") == 0.0
 
 
 def _fallback_call(profile: str, turn: str) -> bytes:
@@ -384,19 +395,6 @@ async def test_a_persons_log_lines_name_them(
     # Outside the turn a line names nobody.
     logging.getLogger("lares_agent_trigger.test").info("between turns")
     assert not hasattr(logs.records[-1], "enduser.id")
-
-
-async def test_the_warning_that_a_turn_has_no_cost_names_its_person(
-    receiver: Receiver, rows: Rows, logs: pytest.LogCaptureFixture
-) -> None:
-    """A profile no person runs on has no source to price by."""
-    client, _ = receiver
-
-    await _deliver(client, model_call(1, profile="rex", content=ANSWER), turn_ended(profile="rex"))
-
-    assert len(rows()) == 1
-    (line,) = [record for record in logs.records if "has no cost" in record.getMessage()]
-    assert getattr(line, "enduser.id", None) == "rex"
 
 
 async def test_a_persons_turn_that_never_ended_is_a_trace_that_names_them(

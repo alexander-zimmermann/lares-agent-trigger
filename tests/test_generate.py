@@ -4,6 +4,8 @@ the rendered files out.
 `rendering/` holds one declaration that touches every surface and the files it
 renders to. A deliberate change to the rendering is reviewed as a diff of
 those files: `UPDATE_RENDERING=1 pytest tests/test_generate.py` rewrites them.
+The expected files pin every rendered value; the tests beside them cover what
+those files cannot show: a declaration that differs, and a refusal.
 """
 
 from __future__ import annotations
@@ -30,12 +32,6 @@ _PERSONS_TEXT = PERSONS.read_text(encoding="utf-8")
 NO_PERSONS = _PERSONS_TEXT[: _PERSONS_TEXT.index("\npersons:\n")]
 
 
-def _write_use_cases(tmp_path: Path, text: str) -> Path:
-    path = tmp_path / "use-cases.yaml"
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
 def _render(
     tmp_path: Path,
     use_cases: str | None = None,
@@ -60,11 +56,6 @@ def _config(
 ) -> dict[str, Any]:
     rendered = _render(tmp_path, use_cases, persons=persons)
     loaded: dict[str, Any] = yaml.safe_load(rendered.hermes_config)
-    return loaded
-
-
-def _profile(tmp_path: Path, handle: str, persons: str | None = None) -> dict[str, Any]:
-    loaded: dict[str, Any] = yaml.safe_load(_render(tmp_path, persons=persons).profiles[handle])
     return loaded
 
 
@@ -115,19 +106,11 @@ def test_the_rendering_matches_the_expected_files(tmp_path: Path) -> None:
         assert text == (EXPECTED / name).read_text(encoding="utf-8"), name
 
 
-def test_the_default_profile_runs_on_its_source_and_falls_back_in_order(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+def test_every_rendered_file_opens_with_the_generated_line(tmp_path: Path) -> None:
+    rendered = _render(tmp_path)
 
-    assert config["model"] == {"provider": "openai-codex", "default": "gpt-6-sol"}
-    assert config["fallback_providers"] == [
-        {"provider": "openai-api", "model": "gpt-6-luna"},
-        {"provider": "openai-api", "model": "gpt-5.6-terra"},
-    ]
-
-
-def test_the_default_profile_works_in_the_harness_home(tmp_path: Path) -> None:
-    """The gateway's working directory, where Hermes discovers the context files."""
-    assert _config(tmp_path)["terminal"] == {"cwd": "/opt/data"}
+    for text in _files(rendered).values():
+        assert text.splitlines()[0] == GENERATED_LINE
 
 
 def test_a_source_nobody_runs_on_renders_nothing(tmp_path: Path) -> None:
@@ -137,122 +120,25 @@ def test_a_source_nobody_runs_on_renders_nothing(tmp_path: Path) -> None:
     assert _render(tmp_path, persons=without) == _render(tmp_path)
 
 
-def test_each_enabled_person_gets_a_profile_of_their_own(tmp_path: Path) -> None:
-    """max is dormant."""
-    assert list(_render(tmp_path).profiles) == ["kim", "lou"]
+def test_a_dormant_person_renders_nothing(tmp_path: Path) -> None:
+    without = _PERSONS_TEXT[: _PERSONS_TEXT.index("  - name: max")]
+
+    assert _render(tmp_path, persons=without) == _render(tmp_path)
 
 
-def test_a_persons_profile_runs_on_their_source_in_their_directory(tmp_path: Path) -> None:
-    lou = _profile(tmp_path, "lou")
+def test_a_dormant_use_case_renders_nothing(tmp_path: Path) -> None:
+    """The dormant entry is the only one naming lares-wiki: no entry, no job, no route."""
+    text = USE_CASES.read_text(encoding="utf-8")
+    without = text[: text.index("  - name: basalte-prose")]
 
-    assert lou["model"] == {"provider": "openai-codex", "default": "gpt-6-luna"}
-    assert lou["fallback_providers"] == [{"provider": "openai-api", "model": "gpt-6-luna"}]
-    assert lou["terminal"] == {"cwd": "/opt/data/profiles/lou"}
-
-
-def test_a_persons_surfaces_hold_their_own_tool_servers(tmp_path: Path) -> None:
-    """Discord keeps the harness's own Discord tools; the web chat comes in on the API server.
-
-    The web chat holds the harness's own skill tools as well, which Discord's composite holds.
-    """
-    kim, lou = _profile(tmp_path, "kim"), _profile(tmp_path, "lou")
-
-    assert kim["platform_toolsets"] == {
-        "discord": ["hermes-discord", "lares", "lares-control", "github"],
-        "api_server": ["skills", "lares", "lares-control", "github"],
-    }
-    assert list(kim["mcp_servers"]) == ["lares", "lares-control", "github"]
-    assert lou["platform_toolsets"] == {
-        "discord": ["hermes-discord", "lares"],
-        "api_server": ["skills", "lares"],
-    }
-    # The default profile's entry: one route per server, whoever holds it.
-    assert lou["mcp_servers"] == {"lares": _config(tmp_path)["mcp_servers"]["lares"]}
+    assert _render(tmp_path, without) == _render(tmp_path)
+    assert "lares-wiki" not in _config(tmp_path)["mcp_servers"]
+    assert "lares-wiki" not in _routes(tmp_path)
 
 
 def _values(tmp_path: Path, persons: str | None = None) -> dict[str, Any]:
     loaded: dict[str, Any] = yaml.safe_load(_render(tmp_path, persons=persons).profiles_values)
     return loaded
-
-
-def test_each_persons_files_are_mounted_read_only_into_their_profile(tmp_path: Path) -> None:
-    """Their config and .env, and the files every person shares: SOUL.md, AGENTS.md, and the
-    marker that keeps the harness from seeding its bundled skills."""
-    deployment = _values(tmp_path)["deployment"]
-
-    assert {
-        name: deployment["volumes"][name] for name in deployment["volumes"] if "lou" in name
-    } == {
-        "hermes-lou-env": {
-            "secret": {
-                "secretName": "hermes-credentials",
-                "items": [{"key": "lou.env", "path": ".env"}],
-            }
-        },
-        "hermes-lou-config": {
-            "configMap": {
-                "name": "hermes-profiles",
-                "items": [{"key": "lou", "path": "config.yaml"}],
-            }
-        },
-        "hermes-lou-soul": {
-            "configMap": {
-                "name": "hermes-config",
-                "items": [{"key": "persons-SOUL.md", "path": "SOUL.md"}],
-            }
-        },
-        "hermes-lou-agents": {
-            "configMap": {
-                "name": "hermes-config",
-                "items": [{"key": "AGENTS.md", "path": "AGENTS.md"}],
-            }
-        },
-        "hermes-lou-no-bundled-skills": {
-            "configMap": {
-                "name": "hermes-config",
-                "items": [{"key": ".no-bundled-skills", "path": ".no-bundled-skills"}],
-            }
-        },
-    }
-    mounts = {name: mount for name, mount in deployment["volumeMounts"].items() if "lou" in name}
-    assert mounts == {
-        f"hermes-lou-{part}": {
-            "mountPath": f"/opt/data/profiles/lou/{file}",
-            "subPath": file,
-            "readOnly": True,
-        }
-        for part, file in (
-            ("env", ".env"),
-            ("config", "config.yaml"),
-            ("soul", "SOUL.md"),
-            ("agents", "AGENTS.md"),
-            ("no-bundled-skills", ".no-bundled-skills"),
-        )
-    }
-    # max is dormant.
-    assert {name.split("-")[1] for name in deployment["volumes"]} == {"kim", "lou"}
-
-
-def test_each_persons_agent_log_is_streamed_by_a_container_of_its_own(tmp_path: Path) -> None:
-    """Hermes writes each profile's log under its home; Loki names the person by the container."""
-    containers = _values(tmp_path)["deployment"]["additionalContainers"]
-
-    # max is dormant.
-    assert list(containers) == ["agent-log-kim", "agent-log-lou"]
-    assert containers["agent-log-lou"] == {
-        # lares pins the image every log container runs under this name.
-        "image": "agent-log",
-        "command": ["tail", "-n", "0", "-F", "/opt/data/profiles/lou/logs/agent.log"],
-        "volumeMounts": [{"name": "hermes-data", "mountPath": "/opt/data", "readOnly": True}],
-        "securityContext": {
-            "runAsUser": 10000,
-            "runAsGroup": 10000,
-            "runAsNonRoot": True,
-            "readOnlyRootFilesystem": True,
-            "allowPrivilegeEscalation": False,
-            "capabilities": {"drop": ["ALL"]},
-        },
-    }
 
 
 def test_without_persons_the_profiles_values_add_nothing(tmp_path: Path) -> None:
@@ -261,67 +147,11 @@ def test_without_persons_the_profiles_values_add_nothing(tmp_path: Path) -> None
     }
 
 
-def test_each_persons_config_is_one_key_of_the_profiles_config_map(tmp_path: Path) -> None:
-    """Its content hash rolls the harness when a profile changes."""
-    kustomization = yaml.safe_load(_render(tmp_path).profiles_kustomization)
+def test_without_persons_the_profiles_config_map_is_still_generated(tmp_path: Path) -> None:
+    """kustomize refuses a kustomization without anything in it."""
     empty = yaml.safe_load(_render(tmp_path, persons=NO_PERSONS).profiles_kustomization)
 
-    assert kustomization["configMapGenerator"] == [
-        {"name": "hermes-profiles", "files": ["kim=kim/config.yaml", "lou=lou/config.yaml"]}
-    ]
-    # kustomize refuses a kustomization without anything in it.
     assert empty["configMapGenerator"] == [{"name": "hermes-profiles", "files": []}]
-
-
-def test_a_persons_turns_are_reported_like_the_default_profiles(tmp_path: Path) -> None:
-    assert _profile(tmp_path, "lou")["hooks"] == _config(tmp_path)["hooks"]
-
-
-def test_a_persons_profile_carries_the_settings_whole(tmp_path: Path) -> None:
-    """The onboarding latches among them: the config is read-only, a latch could not be set."""
-    settings = SETTINGS.read_text(encoding="utf-8")
-    profile = _render(tmp_path).profiles["lou"]
-
-    assert settings in profile
-    assert _profile(tmp_path, "lou")["agent"] == yaml.safe_load(settings)["agent"]
-
-
-def test_each_discord_person_is_routed_to_their_own_profile(tmp_path: Path) -> None:
-    """By the sender's id, sealed in the default profile's .env; max is dormant."""
-    assert _config(tmp_path)["gateway"]["profile_routes"] == [
-        {
-            "name": "kim",
-            "platform": "discord",
-            "user_id": "${env:DISCORD_USER_KIM}",
-            "profile": "kim",
-        },
-        {
-            "name": "lou",
-            "platform": "discord",
-            "user_id": "${env:DISCORD_USER_LOU}",
-            "profile": "lou",
-        },
-    ]
-
-
-def test_only_the_discord_persons_may_write_and_only_the_admin_runs_every_command(
-    tmp_path: Path,
-) -> None:
-    """A missing id leaves a person ignored, never misrouted to the default profile."""
-    discord = _config(tmp_path)["discord"]
-
-    assert discord["allow_from"] == ["${env:DISCORD_USER_KIM}", "${env:DISCORD_USER_LOU}"]
-    assert discord["allow_admin_from"] == ["${env:DISCORD_USER_KIM}"]
-    assert discord["group_allow_admin_from"] == ["${env:DISCORD_USER_KIM}"]
-    assert discord["user_allowed_commands"] == ["reset", "stop", "retry", "undo"]
-    assert discord["group_user_allowed_commands"] == ["reset", "stop", "retry", "undo"]
-
-
-def test_the_rendered_keys_join_the_settings_own_blocks(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-
-    assert config["gateway"]["multiplex_profiles"] is True
-    assert config["discord"]["require_mention"] is True
 
 
 def test_the_rendered_keys_stand_alone_when_the_settings_have_no_such_block(
@@ -341,17 +171,6 @@ def test_the_rendered_keys_stand_alone_when_the_settings_have_no_such_block(
     ]
 
 
-def test_once_persons_are_on_discord_the_default_profile_holds_no_chat_server(
-    tmp_path: Path,
-) -> None:
-    """The machines' profile keeps the event and cron surfaces; the chat is the persons'."""
-    config = _config(tmp_path)
-
-    assert config["platform_toolsets"]["discord"] == ["hermes-discord", "no_mcp"]
-    # Only the chat held the request server.
-    assert "lares-control" not in config["mcp_servers"]
-
-
 def test_without_a_discord_person_the_default_profile_renders_as_without_persons(
     tmp_path: Path,
 ) -> None:
@@ -363,12 +182,6 @@ def test_without_a_discord_person_the_default_profile_renders_as_without_persons
         _render(tmp_path, persons=without_discord).hermes_config
         == _render(tmp_path, persons=NO_PERSONS).hermes_config
     )
-
-
-def test_a_dormant_person_renders_nothing(tmp_path: Path) -> None:
-    without = _PERSONS_TEXT[: _PERSONS_TEXT.index("  - name: max")]
-
-    assert _render(tmp_path, persons=without) == _render(tmp_path)
 
 
 def test_each_surface_sees_only_the_servers_its_use_cases_may_hold(tmp_path: Path) -> None:
@@ -383,39 +196,33 @@ def test_each_surface_sees_only_the_servers_its_use_cases_may_hold(tmp_path: Pat
     assert toolsets["cron"] == ["hermes-cron", "lares", "lares-memory", "github"]
 
 
-GATEWAY = "http://agentgateway.agents.svc.cluster.local:8080"
-GITHUB_TOOLS = ["get_*", "list_*", "search_*", "issue_read", "pull_request_read"]
-
-
-def test_every_tool_server_entry_is_its_gateway_route_under_the_profiles_key(
+def test_a_memory_server_reaches_only_the_surface_of_the_use_cases_keeping_one(
     tmp_path: Path,
 ) -> None:
-    """One shape for every server: the route, the profile's key for it, the include list.
+    """The chat keeps a memory too, but names no memory server: Discord does not get it."""
+    toolsets = _config(tmp_path, persons=NO_PERSONS)["platform_toolsets"]
 
-    The gateway serves tools only, so the harness asks for no resources or prompts.
-    """
-    lares = _config(tmp_path)["mcp_servers"]["lares"]
-
-    assert lares == {
-        "url": f"{GATEWAY}/mcp/lares",
-        "headers": {"Authorization": "Bearer ${env:LARES_GATEWAY_KEY}"},
-        "timeout": 60,
-        "tools": {"include": LARES_TOOLS, "resources": False, "prompts": False},
-    }
+    assert "lares-memory" not in toolsets["discord"]
+    assert "lares-memory" not in toolsets["api_server"]
 
 
-def test_a_person_reaches_every_server_on_the_servers_route(tmp_path: Path) -> None:
-    """kim's key names kim to the gateway, so kim needs no route of their own."""
-    kim = _profile(tmp_path, "kim")["mcp_servers"]
+def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> None:
+    """An explicit list without a server name would hand that surface every server."""
+    text = USE_CASES.read_text(encoding="utf-8")
+    only_chat = text[: text.index("  - name: explain-episode")]
 
-    assert kim["lares"]["url"] == f"{GATEWAY}/mcp/lares"
-    assert kim["lares-control"]["url"] == f"{GATEWAY}/mcp/lares-control"
-    assert kim["github"] == {
-        "url": f"{GATEWAY}/mcp/github",
-        "headers": {"Authorization": "Bearer ${env:GITHUB_GATEWAY_KEY}"},
-        "timeout": 60,
-        "tools": {"include": GITHUB_TOOLS, "resources": False, "prompts": False},
-    }
+    toolsets = _config(tmp_path, only_chat, NO_PERSONS)["platform_toolsets"]
+    assert toolsets["api_server"] == ["no_mcp"]
+    # The chat's read servers stay readable for a job made by hand; its request server does not.
+    assert toolsets["cron"] == ["hermes-cron", "lares", "github"]
+    # No agent job is left; the script's, which needs no model, stays.
+    assert [job["name"] for job in _jobs(tmp_path, only_chat)] == ["lares:skill-digest"]
+
+    only_control = only_chat.replace(
+        "    tools: [lares, lares-control, github]\n", "    tools: [lares-control]\n"
+    )
+    only_control_toolsets = _config(tmp_path, only_control, NO_PERSONS)["platform_toolsets"]
+    assert only_control_toolsets["cron"] == ["hermes-cron", "no_mcp"]
 
 
 def _gateway(tmp_path: Path, persons: str | None = None, use_cases: str | None = None) -> Any:
@@ -430,76 +237,11 @@ def _routes(
     return {route["name"]: route for route in config["binds"][0]["listeners"][0]["routes"]}
 
 
-def test_the_gateway_holds_one_route_per_tool_server_and_one_per_connector(
-    tmp_path: Path,
-) -> None:
-    """Every server a profile holds, once, then every connector a person signs in to."""
-    assert list(_routes(tmp_path)) == [
-        "lares",
-        "lares-control",
-        "lares-memory",
-        "github",
-        "claude-ai",
-    ]
-
-
-def _keyed(tmp_path: Path, persons: str | None = None) -> dict[str, dict[str, Any]]:
-    """The routes a profile's key opens: every one but the connectors'."""
-    return {
-        name: route
-        for name, route in _routes(tmp_path, persons).items()
-        if "apiKey" in route["policies"]
-    }
-
-
-def test_each_route_takes_the_keys_of_the_profiles_holding_it_and_no_other(
-    tmp_path: Path,
-) -> None:
-    """Each key a variable named after its sealed key, the one the profile's .env reads."""
-    keys = {
-        name: [key["key"] for key in route["policies"]["apiKey"]["keys"]]
-        for name, route in _keyed(tmp_path).items()
-    }
-
-    assert keys == {
-        "lares": ["${LARES_GATEWAY_KEY}", "${KIM_LARES_GATEWAY_KEY}", "${LOU_LARES_GATEWAY_KEY}"],
-        "lares-control": ["${KIM_LARES_CONTROL_GATEWAY_KEY}"],
-        "lares-memory": ["${LARES_MEMORY_GATEWAY_KEY}"],
-        "github": ["${KIM_GITHUB_GATEWAY_KEY}"],
-    }
-    assert all(
-        route["policies"]["apiKey"]["mode"] == "strict" for route in _keyed(tmp_path).values()
-    )
-    # Without persons, the default profile holds the chat's servers on the same routes.
+def test_without_persons_the_default_profile_holds_the_chats_servers(tmp_path: Path) -> None:
+    """Its key alone opens the routes of the chat's servers, github among them."""
     assert _routes(tmp_path, NO_PERSONS)["github"]["policies"]["apiKey"]["keys"] == [
         {"key": "${GITHUB_GATEWAY_KEY}"}
     ]
-
-
-def test_a_persons_key_carries_their_handle(tmp_path: Path) -> None:
-    """The gateway names the person behind the key; the machines' key names nobody."""
-    lares = _routes(tmp_path)["lares"]["policies"]["apiKey"]["keys"]
-
-    assert lares == [
-        {"key": "${LARES_GATEWAY_KEY}"},
-        {"key": "${KIM_LARES_GATEWAY_KEY}", "metadata": {"enduser_id": "kim"}},
-        {"key": "${LOU_LARES_GATEWAY_KEY}", "metadata": {"enduser_id": "lou"}},
-    ]
-
-
-def test_each_route_names_the_caller_to_its_server(tmp_path: Path) -> None:
-    """On the call to the server, over whatever the caller sent: the route, and the key's person."""
-    routes = _routes(tmp_path)
-
-    for name in ("lares", "lares-memory", "github"):
-        (target,) = routes[name]["backends"][0]["mcp"]["targets"]
-        assert target["policies"] == {
-            "transformations": {
-                "request": {
-                    "set": {"X-Client-Id": f'"{name}"', "X-Enduser-Id": "apiKey.enduser_id"}
-                }
-            }
-        }, name
 
 
 def test_a_server_outside_the_cluster_is_told_nobody(tmp_path: Path) -> None:
@@ -515,38 +257,6 @@ def test_a_server_outside_the_cluster_is_told_nobody(tmp_path: Path) -> None:
     assert "policies" in routes["lares"]["backends"][0]["mcp"]["targets"][0]
 
 
-def test_every_bridge_route_calls_the_bridge_with_the_gateways_key(tmp_path: Path) -> None:
-    """One key for the bridge, whichever route the call came in on."""
-    routes = _routes(tmp_path)
-
-    assert routes["lares"]["matches"] == [{"path": {"exact": "/mcp/lares"}}]
-    mcp = routes["lares"]["backends"][0]["mcp"]
-    # A session would keep the credential it started with past a renewal.
-    assert mcp["statefulMode"] == "stateless"
-    assert [(target["name"], target["mcp"]) for target in mcp["targets"]] == [
-        ("lares", {"host": "http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp"})
-    ]
-    key = {
-        "key": {
-            "value": {"file": "/etc/agentgateway/credentials/agentgateway-keys/lares-mcp-bridge"}
-        }
-    }
-    for name in ("lares", "lares-control", "lares-memory", "claude-ai"):
-        assert routes[name]["policies"]["backendAuth"] == key, name
-
-
-def test_an_http_route_attaches_its_credential_from_the_mounted_secret(tmp_path: Path) -> None:
-    github = _routes(tmp_path)["github"]
-
-    assert github["matches"] == [{"path": {"exact": "/mcp/github"}}]
-    (target,) = github["backends"][0]["mcp"]["targets"]
-    assert target["mcp"] == {"host": "http://github-mcp-server.agents.svc.cluster.local:8082/mcp"}
-    # On Authorization, the gateway's default: a bearer token.
-    assert github["policies"]["backendAuth"] == {
-        "key": {"value": {"file": "/etc/agentgateway/credentials/github-mcp-server-token/token"}}
-    }
-
-
 def test_a_credential_in_another_header_goes_as_it_is(tmp_path: Path) -> None:
     text = USE_CASES.read_text(encoding="utf-8").replace(
         "      header: Authorization\n", "      header: X-Api-Key\n"
@@ -554,21 +264,6 @@ def test_a_credential_in_another_header_goes_as_it_is(tmp_path: Path) -> None:
     github = _routes(tmp_path, use_cases=text)["github"]
 
     assert github["policies"]["backendAuth"]["key"]["location"] == {"header": {"name": "X-Api-Key"}}
-
-
-def test_each_route_serves_only_its_servers_tools(tmp_path: Path) -> None:
-    """One allow rule per entry of `tools`: a glob by its prefix, a name by itself."""
-    routes = _routes(tmp_path)
-
-    assert routes["github"]["policies"]["mcpAuthorization"] == {
-        "rules": [
-            'mcp.tool.name.startsWith("get_")',
-            'mcp.tool.name.startsWith("list_")',
-            'mcp.tool.name.startsWith("search_")',
-            'mcp.tool.name == "issue_read"',
-            'mcp.tool.name == "pull_request_read"',
-        ]
-    }
 
 
 def test_a_glob_inside_a_name_becomes_an_anchored_pattern(tmp_path: Path) -> None:
@@ -583,18 +278,10 @@ def test_a_glob_inside_a_name_becomes_an_anchored_pattern(tmp_path: Path) -> Non
     ]
 
 
-def test_the_gateway_traces_every_call_at_the_platforms_ratio(tmp_path: Path) -> None:
-    config = _gateway(tmp_path)
+def test_a_connector_nobody_signs_in_to_has_no_route(tmp_path: Path) -> None:
+    persons = _PERSONS_TEXT.replace("    connectors: [claude-ai]\n", "")
 
-    assert config["frontendPolicies"] == {
-        "tracing": {
-            "host": "alloy-alloy-receiver.alloy.svc.cluster.local:4318",
-            "protocol": "http",
-            "randomSampling": "0.5",
-        }
-    }
-    # The gateway listens where the harness calls it.
-    assert config["binds"][0]["port"] == 8080
+    assert "claude-ai" not in _routes(tmp_path, persons)
 
 
 def _secret_items(volumes: list[dict[str, Any]], secret: str) -> list[str]:
@@ -623,142 +310,11 @@ def test_every_key_the_routes_name_is_a_variable_or_file_the_values_provide(
     assert read == files
 
 
-def test_the_gateway_reads_its_keys_and_mounts_its_routes_and_credentials(tmp_path: Path) -> None:
-    """Whole directories, never a subPath: kubelet swaps a renewed Secret in, and it reloads.
-
-    A key is an environment variable, read at start, so a resealed one rolls
-    the gateway; a renewed token does not.
-    """
-    values = yaml.safe_load(_render(tmp_path).routes_values)
-
-    def key(variable: str, sealed: str) -> dict[str, Any]:
-        reference = {"name": "agentgateway-keys", "key": sealed}
-        return {"name": variable, "valueFrom": {"secretKeyRef": reference}}
-
-    def items(*keys: str) -> list[dict[str, str]]:
-        return [{"key": k, "path": k} for k in keys]
-
-    credentials = "/etc/agentgateway/credentials"
-    assert values == {
-        "config": {"config": {"localXdsPath": "/etc/agentgateway/routes/config.yaml"}},
-        "podAnnotations": {"secret.reloader.stakater.com/reload": "agentgateway-keys"},
-        "extraEnv": [
-            key("LARES_GATEWAY_KEY", "lares-gateway-key"),
-            key("KIM_LARES_GATEWAY_KEY", "kim-lares-gateway-key"),
-            key("LOU_LARES_GATEWAY_KEY", "lou-lares-gateway-key"),
-            key("KIM_LARES_CONTROL_GATEWAY_KEY", "kim-lares-control-gateway-key"),
-            key("LARES_MEMORY_GATEWAY_KEY", "lares-memory-gateway-key"),
-            key("KIM_GITHUB_GATEWAY_KEY", "kim-github-gateway-key"),
-        ],
-        "extraVolumes": [
-            {"name": "routes", "configMap": {"name": "agentgateway-routes"}},
-            {
-                "name": "agentgateway-keys",
-                "secret": {
-                    "secretName": "agentgateway-keys",
-                    "items": items("lares-mcp-bridge"),
-                },
-            },
-            {
-                "name": "github-mcp-server-token",
-                "secret": {"secretName": "github-mcp-server-token", "items": items("token")},
-            },
-        ],
-        "extraVolumeMounts": [
-            {"name": "routes", "mountPath": "/etc/agentgateway/routes", "readOnly": True},
-            {
-                "name": "agentgateway-keys",
-                "mountPath": f"{credentials}/agentgateway-keys",
-                "readOnly": True,
-            },
-            {
-                "name": "github-mcp-server-token",
-                "mountPath": f"{credentials}/github-mcp-server-token",
-                "readOnly": True,
-            },
-        ],
-    }
-
-
-def test_a_memory_server_reaches_only_the_surface_of_the_use_cases_keeping_one(
-    tmp_path: Path,
-) -> None:
-    """The chat keeps a memory too, but names no memory server: Discord does not get it."""
-    toolsets = _config(tmp_path, persons=NO_PERSONS)["platform_toolsets"]
-
-    assert "lares-memory" not in toolsets["discord"]
-    assert "lares-memory" not in toolsets["api_server"]
-    assert _config(tmp_path)["mcp_servers"]["lares-memory"]["tools"]["include"] == [
-        "get_memory",
-        "append_memory",
-    ]
-
-
-def test_the_hook_reports_every_call_failure_and_finished_turn_to_the_trigger(
-    tmp_path: Path,
-) -> None:
-    assert _config(tmp_path)["hooks"] == {
-        "outbound": [
-            {
-                "name": "lares-agent-trigger",
-                "url": "http://lares-agent-trigger.agents.svc.cluster.local:8080/hooks/hermes",
-                "events": [
-                    "post_api_request",
-                    "post_tool_call",
-                    "api_request_error",
-                    "on_session_end",
-                ],
-                "secret_env": "LARES_AGENT_TRIGGER_HOOK_SECRET",
-                "timeout": 10,
-            }
-        ]
-    }
-
-
-def test_one_sampling_ratio_is_rendered_for_every_service_of_the_platform(
-    tmp_path: Path,
-) -> None:
-    """The trigger, the bridge and the engine read it from the same rendered variable."""
-    line = _render(tmp_path).tracing.splitlines()[-1]
-
-    assert line == "TRACING_SAMPLING_RATIO=0.5"
+def test_the_sampling_ratio_is_rendered_as_the_declaration_writes_it(tmp_path: Path) -> None:
     text = USE_CASES.read_text(encoding="utf-8")
     whole = text.replace("sampling_ratio: 0.5", "sampling_ratio: 1")
+
     assert _render(tmp_path, whole).tracing.splitlines()[-1] == "TRACING_SAMPLING_RATIO=1.0"
-
-
-def test_a_schedule_use_case_becomes_one_managed_cron_job(tmp_path: Path) -> None:
-    assert _jobs(tmp_path)[0] == {
-        "name": "lares:propose-faults",
-        "schedule": "0 3 * * 0",
-        "skills": ["lares-propose"],
-        "prompt": "Answer in English. Stay within 80 tool calls and 20 minutes.",
-        # The trigger delivers; the harness keeps the output to itself.
-        "deliver": "local",
-    }
-
-
-def test_a_script_becomes_one_managed_cron_job_without_a_model(tmp_path: Path) -> None:
-    """The harness runs the script and delivers its output; a dormant script renders nothing."""
-    assert _jobs(tmp_path)[1:] == [
-        {
-            "name": "lares:skill-digest",
-            "schedule": "0 18 * * 0",
-            "script": "skill-digest.py",
-            "no_agent": True,
-            "deliver": "discord",
-        }
-    ]
-
-
-LARES_TOOLS = [
-    "list_*",
-    "get_current_knx",
-    "get_episode",
-    "query_*",
-    "correlate_events",
-    "search_wiki",
-]
 
 
 def test_the_default_profiles_env_names_each_key_its_config_reads(tmp_path: Path) -> None:
@@ -780,48 +336,6 @@ def test_the_default_profiles_env_names_each_key_its_config_reads(tmp_path: Path
     ]
 
 
-def test_once_persons_are_on_discord_the_default_profile_holds_their_ids(
-    tmp_path: Path,
-) -> None:
-    """The bot still answers through the default profile; the chat's servers are the persons'."""
-    assert _env_lines(tmp_path) == [
-        """API_SERVER_KEY='{{ index . "api-server-key" }}'""",
-        """DISCORD_BOT_TOKEN='{{ index . "discord-bot-token" }}'""",
-        """DISCORD_USER_KIM='{{ index . "discord-user-kim" }}'""",
-        """DISCORD_USER_LOU='{{ index . "discord-user-lou" }}'""",
-        """LARES_AGENT_TRIGGER_HOOK_SECRET='{{ index . "lares-agent-trigger-hook-secret" }}'""",
-        """LARES_GATEWAY_KEY='{{ index . "lares-gateway-key" }}'""",
-        """LARES_MEMORY_GATEWAY_KEY='{{ index . "lares-memory-gateway-key" }}'""",
-        """OPENAI_API_KEY='{{ index . "openai-api-key" }}'""",
-    ]
-
-
-def test_each_persons_env_holds_their_own_keys_and_the_shared_hook_secret(tmp_path: Path) -> None:
-    """Their own key of the API server, of each route they hold and of the OpenAI project,
-    sealed under the handle; the hook secret is the one every profile shares."""
-    assert _env_lines(tmp_path, profile="kim") == [
-        """API_SERVER_KEY='{{ index . "kim-api-server-key" }}'""",
-        """LARES_AGENT_TRIGGER_HOOK_SECRET='{{ index . "lares-agent-trigger-hook-secret" }}'""",
-        """LARES_GATEWAY_KEY='{{ index . "kim-lares-gateway-key" }}'""",
-        """LARES_CONTROL_GATEWAY_KEY='{{ index . "kim-lares-control-gateway-key" }}'""",
-        """GITHUB_GATEWAY_KEY='{{ index . "kim-github-gateway-key" }}'""",
-        """OPENAI_API_KEY='{{ index . "kim-openai-api-key" }}'""",
-    ]
-    assert _env_lines(tmp_path, profile="lou") == [
-        """API_SERVER_KEY='{{ index . "lou-api-server-key" }}'""",
-        """LARES_AGENT_TRIGGER_HOOK_SECRET='{{ index . "lares-agent-trigger-hook-secret" }}'""",
-        """LARES_GATEWAY_KEY='{{ index . "lou-lares-gateway-key" }}'""",
-        """OPENAI_API_KEY='{{ index . "lou-openai-api-key" }}'""",
-    ]
-
-
-def test_every_profiles_env_is_one_file_of_the_harness_secret(tmp_path: Path) -> None:
-    patch = yaml.safe_load(_render(tmp_path).env_template)
-
-    assert patch["metadata"] == {"name": "hermes-credentials", "namespace": "agents"}
-    assert list(patch["spec"]["template"]["data"]) == ["default.env", "kim.env", "lou.env"]
-
-
 def test_without_a_chat_the_default_profile_holds_no_bot_token(tmp_path: Path) -> None:
     """The chat is what Discord serves; the trigger delivers to Discord with its own mount."""
     text = USE_CASES.read_text(encoding="utf-8")
@@ -836,53 +350,6 @@ def test_without_a_chat_the_default_profile_holds_no_bot_token(tmp_path: Path) -
         """LARES_MEMORY_GATEWAY_KEY='{{ index . "lares-memory-gateway-key" }}'""",
         """OPENAI_API_KEY='{{ index . "openai-api-key" }}'""",
     ]
-
-
-def test_a_dormant_use_case_renders_nothing(tmp_path: Path) -> None:
-    """The dormant entry is the only one naming lares-wiki: no entry, no job, no route."""
-    text = USE_CASES.read_text(encoding="utf-8")
-    without = text[: text.index("  - name: basalte-prose")]
-
-    assert _render(tmp_path, without) == _render(tmp_path)
-    assert "lares-wiki" not in _config(tmp_path)["mcp_servers"]
-    assert "lares-wiki" not in _routes(tmp_path)
-
-
-def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> None:
-    """An explicit list without a server name would hand that surface every server."""
-    text = USE_CASES.read_text(encoding="utf-8")
-    only_chat = text[: text.index("  - name: explain-episode")]
-
-    toolsets = _config(tmp_path, only_chat, NO_PERSONS)["platform_toolsets"]
-    assert toolsets["api_server"] == ["no_mcp"]
-    # The chat's read servers stay readable for a job made by hand; its request server does not.
-    assert toolsets["cron"] == ["hermes-cron", "lares", "github"]
-    # No agent job is left; the script's, which needs no model, stays.
-    assert [job["name"] for job in _jobs(tmp_path, only_chat)] == ["lares:skill-digest"]
-
-    only_control = only_chat.replace(
-        "    tools: [lares, lares-control, github]\n", "    tools: [lares-control]\n"
-    )
-    only_control_toolsets = _config(tmp_path, only_control, NO_PERSONS)["platform_toolsets"]
-    assert only_control_toolsets["cron"] == ["hermes-cron", "no_mcp"]
-
-
-def test_every_rendered_file_opens_with_the_generated_line(tmp_path: Path) -> None:
-    rendered = _render(tmp_path)
-
-    for text in _files(rendered).values():
-        assert text.splitlines()[0] == GENERATED_LINE
-
-
-def test_the_settings_are_kept_whole_beside_the_rendered_part(tmp_path: Path) -> None:
-    settings = SETTINGS.read_text(encoding="utf-8")
-    rendered = _render(tmp_path).hermes_config.splitlines()
-
-    # Comments and all, in order: the settings are copied, never re-serialised;
-    # the rendered keys of a block the settings hold follow the block's own.
-    lines = iter(rendered)
-    assert all(line in lines for line in settings.splitlines())
-    assert _config(tmp_path)["agent"] == yaml.safe_load(settings)["agent"]
 
 
 @pytest.mark.parametrize(
@@ -1030,48 +497,3 @@ def test_an_invalid_person_declaration_fails_with_the_field_named(
     assert "persons.yaml" in error
     assert "acount" in error
     assert not any((tmp_path / "out").iterdir())
-
-
-def test_a_connector_signs_its_persons_in_through_authentik(tmp_path: Path) -> None:
-    """Its path and the metadata beside it; Authentik registers no clients, so the gateway hands
-    out the pre-registered one."""
-    claude = _routes(tmp_path)["claude-ai"]
-
-    assert claude["matches"] == [
-        {"path": {"exact": "/mcp"}},
-        {"path": {"exact": "/.well-known/oauth-protected-resource/mcp"}},
-        {"path": {"exact": "/.well-known/oauth-authorization-server/mcp"}},
-        {"path": {"exact": "/.well-known/oauth-authorization-server/mcp/client-registration"}},
-    ]
-    assert claude["policies"]["mcpAuthentication"] == {
-        "issuer": "${AUTHENTIK_URL}/application/o/claude-ai/",
-        "audiences": ["claude-ai"],
-        "provider": {"authentik": {}},
-        "clientId": "claude-ai",
-        "resourceMetadata": {
-            "scopesSupported": ["openid", "profile", "email", "offline_access"],
-            "bearerMethodsSupported": ["header"],
-        },
-    }
-
-
-def test_a_connector_serves_its_tools_to_its_persons_only(tmp_path: Path) -> None:
-    """Anyone else Authentik signs in is refused; the person is named to the server."""
-    claude = _routes(tmp_path)["claude-ai"]
-
-    assert claude["policies"]["mcpAuthorization"] == {"rules": ['mcp.tool.name.startsWith("")']}
-    # On the way to the server, after the sign-in has read the token.
-    assert claude["backends"][0]["policies"] == {
-        "authorization": {"rules": ['jwt.preferred_username in ["kim"]']}
-    }
-    (target,) = claude["backends"][0]["mcp"]["targets"]
-    assert target["policies"]["transformations"]["request"]["set"] == {
-        "X-Client-Id": '"claude-ai"',
-        "X-Enduser-Id": "jwt.preferred_username",
-    }
-
-
-def test_a_connector_nobody_signs_in_to_has_no_route(tmp_path: Path) -> None:
-    persons = _PERSONS_TEXT.replace("    connectors: [claude-ai]\n", "")
-
-    assert "claude-ai" not in _routes(tmp_path, persons)

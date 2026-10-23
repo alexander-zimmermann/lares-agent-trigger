@@ -62,18 +62,17 @@ class Metrics:
         self.hook_events = Counter(
             "agent_trigger_hook_events_total",
             "Deliveries of the harness's hook, by what the receiver made of them.",
-            # counted | recorded | booked | handed_over | duplicate | orphaned | ignored
+            # counted | recorded | handed_over | duplicate | ignored
             # | refused | invalid | error
             ["outcome"],
             registry=self.registry,
         )
-        # Calls spent and in no row: of a turn whose end never came, or of a
-        # background review in a session no row holds. `enduser_id` is the
-        # profile's person; empty for the machines.
+        # Calls spent and in no row: of a turn whose end never came.
+        # `enduser_id` is the profile's person; empty for the machines.
         self.orphaned_calls = Counter(
             "agent_trigger_orphaned_calls_total",
-            "Model calls in no row: of a turn that never reported its end within an hour, or of "
-            "a background review in a session no row holds, by the profile's person.",
+            "Model calls in no row: of a turn that never reported its end within an hour, "
+            "by the profile's person.",
             ["enduser_id"],
             registry=self.registry,
         )
@@ -90,9 +89,9 @@ class Metrics:
         )
         self.unpriced_calls = Counter(
             "agent_trigger_unpriced_calls_total",
-            "Model calls without a cost, by use case, who served them and why; "
-            "their row's cost stays NULL.",
-            ["use_case", "provider", "model", "reason"],  # undeclared | no_usage | no_calls
+            "Model calls without a cost, by use case and who served them: no declared step, no "
+            "usage, or calls that never came through the hook; their row's cost stays NULL.",
+            ["use_case", "provider", "model"],
             registry=self.registry,
         )
         self.answers = Counter(
@@ -115,16 +114,6 @@ class Metrics:
             "Chat turns whose last model call failed for good, by person and the harness's class "
             "of the failure.",
             ["enduser_id", "error_type"],
-            registry=self.registry,
-        )
-        # A turn that should not have come the way it did: from a profile no
-        # person runs on, a Discord turn on the default profile while the
-        # chat is the persons', a cron turn on a person's profile.
-        self.odd_turns = Counter(
-            "agent_trigger_odd_turns_total",
-            "Turns from where none should come, by what was odd and the profile's person.",
-            # undeclared_profile | discord_on_default | cron_on_person
-            ["kind", "enduser_id"],
             registry=self.registry,
         )
         self.api_requests = Counter(

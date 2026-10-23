@@ -9,8 +9,6 @@ already has this one".
 A run the harness started on its own — a chat turn, a cron execution — is
 already over when the trigger hears of it, so its row is written closed, in
 one statement, and the same key keeps a replayed delivery from a second one.
-A chat row takes its background review's calls afterwards, in columns of
-their own.
 
 `agent_memory` holds one row of notes per use case, which this service alone
 appends to; and a run a person asks for on an episode reads that episode from
@@ -127,14 +125,6 @@ class OpenRow:
 
     id: int
     attempt: int
-
-
-@dataclass(frozen=True)
-class ChatRow:
-    """The newest chat row of a session: the answer a background review is booked on."""
-
-    id: int
-    use_case: str
 
 
 class Ledger:
@@ -395,71 +385,6 @@ class Ledger:
                 )
             ).fetchall()
         return int(rows[0]["id"]) if rows else None
-
-    async def newest_chat_row(self, session_id: str) -> ChatRow | None:
-        """The session's newest chat row; None when the session has none."""
-        async with self._require_pool.connection() as conn:
-            rows = await (
-                await conn.execute(
-                    """
-                    SELECT id, use_case FROM agent_runs
-                    WHERE session_id = %s AND subject_kind = 'chat'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (session_id,),
-                )
-            ).fetchall()
-        return ChatRow(id=int(rows[0]["id"]), use_case=str(rows[0]["use_case"])) if rows else None
-
-    async def add_review(
-        self,
-        run_id: int,
-        *,
-        tokens_in: int | None,
-        tokens_out: int | None,
-        cost: Decimal | None,
-        text: str | None,
-        continued: bool,
-    ) -> None:
-        """Add one call of a background review to a chat row's review columns.
-
-        A row without a review takes the call's numbers; a row with one adds
-        them, and an unknown part leaves that sum unknown. `continued` says
-        the review booked a call on the row before, so this one adds even
-        where every sum is unknown. The text is the review's newest reply; a
-        call without one leaves it as it was.
-        """
-        async with self._require_pool.connection() as conn:
-            await conn.execute(
-                """
-                UPDATE agent_runs SET
-                    review_tokens_in = CASE WHEN r.reviewed
-                        THEN agent_runs.review_tokens_in + %(tokens_in)s::integer
-                        ELSE %(tokens_in)s::integer END,
-                    review_tokens_out = CASE WHEN r.reviewed
-                        THEN agent_runs.review_tokens_out + %(tokens_out)s::integer
-                        ELSE %(tokens_out)s::integer END,
-                    review_cost = CASE WHEN r.reviewed
-                        THEN agent_runs.review_cost + %(cost)s::numeric
-                        ELSE %(cost)s::numeric END,
-                    review_text = COALESCE(%(text)s::text, agent_runs.review_text)
-                FROM (
-                    SELECT id, %(continued)s OR num_nonnulls(review_tokens_in, review_tokens_out,
-                                                             review_cost, review_text) > 0
-                               AS reviewed
-                    FROM agent_runs WHERE id = %(run_id)s
-                ) AS r
-                WHERE agent_runs.id = r.id
-                """,
-                {
-                    "run_id": run_id,
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "cost": cost,
-                    "text": text,
-                    "continued": continued,
-                },
-            )
 
     async def close_abandoned(self, error: str) -> list[AbandonedRow]:
         """Close as failed every row still open that no event comes back for; the rows closed.

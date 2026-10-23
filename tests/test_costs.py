@@ -86,14 +86,13 @@ def _spent(metrics: Metrics, use_case: str, step: str) -> float:
     )
 
 
-def _unpriced(metrics: Metrics, use_case: str, provider: str, model: str, reason: str) -> float:
+def _unpriced(metrics: Metrics, use_case: str, provider: str, model: str) -> float:
     return sample(
         metrics,
         "agent_trigger_unpriced_calls_total",
         use_case=use_case,
         provider=provider,
         model=model,
-        reason=reason,
     )
 
 
@@ -223,7 +222,7 @@ async def test_an_event_run_whose_calls_never_came_has_no_cost(
     assert row["status"] == "completed"
     assert row["cost"] is None
     # It answered, so it called the model: its cost is unknown, and that is counted.
-    assert _unpriced(metrics, "explain-episode", "openai-codex", "gpt-6-sol", "no_calls") == 1.0
+    assert _unpriced(metrics, "explain-episode", "openai-codex", "gpt-6-sol") == 1.0
     assert _answers(metrics, "explain-episode", "primary") == 1.0
 
 
@@ -236,7 +235,7 @@ async def test_a_turn_whose_calls_a_restart_lost_is_counted_without_a_cost(
 
     (row,) = rows()
     assert row["cost"] is None
-    assert _unpriced(metrics, "messenger", "", "gpt-6-sol", "no_calls") == 1.0
+    assert _unpriced(metrics, "messenger", "", "gpt-6-sol") == 1.0
 
 
 async def test_a_retried_attempt_still_counts_what_it_spent(
@@ -286,7 +285,7 @@ async def test_a_call_no_declared_step_covers_leaves_the_cost_unknown_and_is_cou
 
     (row,) = rows()
     assert row["cost"] is None
-    assert _unpriced(metrics, "messenger", "openai-api", "gpt-6-sol", "undeclared") == 1.0
+    assert _unpriced(metrics, "messenger", "openai-api", "gpt-6-sol") == 1.0
     # What could be priced is still spent.
     assert _spent(metrics, "messenger", "fallback") == pytest.approx(float(ONE_CALL))
     assert _answers(metrics, "messenger", "undeclared") == 1.0
@@ -303,7 +302,7 @@ async def test_a_metered_call_without_usage_is_unpriced(receiver: Receiver, rows
 
     (row,) = rows()
     assert row["cost"] is None
-    assert _unpriced(metrics, "messenger", "openai-api", "gpt-6-luna", "no_usage") == 1.0
+    assert _unpriced(metrics, "messenger", "openai-api", "gpt-6-luna") == 1.0
 
 
 async def test_a_subscription_call_without_usage_still_costs_nothing(
@@ -315,16 +314,3 @@ async def test_a_subscription_call_without_usage_still_costs_nothing(
 
     (row,) = rows()
     assert row["cost"] == Decimal("0")
-
-
-async def test_a_turn_from_a_profile_without_a_source_is_unpriced(
-    receiver: Receiver, rows: Rows
-) -> None:
-    """No person is declared; another profile's calls have no source to price by."""
-    client, metrics = receiver
-
-    await _deliver(client, _call(1, profile="kim", content=ANSWER), turn_ended(profile="kim"))
-
-    (row,) = rows()
-    assert row["cost"] is None
-    assert _unpriced(metrics, "messenger", "openai-codex", "gpt-6-sol", "undeclared") == 1.0

@@ -7,12 +7,11 @@ own, and the routes and every credential laid into a volume the way kubelet
 lays a Secret into a pod: a timestamped directory behind `..data`, swapped
 whole on a change. The cluster's Authentik comes in as the overlay sets it.
 Each upstream answers under the name the declaration gives it, on a network
-of their own. GitHub's server is the real one, started as lares starts it;
-it refuses a call without a token, so a route that lists its tools attached
-one. The bridge is a stand-in that lists a tool no route serves and answers
-with the key it was called with and the caller the gateway named. Authentik
-is a stand-in serving one application's discovery and signing keys; the
-test signs the tokens.
+of their own. The bridge is a stand-in, under the bridge's name and under
+GitHub's, that lists a tool no route serves and answers with the key it was
+called with and the caller the gateway named: what a route attached shows
+there. Authentik is a stand-in serving one application's discovery and
+signing keys; the test signs the tokens.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -40,9 +38,8 @@ from lares_agent_trigger.use_cases import ToolServer, load_use_case_file
 
 from .test_generate import PERSONS, SETTINGS, USE_CASES
 
-# What lares deploys; Renovate bumps them.
+# What lares deploys; Renovate bumps it.
 GATEWAY_IMAGE = "cr.agentgateway.dev/agentgateway:v1.6.0"
-GITHUB_SERVER_IMAGE = "ghcr.io/github/github-mcp-server:v2.0.3"
 # The stand-in bridge's interpreter.
 BRIDGE_IMAGE = "python:3.15-slim"
 
@@ -220,10 +217,14 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
                 network,
                 "--network-alias",
                 github_host,
-                GITHUB_SERVER_IMAGE,
-                "http",
-                "--read-only",
-                "--toolsets=repos,issues,pull_requests",
+                "-e",
+                f"PORT={urlsplit(github.url).port}",
+                "-v",
+                f"{FAKE_BRIDGE}:/fake_bridge.py:ro",
+                BRIDGE_IMAGE,
+                "python",
+                "-I",
+                "/fake_bridge.py",
             )
         )
         port = urlsplit(declared.gateway.url).port
@@ -424,15 +425,11 @@ def test_a_caller_never_names_itself_to_the_bridge(gateway: Gateway) -> None:
     assert kim.caller("get_episode")["enduser"] == "kim"
 
 
-def test_github_answers_through_its_route_with_the_attached_token(
-    gateway: Gateway, rendered: Rendered
-) -> None:
-    """Without a token the server answers nothing, so listed tools mean the gateway attached one."""
-    tools = _open(gateway, "github", _value("kim-github-gateway-key")).tools()
+def test_a_route_attaches_its_servers_credential_from_the_mounted_file(gateway: Gateway) -> None:
+    """GitHub's route carries the token laid into its Secret's directory, never the caller's key."""
+    caller = _open(gateway, "github", _value("kim-github-gateway-key")).caller("get_episode")
 
-    assert {"get_file_contents", "list_issues", "issue_read", "pull_request_read"} <= set(tools)
-    assert all(any(fnmatchcase(name, p) for p in rendered.github.tools) for name in tools)
-    assert not any(name.startswith(("create_", "update_", "merge_")) for name in tools)
+    assert caller == {"authorization": f"Bearer {TOKEN}", "client": "github", "enduser": "kim"}
 
 
 def test_a_renewed_credential_reaches_an_open_session_without_a_restart(
