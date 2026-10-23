@@ -1,57 +1,15 @@
 """Delivery: the trigger carries a completed run's output to the targets its use case declares.
 
-The model never delivers — on an API run the harness posts nothing itself. The
-registry below holds one delivery per output target. `stored` is the ledger
-row, which the event path writes before any other target sees the text; the
-others post the text somewhere a person reads it and name what they created,
-so the row can record it in `output_ref`. A target that refuses fails the run:
-the others are still tried, the stored text stays, and the refusal's raw text
-becomes the row's error.
-
-`wiki_page` takes a structured output, validated before anything leaves: the
-run opens with its sentence, as every run does, then names its page in a block
-and ends with the page itself —
-
-    <sentence>
-
-    ---
-    path: haus/wartungsplan
-    title: Wartungsplan
-    ---
-    <the page in Markdown, to the end of the text>
-
-A block that does not hold is a refusal like any other, and the wiki is never
-called.
-
-The GitHub targets — `github_pr`, `github_issue`, `github_comment` — take one
-fenced block per thing to open, up to three a run, written as the write App:
-
-    <sentence>
-
-    ~~~github_pr
-    repository: lares
-    path: kubernetes/applications/lares-diagnostics-engine/base/config/faults.yaml
-    title: Let the dryer run five hours before appliance_runtime fires
-    labels: [topic/smart-home]
-    body: |
-      <the evidence, in Markdown>
-    diff: |
-      <a unified diff of that one file>
-    ~~~
-
-A tilde fence closes only on a line `~~~` of its own, so the backtick fences a
-body quotes never end it, and the blocks are cut out of the text the other
-targets carry. Every target checks the output before any of them is written
-to, and one check that fails keeps them all from it; a GitHub target then
-checks its labels against the repository and a pull request's diff against
-the file on the default branch before it writes. A run with nothing for a
-target says so in one block, `none: <why>`; a run that names none at all fails.
-
-The targets the enabled event and schedule use cases declare are built, and
-one of them without its settings — or without a delivery at all — stops the
-pod at startup, the same rule as a use-case file that does not validate.
-Every other target is built when its settings are there, for a run fed by
-hand to a use case still dormant.
+The targets, what each creates and the block formats a run writes for the
+wiki and for GitHub are the README's "Delivery" and "GitHub". This module
+holds one delivery per target in a registry and the rules every delivery
+keeps: `stored` is the row, written before any other target sees the text;
+every block is checked before any target is written to, and one check that
+fails keeps them all from it; a target that refuses fails the run while the
+others are still tried, the stored text stays, and the refusal's raw text
+becomes the row's error. The targets the enabled event and schedule use cases
+declare are built at startup, and one without its settings stops the pod;
+every other target is built when its settings are there, for a hand-fed run.
 """
 
 from __future__ import annotations

@@ -1,45 +1,15 @@
 """The trigger's own API: start a use case now, append to a use case's memory.
 
-The bridge forwards its `start_run` tool here with the key sealed for both
-pods as a Bearer token. Notes reach a use case's memory the same way, so the
-trigger stays the only writer of `agent_memory`. The API sits on the
-receiver's port, beside the hook.
-
-`POST /api/runs` with `use_case` and, for a use case that runs on an episode,
-the episode id as `subject`:
-
-- an event use case runs on that episode through the Runs API, exactly as on
-  an event, except that its row says `trigger = message` and its subject key
-  carries when it was asked for. The answer comes once the row is claimed —
-  202 with the run's id, 429 when the day's runs are spent, 409 with the
-  run's id while one asked for on that episode is still open — and the output
-  goes where the use case delivers;
-- a schedule use case has its managed job run now (202 with the job's id), and
-  its next cron turn is recorded as started by a person; 429 when the day's
-  runs are spent, 409 when a person paused the job. `focus`, what the person
-  asked it to look at in their own words, goes into that one run's prompt;
-  an episode use case takes none;
-- the chat, a dormant use case, one that does not exist, or an episode the
-  engine never recorded is refused with the reason, so the chat can say it.
-
-With `output` instead, the run is fed by hand: the text is taken as what a
-run of that use case wrote, written into a row of its own (`trigger =
-manual`, no subject), and delivered to every target the use case declares,
-exactly as a run's text would be — a dormant use case included, since no
-model is asked. The answer comes once it is delivered: 200 with the run's id,
-its status and what it created, `failed` with the reason when a target
-refused. The bridge's `start_run` never sends it; it is how a delivery is
-tried live before a skill writes for it.
-
-`POST /api/memory` with `use_case` and `text` appends the note to the use
-case's memory, if it declares one, cut to its bound (`memory.py`).
-
-Every refusal is `{"error": "<reason>"}` with a 4xx; 503 when the ledger or the
-harness did not answer, which the caller may try again.
-
-Each request is a server span that continues the caller's `traceparent`, so
-a run the bridge asks for is part of the trace of the person's tool call; the
-run goes on in that trace after the answer.
+The contract (routes, bodies, answers) is the README's "Starting a use case
+from chat". This module keeps the trigger the only starter of runs and the
+only writer of `agent_memory`. An event use case runs on the episode the
+request names through the path an event takes, from the claim on, under a
+subject key that carries when it was asked for; a request while such a run is
+still open is answered with that run. A schedule use case has its managed job
+run now, and the job's first cron turn to end after the request is written as
+a person's. A hand-fed run (`output` instead of a subject) is written as a row
+of its own and delivered as a run's text would be, no model asked. Each
+request is a server span continuing the caller's `traceparent`.
 """
 
 from __future__ import annotations
