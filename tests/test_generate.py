@@ -141,9 +141,43 @@ def _values(tmp_path: Path, persons: str | None = None) -> dict[str, Any]:
     return loaded
 
 
-def test_without_persons_the_profiles_values_add_nothing(tmp_path: Path) -> None:
-    assert _values(tmp_path, NO_PERSONS) == {
+def test_without_persons_or_plugins_the_profiles_values_add_nothing(tmp_path: Path) -> None:
+    settings = SETTINGS.read_text(encoding="utf-8")
+    without = settings[: settings.index("\n# A plugin vendored")] + "\n"
+    rendered = _render(tmp_path, settings=without, persons=NO_PERSONS)
+
+    assert yaml.safe_load(rendered.profiles_values) == {
         "deployment": {"volumes": {}, "volumeMounts": {}, "additionalContainers": {}}
+    }
+
+
+def test_every_enabled_plugin_is_the_config_map_of_its_name_in_every_profile(
+    tmp_path: Path,
+) -> None:
+    """A person's message runs in the person's profile, which finds plugins only under its home."""
+    rendered = _render(tmp_path)
+    deployment = yaml.safe_load(rendered.profiles_values)["deployment"]
+    plugin = "hermes-session-reset-policy"
+    homes = ["/opt/data", *(f"/opt/data/profiles/{handle}" for handle in rendered.profiles)]
+
+    mounted = {
+        mount["mountPath"]: deployment["volumes"][name]
+        for name, mount in deployment["volumeMounts"].items()
+        if "/plugins/" in mount["mountPath"]
+    }
+    assert mounted == {
+        f"{home}/plugins/{plugin}": {"configMap": {"name": plugin}} for home in homes
+    }
+
+
+def test_without_persons_only_the_default_profile_mounts_the_plugins(tmp_path: Path) -> None:
+    deployment = _values(tmp_path, NO_PERSONS)["deployment"]
+
+    assert deployment["volumeMounts"] == {
+        "hermes-session-reset-policy": {
+            "mountPath": "/opt/data/plugins/hermes-session-reset-policy",
+            "readOnly": True,
+        }
     }
 
 
@@ -402,6 +436,24 @@ def test_settings_carrying_a_rendered_key_are_refused(
     settings = SETTINGS.read_text(encoding="utf-8") + f"\n{key}: {{}}\n"
 
     with pytest.raises(ValueError, match=f"`{key}` is rendered from {source}"):
+        _render(tmp_path, settings=settings)
+
+
+@pytest.mark.parametrize(
+    "plugins",
+    [
+        "plugins: []",
+        "plugins:\n  enabled: hermes-session-reset-policy",
+        "plugins:\n  enabled:\n    - 3",
+    ],
+)
+def test_settings_whose_enabled_plugins_are_not_names_are_refused(
+    tmp_path: Path, plugins: str
+) -> None:
+    settings = SETTINGS.read_text(encoding="utf-8")
+    settings = settings[: settings.index("plugins:")] + plugins + "\n"
+
+    with pytest.raises(ValueError, match="`plugins.enabled` must be a list of plugin names"):
         _render(tmp_path, settings=settings)
 
 

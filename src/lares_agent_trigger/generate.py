@@ -140,6 +140,10 @@ _SHARED_FILES = (
     # Empty: without it the harness seeds its bundled skills into the profile
     ("no-bundled-skills", ".no-bundled-skills", ".no-bundled-skills"),
 )
+# Hermes finds a plugin under the active profile's home, and a person's message runs in
+# the person's: every plugin settings.yaml enables is a ConfigMap of its name, mounted
+# as its directory in every profile.
+_PLUGINS_DIRECTORY = "plugins"
 
 # Each person's log container, beside the default profile's `agent-log`.
 _LOG_CONTAINER = "agent-log"
@@ -269,8 +273,9 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# An additional values file of Hermes's chart: each person's config and .env, the\n"
         "# persons' SOUL.md, AGENTS.md and the marker that keeps the bundled skills out,\n"
         "# each mounted read-only into the person's profile, and the container that\n"
-        "# streams the profile's agent.log for Loki.\n"
-        f"{_dump(_profiles_values(profiles))}"
+        "# streams the profile's agent.log for Loki. Every plugin settings.yaml enables is\n"
+        "# the ConfigMap of its name, mounted read-only as its directory in every profile.\n"
+        f"{_dump(_profiles_values(profiles, _enabled_plugins(parsed)))}"
     )
     jobs = [
         *(_cron_job(use_case) for use_case in enabled if use_case.is_schedule),
@@ -461,15 +466,17 @@ def _profiles_kustomization(handles: Iterable[str]) -> dict[str, Any]:
     }
 
 
-def _profiles_values(handles: Iterable[str]) -> dict[str, Any]:
-    """The volumes and mounts of every person's files, each a read-only subPath mount, and
-    the container that streams each person's log.
+def _profiles_values(handles: Iterable[str], plugins: list[str]) -> dict[str, Any]:
+    """The volumes and mounts of every person's files, each a read-only subPath mount, the
+    container that streams each person's log, and each plugin's directory in every profile.
 
     The chart keys a mount by its volume, so each profile mounts volumes of its own.
     """
     volumes: dict[str, Any] = {}
     mounts: dict[str, Any] = {}
     containers: dict[str, Any] = {}
+    for plugin in plugins:
+        _mount_plugin(volumes, mounts, plugin, plugin, _HOME)
     for handle in handles:
         containers[f"{_LOG_CONTAINER}-{handle}"] = _log_container(handle)
         files = [
@@ -496,6 +503,10 @@ def _profiles_values(handles: Iterable[str]) -> dict[str, Any]:
                 "subPath": file,
                 "readOnly": True,
             }
+        for plugin in plugins:
+            _mount_plugin(
+                volumes, mounts, f"hermes-{handle}-{plugin}", plugin, _profile_directory(handle)
+            )
     return {
         "deployment": {
             "volumes": volumes,
@@ -503,6 +514,20 @@ def _profiles_values(handles: Iterable[str]) -> dict[str, Any]:
             "additionalContainers": containers,
         }
     }
+
+
+def _mount_plugin(
+    volumes: dict[str, Any], mounts: dict[str, Any], name: str, plugin: str, home: str
+) -> None:
+    """The plugin's ConfigMap as its directory under the profile's plugins, read-only."""
+    volumes[name] = {"configMap": {"name": plugin}}
+    mounts[name] = {"mountPath": f"{home}/{_PLUGINS_DIRECTORY}/{plugin}", "readOnly": True}
+
+
+def _enabled_plugins(settings: dict[str, Any]) -> list[str]:
+    """The plugins settings.yaml enables, in file order."""
+    enabled: list[str] = settings.get("plugins", {}).get("enabled", [])
+    return enabled
 
 
 def _log_container(handle: str) -> dict[str, Any]:
@@ -538,6 +563,10 @@ def _parse_settings(settings: str) -> dict[str, Any]:
         for key in keys:
             if key in parsed:
                 raise ValueError(f"`{key}` is rendered from {source}; remove it here")
+    plugins = parsed.get("plugins", {})
+    enabled = plugins.get("enabled", []) if isinstance(plugins, dict) else None
+    if not isinstance(enabled, list) or not all(isinstance(name, str) for name in enabled):
+        raise ValueError("`plugins.enabled` must be a list of plugin names, or left out")
     for block, keys in SHARED_BLOCKS.items():
         if block not in parsed:
             continue

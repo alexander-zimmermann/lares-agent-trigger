@@ -18,3 +18,8 @@ discord:
 memory:
   memory_enabled: true
   nudge_interval: 5
+
+# A plugin vendored as the ConfigMap of its name.
+plugins:
+  enabled:
+    - hermes-session-reset-policy
