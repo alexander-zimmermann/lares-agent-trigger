@@ -16,8 +16,9 @@ This module keeps the rules the rendering follows:
   list without a server name hands the surface every server, so an empty one
   is the `no_mcp` sentinel; a list for Discord or cron starts with the
   platform's composite, the API server gets none;
-- every value is sealed once per SealedSecret under its own key, a variable's
-  key its name lower case and dashed, a person's own prefixed by the handle;
+- every value is sealed once: a variable's key is its name lower case and dashed, a
+  person's own prefixed by the handle, and the gateway reads each profile's key from
+  the harness's SealedSecret, which shares its namespace;
 - a route's keys are variables the gateway expands at start, a credential a
   file it watches, and a server outside the cluster is told nobody.
 """
@@ -87,10 +88,10 @@ class SealedSecret(NamedTuple):
     namespace: str
 
 
-# Every profile's `.env`, `<profile>.env`, from the SealedSecret the harness's keys are sealed in.
+# Every profile's `.env`, `<profile>.env`, from the SealedSecret the harness's keys are
+# sealed in. The gateway reads each profile's key from the same Secret, which shares its
+# namespace: a profile's key is sealed once.
 HARNESS_KEYS = SealedSecret("hermes-credentials", "agents")
-# The gateway's keys: every profile's key for its routes, and what it attaches to the bridge.
-GATEWAY_KEYS = SealedSecret("agentgateway-keys", "agents")
 # The routes file, a key of this ConfigMap.
 _GATEWAY_ROUTES = "agentgateway-routes"
 
@@ -306,7 +307,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
     routes_file = (
         f"{GENERATED_LINE}\n"
         "# The gateway's routes. A key is a variable the gateway expands at start, set from\n"
-        f"# {GATEWAY_KEYS.name}, as is a connector's issuer; a credential is a file it reads\n"
+        f"# {HARNESS_KEYS.name}, as is a connector's issuer; a credential is a file it reads\n"
         "# and watches.\n"
         f"{_dump(_gateway_config(declared, routes, connectors))}"
     )
@@ -856,14 +857,16 @@ def _routes_values(
 ) -> dict[str, Any]:
     """Each profile's key as a variable, once, and the routes and every credential as whole mounts.
 
-    A variable is read at start, so a resealed key rolls the gateway through
-    the reloader; a renewed credential is a file the gateway watches.
+    The keys come from the harness's SealedSecret, where each profile's key is
+    sealed once. A variable is read at start, so a resealed key rolls the
+    gateway through the reloader; a renewed credential is a file the gateway
+    watches.
     """
     sealed = dict.fromkeys(key.sealed for route in routes for key in route.keys)
     variables = [
         {
             "name": _variable(name),
-            "valueFrom": {"secretKeyRef": {"name": GATEWAY_KEYS.name, "key": name}},
+            "valueFrom": {"secretKeyRef": {"name": HARNESS_KEYS.name, "key": name}},
         }
         for name in sealed
     ]
@@ -894,7 +897,7 @@ def _routes_values(
     ]
     return {
         "config": {"config": {"localXdsPath": f"{_GATEWAY_ROUTES_DIR}/{_CONFIG_FILE}"}},
-        "podAnnotations": {"secret.reloader.stakater.com/reload": GATEWAY_KEYS.name},
+        "podAnnotations": {"secret.reloader.stakater.com/reload": HARNESS_KEYS.name},
         "extraEnv": variables,
         "extraVolumes": volumes,
         "extraVolumeMounts": mounts,
