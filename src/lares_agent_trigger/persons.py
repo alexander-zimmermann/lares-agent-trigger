@@ -14,7 +14,8 @@ million tokens. Its fallback steps take over when it fails.
 A person is a household member known by a handle, never by a legal name, an
 e-mail or a Discord id: Git holds their rights, the sign-in provider their
 identity. A person either runs (`enabled: true`) or says why not
-(`dormant: <reason>`); a dormant person renders nothing.
+(`dormant: <reason>`); a dormant person renders nothing but their inactive
+account.
 """
 
 from __future__ import annotations
