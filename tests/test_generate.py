@@ -27,6 +27,8 @@ USE_CASES = RENDERING / "use-cases.yaml"
 PERSONS = RENDERING / "persons.yaml"
 SETTINGS = RENDERING / "settings.yaml"
 EXPECTED = RENDERING / "expected"
+# Named after where it goes, so it is not taken for the declaration it renders.
+AUTHENTIK_PERSONS = "authentik/persons.yaml"
 # The declaration without its persons: the default profile serves the chat.
 _PERSONS_TEXT = PERSONS.read_text(encoding="utf-8")
 NO_PERSONS = _PERSONS_TEXT[: _PERSONS_TEXT.index("\npersons:\n")]
@@ -87,6 +89,7 @@ def _files(rendered: Rendering) -> dict[str, str]:
         "profiles/kustomization.yaml": rendered.profiles_kustomization,
         "profiles/profiles.values.yaml": rendered.profiles_values,
         **{f"profiles/{handle}/config.yaml": text for handle, text in rendered.profiles.items()},
+        AUTHENTIK_PERSONS: rendered.authentik_persons,
     }
 
 
@@ -120,10 +123,14 @@ def test_a_source_nobody_runs_on_renders_nothing(tmp_path: Path) -> None:
     assert _render(tmp_path, persons=without) == _render(tmp_path)
 
 
-def test_a_dormant_person_renders_nothing(tmp_path: Path) -> None:
+def test_a_dormant_person_renders_nothing_but_their_inactive_account(tmp_path: Path) -> None:
+    """max is dormant: the expected blueprint holds their inactive account, nothing else does."""
     without = _PERSONS_TEXT[: _PERSONS_TEXT.index("  - name: max")]
 
-    assert _render(tmp_path, persons=without) == _render(tmp_path)
+    with_max = _files(_render(tmp_path))
+    without_max = _files(_render(tmp_path, persons=without))
+    assert with_max.pop(AUTHENTIK_PERSONS) != without_max.pop(AUTHENTIK_PERSONS)
+    assert with_max == without_max
 
 
 def test_a_dormant_use_case_renders_nothing(tmp_path: Path) -> None:
@@ -485,12 +492,15 @@ def _cli(tmp_path: Path, use_cases: Path = USE_CASES, persons: Path = PERSONS) -
             str(tmp_path / "out" / "routes.values.yaml"),
             "--profiles",
             str(tmp_path / "out" / "profiles"),
+            "--authentik-persons",
+            str(tmp_path / "out" / AUTHENTIK_PERSONS),
         ]
     )
 
 
 def test_the_command_writes_every_file_whole(tmp_path: Path) -> None:
-    (tmp_path / "out").mkdir()
+    # Authentik's blueprints have a directory of their own, which the generator does not own.
+    (tmp_path / "out" / AUTHENTIK_PERSONS).parent.mkdir(parents=True)
     (tmp_path / "out" / "config.yaml").write_text("stale\n", encoding="utf-8")
 
     assert _cli(tmp_path) == 0
@@ -503,6 +513,7 @@ def test_the_command_writes_every_file_whole(tmp_path: Path) -> None:
 
 def test_the_command_removes_the_profile_of_a_person_no_longer_rendered(tmp_path: Path) -> None:
     """max went dormant: their config leaves, and so does their directory."""
+    (tmp_path / "out" / AUTHENTIK_PERSONS).parent.mkdir(parents=True)
     (tmp_path / "out" / "profiles" / "max").mkdir(parents=True)
     (tmp_path / "out" / "profiles" / "max" / "config.yaml").write_text("old\n", encoding="utf-8")
 

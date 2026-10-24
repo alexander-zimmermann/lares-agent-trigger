@@ -5,8 +5,9 @@ settings in, one text per rendered file out. Which files, and what each
 holds, is the README's "The generator", "The keys" and "The gateway's routes".
 This module keeps the rules the rendering follows:
 
-- a dormant use case, a dormant person, a tool server only dormant use cases
-  name and a model source no profile runs on render nothing;
+- a dormant use case, a tool server only dormant use cases name and a model
+  source no profile runs on render nothing, and a dormant person nothing but
+  their inactive account;
 - every file is written whole and opens with the generated line, so a hand
   edit is overwritten by lares's pre-commit hook;
 - every profile's config carries the hand-written settings as one mapping,
@@ -163,6 +164,13 @@ _SKILLS_TOOLSET = "skills"
 # harness's /help and /whoami; `reset` is /new.
 _PERSON_COMMANDS = ("reset", "stop", "retry", "undo")
 
+# Every person's Authentik account sits at this path and in this group, beside a
+# group of their own; the label has Authentik apply the blueprint once discovered.
+_ACCOUNT_PATH = "users/household"
+_HOUSEHOLD_GROUP = "household"
+_PERSON_GROUP = "person-{handle}"
+_INSTANTIATE_LABEL = "blueprints.goauthentik.io/instantiate"
+
 
 @dataclass(frozen=True)
 class Rendering:
@@ -182,6 +190,8 @@ class Rendering:
     # mount them and each credential the routes attach.
     routes: str
     routes_values: str
+    # Authentik's blueprint of every person's account and groups.
+    authentik_persons: str
 
 
 class _Key(NamedTuple):
@@ -220,13 +230,24 @@ class _Dumper(yaml.SafeDumper):
         return True
 
 
+class _KeyOf(NamedTuple):
+    """An Authentik blueprint's reference to its own entry of this id."""
+
+    id: str
+
+
 def _text(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
     # A file inside a file stays readable: a multi-line string is a literal block.
     style = "|" if "\n" in value else None
     return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
 
 
+def _key_of(dumper: yaml.SafeDumper, value: _KeyOf) -> yaml.ScalarNode:
+    return dumper.represent_scalar("!KeyOf", value.id)
+
+
 _Dumper.add_representer(str, _text)
+_Dumper.add_representer(_KeyOf, _key_of)
 
 
 def _dump(data: Any) -> str:
@@ -321,6 +342,15 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# reaches the gateway; a resealed key rolls it.\n"
         f"{_dump(_routes_values(routes, connectors))}"
     )
+    authentik_persons = (
+        f"{GENERATED_LINE}\n"
+        "# An Authentik blueprint: every person of persons.yaml, enabled or dormant, as\n"
+        "# an internal account at users/household named by the handle, a member of\n"
+        "# household and of a group person-<handle> of their own. A dormant person's\n"
+        "# account is inactive; an enabled one's is never set active, so a hand lock\n"
+        "# holds. No account loses a group of its own; the owner's is only created.\n"
+        f"{_dump(_authentik_persons(persons))}"
+    )
     return Rendering(
         hermes_config=hermes_config,
         profiles=profiles,
@@ -331,6 +361,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         env_template=env_template,
         routes=routes_file,
         routes_values=routes_values,
+        authentik_persons=authentik_persons,
     )
 
 
@@ -887,6 +918,52 @@ def _routes_values(
     }
 
 
+def _authentik_persons(persons: PersonsFile) -> dict[str, Any]:
+    """Every declared person's account, then the groups that hold them.
+
+    Membership is set on the groups, so no account loses a group of its own.
+    The owner's account, the `discord: admin` person's, is created where it
+    is missing and otherwise left as it is. Authentik applies the whole file
+    on every change, so an enabled account is never declared active: that
+    would lift a hand lock.
+    """
+    members = list(persons.persons.values())
+    accounts = []
+    for person in members:
+        attrs: dict[str, Any] = {"name": person.name, "type": "internal", "path": _ACCOUNT_PATH}
+        if not person.is_enabled:
+            attrs["is_active"] = False
+        accounts.append(
+            {
+                "model": "authentik_core.user",
+                "state": "created" if person.is_admin else "present",
+                "id": person.name,
+                "identifiers": {"username": person.name},
+                "attrs": attrs,
+            }
+        )
+    groups = [
+        (_HOUSEHOLD_GROUP, members),
+        *((_PERSON_GROUP.format(handle=person.name), [person]) for person in members),
+    ]
+    return {
+        "version": 1,
+        "metadata": {"name": "persons", "labels": {_INSTANTIATE_LABEL: "true"}},
+        "entries": [
+            *accounts,
+            *(
+                {
+                    "model": "authentik_core.group",
+                    "state": "present",
+                    "identifiers": {"name": name},
+                    "attrs": {"users": [_KeyOf(member.name) for member in members]},
+                }
+                for name, members in groups
+            ),
+        ],
+    }
+
+
 def _sealed_key(variable: str) -> str:
     """The key a variable's value is sealed under: its name, lower case and dashed."""
     return variable.lower().replace("_", "-")
@@ -1003,7 +1080,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="lares-agent-trigger generate",
         description="Render the use-case file and the person declaration into the harness "
         "configuration, each person's profile, the cron job set, the sampling ratio, the "
-        "templates of every profile's .env, and the gateway's routes and chart values.",
+        "templates of every profile's .env, the gateway's routes and chart values, and "
+        "Authentik's blueprint of the persons.",
     )
     parser.add_argument("--use-cases", type=Path, required=True)
     parser.add_argument("--persons", type=Path, required=True)
@@ -1016,6 +1094,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--routes-values", type=Path, required=True)
     # Written whole: each person's config, the ConfigMap of them and the chart values.
     parser.add_argument("--profiles", type=Path, required=True)
+    parser.add_argument("--authentik-persons", type=Path, required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -1041,6 +1120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         (args.env_template, rendered.env_template),
         (args.routes, rendered.routes),
         (args.routes_values, rendered.routes_values),
+        (args.authentik_persons, rendered.authentik_persons),
         (profiles / "kustomization.yaml", rendered.profiles_kustomization),
         (profiles / "profiles.values.yaml", rendered.profiles_values),
         *((profiles / handle / _CONFIG_FILE, text) for handle, text in rendered.profiles.items()),
