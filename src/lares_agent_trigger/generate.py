@@ -163,11 +163,10 @@ _SKILLS_TOOLSET = "skills"
 # so /new allows its alias /reset, never the other way round.
 _PERSON_COMMANDS = ("new", "stop", "retry", "undo")
 
-# Every person's Authentik account sits at this path and in this group, beside a
-# group of their own; the label has Authentik apply the blueprint once discovered.
+# Every person's Authentik account sits at this path and in this group; the label
+# has Authentik apply the blueprint once discovered.
 _ACCOUNT_PATH = "users/household"
 _HOUSEHOLD_GROUP = "household"
-_PERSON_GROUP = "person-{handle}"
 _INSTANTIATE_LABEL = "blueprints.goauthentik.io/instantiate"
 
 # Open WebUI's own copy of each person's API server key, sealed in its namespace under
@@ -198,7 +197,7 @@ class Rendering:
     # mount them and each credential the routes attach.
     routes: str
     routes_values: str
-    # Authentik's blueprint of every person's account and groups.
+    # Authentik's blueprint of every person's account and the household group.
     authentik_persons: str
     # The chart values that connect Open WebUI to every person's profile.
     open_webui_connections: str
@@ -340,10 +339,10 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
     authentik_persons = (
         f"{GENERATED_LINE}\n"
         "# An Authentik blueprint: every person of persons.yaml, enabled or dormant, as\n"
-        "# an internal account at users/household named by the handle, a member of\n"
-        "# household and of a group person-<handle> of their own. A dormant person's\n"
-        "# account is inactive; an enabled one's is never set active, so a hand lock\n"
-        "# holds. No account loses a group of its own; the owner's is only created.\n"
+        "# an internal account at users/household named by the handle and a member of\n"
+        "# household. A dormant person's account is inactive; an enabled one's is never\n"
+        "# set active, so a hand lock holds. Membership is set on the group, so an\n"
+        "# account keeps its other groups; the owner's account is only created.\n"
         f"{_dump(_authentik_persons(persons))}"
     )
     open_webui_connections = (
@@ -922,9 +921,9 @@ def _routes_values(
 
 
 def _authentik_persons(persons: PersonsFile) -> dict[str, Any]:
-    """Every declared person's account, then the groups that hold them.
+    """Every declared person's account, then the group that holds them.
 
-    Membership is set on the groups, so no account loses a group of its own.
+    Membership is set on the group, so an account keeps its other groups.
     The owner's account, the `discord: admin` person's, is created where it
     is missing and otherwise left as it is. Authentik applies the whole file
     on every change, so an enabled account is never declared active: that
@@ -945,24 +944,17 @@ def _authentik_persons(persons: PersonsFile) -> dict[str, Any]:
                 "attrs": attrs,
             }
         )
-    groups = [
-        (_HOUSEHOLD_GROUP, members),
-        *((_PERSON_GROUP.format(handle=person.name), [person]) for person in members),
-    ]
     return {
         "version": 1,
         "metadata": {"name": "persons", "labels": {_INSTANTIATE_LABEL: "true"}},
         "entries": [
             *accounts,
-            *(
-                {
-                    "model": "authentik_core.group",
-                    "state": "present",
-                    "identifiers": {"name": name},
-                    "attrs": {"users": [_KeyOf(member.name) for member in members]},
-                }
-                for name, members in groups
-            ),
+            {
+                "model": "authentik_core.group",
+                "state": "present",
+                "identifiers": {"name": _HOUSEHOLD_GROUP},
+                "attrs": {"users": [_KeyOf(member.name) for member in members]},
+            },
         ],
     }
 
