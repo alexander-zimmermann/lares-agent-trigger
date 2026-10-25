@@ -22,7 +22,7 @@ from .api import TriggerApi
 from .closing import Closer
 from .config import Settings
 from .consumer import EpisodeConsumer
-from .cron_jobs import load_cron_jobs
+from .cron_jobs import declared_jobs
 from .deliveries import build_deliveries
 from .event_runs import EventRuns
 from .github import github_app
@@ -50,15 +50,13 @@ async def _amain() -> int:
     logger.info("lares-agent-trigger starting")
 
     metrics = Metrics()
-    # A file that does not validate, a job set rendered from another
-    # declaration, or an output nobody could deliver stops the pod here with
-    # the reason in the log: starting runs from a half-read catalogue is worse
-    # than not starting.
+    # A file that does not validate or an output nobody could deliver stops the
+    # pod here with the reason in the log: starting runs from a half-read
+    # catalogue is worse than not starting.
     try:
         declared = load_use_case_file(settings.use_cases_file)
         use_cases = declared.use_cases
         persons = load_persons_file(settings.persons_file, declared)
-        cron_jobs = load_cron_jobs(settings.cron_jobs_file, declared)
         github = github_app(settings)
         deliveries = build_deliveries(settings, use_cases, metrics, github)
     except ValueError as exc:
@@ -104,7 +102,11 @@ async def _amain() -> int:
         turn_wait_seconds=settings.turn_wait_seconds,
     )
     schedules = Schedules(
-        cron_jobs, hermes, turns, metrics, retry_seconds=settings.reconcile_retry_seconds
+        declared_jobs(declared),
+        hermes,
+        turns,
+        metrics,
+        retry_seconds=settings.reconcile_retry_seconds,
     )
     consumer = EpisodeConsumer(settings, runs, metrics)
     api = TriggerApi(use_cases, runs, schedules, ledger, closer, settings.api_key, metrics)

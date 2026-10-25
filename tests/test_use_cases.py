@@ -17,9 +17,6 @@ ledger_hook:
   trigger_url: http://lares-agent-trigger.agents.svc.cluster.local:8080
   secret_env: LARES_AGENT_TRIGGER_HOOK_SECRET
 
-tracing:
-  sampling_ratio: 1.0
-
 gateway:
   url: http://agentgateway.agents.svc.cluster.local:8080
   otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318
@@ -562,27 +559,6 @@ def test_an_unknown_kind_of_tool_server_is_refused(tmp_path: Path) -> None:
     broken = VALID.replace("    kind: http\n", "    kind: gitlab\n", 1)
 
     with pytest.raises(ValueError, match="gitlab"):
-        load_use_cases(_write(tmp_path, broken))
-
-
-def test_the_sampling_ratio_is_read_beside_the_ledger_hook(tmp_path: Path) -> None:
-    declared = load_use_case_file(_write(tmp_path, VALID))
-
-    assert declared.tracing.sampling_ratio == 1.0
-
-
-@pytest.mark.parametrize("ratio", ["-0.1", "1.5", "all"])
-def test_a_sampling_ratio_that_is_no_share_is_refused(tmp_path: Path, ratio: str) -> None:
-    broken = VALID.replace("  sampling_ratio: 1.0\n", f"  sampling_ratio: {ratio}\n", 1)
-
-    with pytest.raises(ValueError, match="sampling_ratio"):
-        load_use_cases(_write(tmp_path, broken))
-
-
-def test_a_file_without_the_sampling_ratio_is_refused(tmp_path: Path) -> None:
-    broken = VALID.replace("tracing:\n  sampling_ratio: 1.0\n", "", 1)
-
-    with pytest.raises(ValueError, match="tracing"):
         load_use_cases(_write(tmp_path, broken))
 
 

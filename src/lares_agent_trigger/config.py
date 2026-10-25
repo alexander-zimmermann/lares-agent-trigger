@@ -24,12 +24,10 @@ class Settings(NatsSettings):
     # ten runs a day never need concurrency.
     fetch_timeout_seconds: float = 5.0
 
-    # The declared use cases, the person declaration with the model sources and
-    # their prices, and the cron job set rendered from them, all mounted from
-    # lares as hashed ConfigMaps.
+    # The declared use cases and the person declaration with the model sources
+    # and their prices, both mounted from lares as hashed ConfigMaps.
     use_cases_file: Path = Path("/etc/lares-agent-trigger/use-cases.yaml")
     persons_file: Path = Path("/etc/lares-agent-trigger/persons.yaml")
-    cron_jobs_file: Path = Path("/etc/lares-agent-trigger/cron-jobs.yaml")
 
     # Ledger: the one table this service writes.
     db_host: str

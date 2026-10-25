@@ -54,7 +54,7 @@ from lares_agent_trigger.api import TriggerApi
 from lares_agent_trigger.closing import Closer
 from lares_agent_trigger.config import Settings
 from lares_agent_trigger.consumer import EpisodeConsumer
-from lares_agent_trigger.cron_jobs import load_cron_jobs
+from lares_agent_trigger.cron_jobs import declared_jobs
 from lares_agent_trigger.deliveries import build_deliveries
 from lares_agent_trigger.event_runs import EventRuns
 from lares_agent_trigger.github import github_app
@@ -152,9 +152,6 @@ USE_CASES = """
 ledger_hook:
   trigger_url: http://lares-agent-trigger.test:8080
   secret_env: LARES_AGENT_TRIGGER_HOOK_SECRET
-
-tracing:
-  sampling_ratio: 1.0
 
 gateway:
   url: http://agentgateway.test:8080
@@ -279,26 +276,6 @@ model_sources:
         model: gpt-6-luna
         bound: capped
         price: {input: 0.10, cached_input: 0.01, output: 0.50}
-"""
-
-# The job set the generator renders from USE_CASES: one job per enabled schedule and script.
-CRON_JOBS = """
-jobs:
-  - name: lares:propose-faults
-    schedule: 0 3 * * 0
-    skills: [lares-propose]
-    prompt: Answer in English. Stay within 80 tool calls and 20 minutes.
-    deliver: local
-  - name: lares:restore-probe
-    schedule: 0 8 * * 1
-    skills: [lares-restore-probe]
-    prompt: Answer in English. Stay within 30 tool calls and 10 minutes.
-    deliver: local
-  - name: lares:skill-digest
-    schedule: 0 18 * * 0
-    script: skill-digest.py
-    no_agent: true
-    deliver: discord
 """
 
 # Two entries copied from the engine's faults.yaml: one sentence with a dash
@@ -551,8 +528,6 @@ def settings(
     use_cases_file.write_text(USE_CASES, encoding="utf-8")
     persons_file = tmp_path / "persons.yaml"
     persons_file.write_text(PERSONS, encoding="utf-8")
-    cron_jobs_file = tmp_path / "cron-jobs.yaml"
-    cron_jobs_file.write_text(CRON_JOBS, encoding="utf-8")
     faults_file = tmp_path / "faults.yaml"
     faults_file.write_text(FAULTS, encoding="utf-8")
     _, relay_port = relay_server
@@ -561,7 +536,6 @@ def settings(
         nats_servers=nats_url,
         use_cases_file=use_cases_file,
         persons_file=persons_file,
-        cron_jobs_file=cron_jobs_file,
         db_host=host,
         db_port=int(postgres.get_exposed_port(5432)),
         db_name="homelab",
@@ -707,7 +681,7 @@ async def service(
         turn_wait_seconds=settings.turn_wait_seconds,
     )
     schedules = Schedules(
-        load_cron_jobs(settings.cron_jobs_file, declared),
+        declared_jobs(declared),
         hermes,
         turns,
         metrics,

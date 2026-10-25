@@ -62,11 +62,6 @@ def _config(
     return loaded
 
 
-def _jobs(tmp_path: Path, use_cases: str | None = None) -> list[dict[str, Any]]:
-    loaded: list[dict[str, Any]] = yaml.safe_load(_render(tmp_path, use_cases).cron_jobs)["jobs"]
-    return loaded
-
-
 def _env_lines(
     tmp_path: Path,
     use_cases: str | None = None,
@@ -82,8 +77,6 @@ def _files(rendered: Rendering) -> dict[str, str]:
     """Every rendered file by its path below the expected files."""
     return {
         "config.yaml": rendered.hermes_config,
-        "cron-jobs.yaml": rendered.cron_jobs,
-        "tracing.env": rendered.tracing,
         "env-template.yaml": rendered.env_template,
         "routes.yaml": rendered.routes,
         "routes.values.yaml": rendered.routes_values,
@@ -136,7 +129,7 @@ def test_a_dormant_person_renders_nothing_but_their_inactive_account(tmp_path: P
 
 
 def test_a_dormant_use_case_renders_nothing(tmp_path: Path) -> None:
-    """The dormant entry is the only one naming lares-wiki: no entry, no job, no route."""
+    """The dormant entry is the only one naming lares-wiki: no entry, no route."""
     text = USE_CASES.read_text(encoding="utf-8")
     without = text[: text.index("  - name: basalte-prose")]
 
@@ -273,8 +266,6 @@ def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> Non
     assert toolsets["api_server"] == ["no_mcp"]
     # The chat's read servers stay readable for a job made by hand; its request server does not.
     assert toolsets["cron"] == ["hermes-cron", "lares", "github"]
-    # No agent job is left; the script's, which needs no model, stays.
-    assert [job["name"] for job in _jobs(tmp_path, only_chat)] == ["lares:skill-digest"]
 
     only_control = only_chat.replace(
         "    tools: [lares, lares-control, github]\n", "    tools: [lares-control]\n"
@@ -363,8 +354,9 @@ def test_every_key_the_routes_name_is_a_variable_or_file_the_values_provide(
 
     named = set(re.findall(r"\$\{(\w+)\}", rendered.routes))
     read = set(re.findall(r"file: (\S+)", rendered.routes))
-    # And the cluster's Authentik in a connector's issuer, which each overlay sets.
-    assert named == variables | {"AUTHENTIK_URL"}
+    # And what lares sets beside them: the cluster's Authentik in a connector's issuer, and the
+    # sampling ratio every service of the platform sets for itself.
+    assert named == variables | {"AUTHENTIK_URL", "TRACING_SAMPLING_RATIO"}
     assert read == files
 
 
@@ -397,13 +389,6 @@ def test_without_persons_open_webui_connects_nowhere(tmp_path: Path) -> None:
     off = [{"name": "ENABLE_OPENAI_API", "value": "false"}]
 
     assert _open_webui_env(tmp_path, NO_PERSONS) == off
-
-
-def test_the_sampling_ratio_is_rendered_as_the_declaration_writes_it(tmp_path: Path) -> None:
-    text = USE_CASES.read_text(encoding="utf-8")
-    whole = text.replace("sampling_ratio: 0.5", "sampling_ratio: 1")
-
-    assert _render(tmp_path, whole).tracing.splitlines()[-1] == "TRACING_SAMPLING_RATIO=1.0"
 
 
 def test_the_default_profiles_env_names_each_key_its_config_reads(tmp_path: Path) -> None:
@@ -513,10 +498,6 @@ def _cli(tmp_path: Path, use_cases: Path = USE_CASES, persons: Path = PERSONS) -
             str(SETTINGS),
             "--hermes-config",
             str(tmp_path / "out" / "config.yaml"),
-            "--cron-jobs",
-            str(tmp_path / "out" / "cron-jobs.yaml"),
-            "--tracing",
-            str(tmp_path / "out" / "tracing.env"),
             "--env-template",
             str(tmp_path / "out" / "env-template.yaml"),
             "--routes",
