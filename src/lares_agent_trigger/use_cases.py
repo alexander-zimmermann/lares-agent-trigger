@@ -35,10 +35,12 @@ from .events import EventKind
 MANAGED_JOB_PREFIX = "lares:"
 
 # Where a completed run's output is delivered; `deliveries.py` holds one delivery
-# per target it can serve, and `stored` is the ledger row itself.
+# per target it can serve, and `stored` is the ledger row itself. `web_chat` is
+# where the harness answers a chat besides Discord; no delivery serves it.
 OutputTarget = Literal[
     "stored",
     "discord",
+    "web_chat",
     "mail",
     "alert",
     "github_pr",
