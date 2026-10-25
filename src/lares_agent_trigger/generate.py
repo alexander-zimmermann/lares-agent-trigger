@@ -42,8 +42,6 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from .cron_jobs import CronJob, dump_cron_jobs, job_name
-from .hermes import language_name
 from .hooks import CALL_FAILED, MODEL_CALL, TOOL_CALL, TURN_ENDED
 from .persons import ModelSource, Person, PersonsFile, load_persons_file
 from .receiver import HOOK_PATH
@@ -51,8 +49,6 @@ from .use_cases import (
     Connector,
     Credential,
     Gateway,
-    ScheduleTrigger,
-    Script,
     ToolAccess,
     ToolServer,
     UseCase,
@@ -82,8 +78,9 @@ SHARED_BLOCKS: dict[str, tuple[str, ...]] = {
     "gateway": ("profile_routes",),
 }
 
-# The ratio the services trace at; the trigger reads it under this name.
-SAMPLING_RATIO_VARIABLE = "TRACING_SAMPLING_RATIO"
+# The share of new traces the gateway keeps: a variable its pod sets, as every service of
+# the agent platform sets its own.
+_SAMPLING_RATIO = "${TRACING_SAMPLING_RATIO}"
 
 
 class SealedSecret(NamedTuple):
@@ -196,8 +193,6 @@ class Rendering:
     # person's files into their profile.
     profiles_kustomization: str
     profiles_values: str
-    cron_jobs: str
-    tracing: str
     env_template: str
     # The gateway's routes, and the chart values that give it their keys and
     # mount them and each credential the routes attach.
@@ -313,21 +308,6 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# the ConfigMap of its name, mounted read-only as its directory in every profile.\n"
         f"{_dump(_profiles_values(profiles, _enabled_plugins(parsed)))}"
     )
-    jobs = [
-        *(_cron_job(use_case) for use_case in enabled if use_case.is_schedule),
-        *(_script_job(script) for script in declared.scripts.values() if script.is_enabled),
-    ]
-    cron_jobs = (
-        f"{GENERATED_LINE}\n"
-        "# The cron jobs the harness runs, one per enabled schedule use case and one per enabled "
-        "script.\n"
-        f"{_dump(dump_cron_jobs(jobs))}"
-    )
-    tracing = (
-        f"{GENERATED_LINE}\n"
-        "# The share of new traces every service of the agent platform keeps.\n"
-        f"{SAMPLING_RATIO_VARIABLE}={declared.tracing.sampling_ratio!r}\n"
-    )
     env_template = _template(
         HARNESS_KEYS,
         "# Each profile's .env, composed from the keys sealed one by one in\n"
@@ -380,8 +360,6 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         profiles=profiles,
         profiles_kustomization=profiles_kustomization,
         profiles_values=profiles_values,
-        cron_jobs=cron_jobs,
-        tracing=tracing,
         env_template=env_template,
         routes=routes_file,
         routes_values=routes_values,
@@ -770,7 +748,7 @@ def _gateway_config(
             "tracing": {
                 "host": collector.netloc,
                 "protocol": "http",
-                "randomSampling": repr(declared.tracing.sampling_ratio),
+                "randomSampling": _SAMPLING_RATIO,
             }
         },
         "binds": [
@@ -1109,51 +1087,19 @@ def _template(target: SealedSecret, comment: str, files: dict[str, str]) -> str:
     return f"{GENERATED_LINE}\n{comment}{_dump(patch)}"
 
 
-def _cron_job(use_case: UseCase) -> CronJob:
-    trigger = use_case.trigger
-    assert isinstance(trigger, ScheduleTrigger)
-    # The loader refuses a schedule use case that names no skill.
-    assert use_case.skill is not None
-    budget = use_case.budget
-    return CronJob(
-        name=job_name(use_case.name),
-        schedule=trigger.cron,
-        skills=(use_case.skill,),
-        prompt=(
-            f"Answer in {language_name(use_case.language)}. "
-            f"Stay within {budget.tool_calls} tool calls and {budget.minutes} minutes."
-        ),
-        # The trigger delivers; the harness keeps the output to itself.
-        deliver="local",
-    )
-
-
-def _script_job(script: Script) -> CronJob:
-    """A script's job: the harness runs the file without a model and delivers its output."""
-    return CronJob(
-        name=job_name(script.name),
-        schedule=script.trigger.cron,
-        script=script.script,
-        no_agent=True,
-        deliver=script.deliver,
-    )
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     """`lares-agent-trigger generate`: render the declarations and write every file."""
     parser = argparse.ArgumentParser(
         prog="lares-agent-trigger generate",
         description="Render the use-case file and the person declaration into the harness "
-        "configuration, each person's profile, the cron job set, the sampling ratio, the "
-        "templates of every profile's .env, the gateway's routes and chart values, "
-        "Authentik's blueprint of the persons, and Open WebUI's connections.",
+        "configuration, each person's profile, the templates of every profile's .env, the "
+        "gateway's routes and chart values, Authentik's blueprint of the persons, and Open "
+        "WebUI's connections.",
     )
     parser.add_argument("--use-cases", type=Path, required=True)
     parser.add_argument("--persons", type=Path, required=True)
     parser.add_argument("--settings", type=Path, required=True)
     parser.add_argument("--hermes-config", type=Path, required=True)
-    parser.add_argument("--cron-jobs", type=Path, required=True)
-    parser.add_argument("--tracing", type=Path, required=True)
     parser.add_argument("--env-template", type=Path, required=True)
     parser.add_argument("--routes", type=Path, required=True)
     parser.add_argument("--routes-values", type=Path, required=True)
@@ -1181,8 +1127,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     profiles: Path = args.profiles
     files = [
         (args.hermes_config, rendered.hermes_config),
-        (args.cron_jobs, rendered.cron_jobs),
-        (args.tracing, rendered.tracing),
         (args.env_template, rendered.env_template),
         (args.routes, rendered.routes),
         (args.routes_values, rendered.routes_values),

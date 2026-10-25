@@ -47,6 +47,8 @@ FAKE_BRIDGE = Path(__file__).parent / "fake_bridge.py"
 FAKE_AUTHENTIK = Path(__file__).parent / "fake_authentik.py"
 # The cluster's Authentik, as the gateway's overlay sets it.
 AUTHENTIK_URL = "http://authentik:9000"
+# The share of traces the gateway keeps, which lares sets beside the rendered values.
+SAMPLING_RATIO = "0.5"
 SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 # Where the rendered chart values mount the routes and the credentials.
 MOUNT = "/etc/agentgateway"
@@ -242,6 +244,8 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
             ),
             "-e",
             f"AUTHENTIK_URL={AUTHENTIK_URL}",
+            "-e",
+            f"TRACING_SAMPLING_RATIO={SAMPLING_RATIO}",
             "--mount",
             f"type=volume,src={volume},dst={MOUNT},readonly",
             GATEWAY_IMAGE,

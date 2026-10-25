@@ -34,6 +34,10 @@ from .events import EventKind
 # its use case or script in the name: `lares:propose-faults`.
 MANAGED_JOB_PREFIX = "lares:"
 
+# ISO 639-1 to the word an instruction line uses. A code without an entry is
+# passed through, so a new language is a file change, not a code change.
+_LANGUAGE_NAMES = {"de": "German", "en": "English"}
+
 # Where a completed run's output is delivered; `deliveries.py` holds one delivery
 # per target it can serve, and `stored` is the ledger row itself. `web_chat` is
 # where the harness answers a chat besides Discord; no delivery serves it.
@@ -300,20 +304,8 @@ class LedgerHook(_Strict):
     secret_env: str = Field(min_length=1)
 
 
-class Tracing(_Strict):
-    """How every service of the agent platform traces: one ratio for the whole platform.
-
-    A new trace is kept at this share, decided by its id, so the trigger, the
-    bridge and the engine keep the same traces; a trace that came in keeps the
-    caller's decision.
-    """
-
-    sampling_ratio: float = Field(ge=0.0, le=1.0)
-
-
 class _File(_Strict):
     ledger_hook: LedgerHook
-    tracing: Tracing
     gateway: Gateway
     tool_servers: list[ToolServer] = Field(min_length=1)
     connectors: list[Connector] = []
@@ -330,7 +322,6 @@ class UseCaseFile:
     connectors: dict[str, Connector]
     scripts: dict[str, Script]
     ledger_hook: LedgerHook
-    tracing: Tracing
     gateway: Gateway
 
 
@@ -417,7 +408,6 @@ def load_use_case_file(path: Path) -> UseCaseFile:
         connectors=connectors,
         scripts=scripts,
         ledger_hook=parsed.ledger_hook,
-        tracing=parsed.tracing,
         gateway=parsed.gateway,
     )
 
@@ -537,3 +527,8 @@ def _check_cron_job(path: Path, use_case: UseCase) -> None:
             f"{path}: use case {use_case.name}: model: the Jobs API gives a cron job no "
             "model of its own; a schedule use case runs on the harness's default"
         )
+
+
+def language_name(language: str) -> str:
+    """The word an instruction line uses for an ISO 639-1 code."""
+    return _LANGUAGE_NAMES.get(language, language)

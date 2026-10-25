@@ -52,13 +52,10 @@ from .config import Settings
 from .cron_jobs import CronJob
 from .ledger import ClosedStatus, Usage
 from .spans import TRACER, failed
+from .use_cases import language_name
 
 # What the harness reports while a run is still going; anything else is final.
 _PENDING = ("queued", "running", "in_progress")
-
-# ISO 639-1 to the word an instruction line uses. A code without an entry is
-# passed through, so a new language is a file change, not a code change.
-_LANGUAGE_NAMES = {"de": "German", "en": "English"}
 
 
 class HermesError(RuntimeError):
@@ -106,11 +103,6 @@ class HarnessJob:
     deliver: str | None
     # False for a paused job.
     enabled: bool
-
-
-def language_name(language: str) -> str:
-    """The word an instruction line uses for an ISO 639-1 code."""
-    return _LANGUAGE_NAMES.get(language, language)
 
 
 def instructions_for(skill: str, language: str, tool_calls: int, minutes: int) -> str:

@@ -59,15 +59,12 @@ scripts:
     enabled: true
 ```
 
-`tools` names tool servers, which the same file declares beside the use cases, together with where the harness reports every finished turn, the share of traces every service of the platform keeps, the gateway every tool server sits behind, and the connectors a person signs in to on it:
+`tools` names tool servers, which the same file declares beside the use cases, together with where the harness reports every finished turn, the gateway every tool server sits behind, and the connectors a person signs in to on it:
 
 ```yaml
 ledger_hook:
   trigger_url: http://lares-agent-trigger.agents.svc.cluster.local:8080
   secret_env: LARES_AGENT_TRIGGER_HOOK_SECRET
-
-tracing:
-  sampling_ratio: 1.0     # one number for the trigger, the bridge, the engine and the gateway
 
 gateway:
   url: http://agentgateway.agents.svc.cluster.local:8080                  # where the harness reaches it
@@ -185,8 +182,7 @@ A dormant person renders nothing but their inactive Authentik account, so it may
 ```bash
 lares-agent-trigger generate \
   --use-cases use-cases.yaml --persons persons.yaml --settings settings.yaml \
-  --hermes-config config.yaml --cron-jobs cron-jobs.yaml \
-  --tracing tracing.env --env-template env-template.yaml \
+  --hermes-config config.yaml --env-template env-template.yaml \
   --routes routes.yaml --routes-values routes.values.yaml --profiles profiles \
   --authentik-persons blueprints/persons.yaml \
   --open-webui-connections connections.values.yaml
@@ -198,8 +194,6 @@ lares-agent-trigger generate \
 | `profiles/<handle>/config.yaml` | each enabled person's: `settings.yaml` as one mapping, then `model`, `fallback_providers` and `terminal` from their source and profile directory, then their tool servers on `discord` and `api_server`, Hermes's own `skills` toolset first on `api_server` (Discord's composite holds it already), the same hook, and their `mcp_servers` |
 | `profiles/kustomization.yaml` | the ConfigMap `hermes-profiles`, one key per person's config, named by the handle |
 | `profiles/profiles.values.yaml` | an additional values file of Hermes's chart: per person a read-only subPath mount of their config, their `.env`, the persons' `SOUL.md`, `AGENTS.md` and `.no-bundled-skills` into `/opt/data/profiles/<handle>/`, and a container `agent-log-<handle>` that streams the profile's `logs/agent.log` for Loki, beside the default profile's `agent-log`; its image is the name `agent-log`, which lares's kustomization pins to the image every log container runs. Every plugin in the settings' `plugins.enabled` is the ConfigMap of its name, mounted read-only as `plugins/<name>/` in the default profile and in each person's: a person's message runs in their profile, and Hermes finds a plugin only under the active profile's home |
-| `cron-jobs.yaml`   | one job per enabled schedule use case, named `lares:<use case>`, with its schedule, skill, prompt and delivery; and one per enabled script, `lares:<script>`, with its schedule, script, `no_agent: true` and delivery |
-| `tracing.env`      | `TRACING_SAMPLING_RATIO`, the declared `tracing.sampling_ratio`, which the trigger, the bridge and the engine's CronJobs read |
 | `env-template.yaml` | a patch of the harness's SealedSecret `hermes-credentials`: `default.env` and each person's `<handle>.env`, as templates of its sealed keys |
 | `routes.yaml` | the gateway's routes file, a key of the ConfigMap `agentgateway-routes`; it names every key as a variable and every credential as a file, and holds none (see [The gateway's routes](#the-gateways-routes)) |
 | `routes.values.yaml` | an additional values file of the gateway's chart: `config.localXdsPath`, each key the routes name as a variable from the SealedSecret `hermes-credentials`, the reloader's annotation for that Secret, and the routes and every Secret a route attaches from, mounted whole and read-only under `/etc/agentgateway/` |
@@ -270,7 +264,7 @@ The routes file holds one route per tool server a profile holds, at `/mcp/<serve
 - names the caller to a server in the cluster (a host under `.svc.cluster.local`) on every call: `X-Client-Id`, the route's name, and `X-Enduser-Id`, the key's `enduser_id` or the token's `preferred_username`. The gateway sets both after copying the caller's headers, so a value the caller sent is overwritten, and one with no person behind it is removed. A server outside the cluster, such as a vendor's hosted one, is told nobody;
 - keeps no session upstream (`statefulMode: stateless`): a session would keep the credential it started with past a renewal.
 
-A route's keys are variables the gateway expands when it loads the file (`${KIM_GATEWAY_KEY}`, the sealed key's name upper case and underscored), set from `hermes-credentials` at start; a resealed key rolls the gateway through the reloader. A connector's `issuer` is expanded the same way: lares sets the cluster's `AUTHENTIK_URL` beside the rendered values. Every credential is a file the gateway watches, and kubelet swaps a changed Secret in whole, so a renewed token or bridge key reaches the next call without a restart. Every call is a span to `gateway.otlp_endpoint`, kept at `tracing.sampling_ratio`.
+A route's keys are variables the gateway expands when it loads the file (`${KIM_GATEWAY_KEY}`, the sealed key's name upper case and underscored), set from `hermes-credentials` at start; a resealed key rolls the gateway through the reloader. A connector's `issuer` is expanded the same way: lares sets the cluster's `AUTHENTIK_URL` beside the rendered values. Every credential is a file the gateway watches, and kubelet swaps a changed Secret in whole, so a renewed token or bridge key reaches the next call without a restart. Every call is a span to `gateway.otlp_endpoint`, kept at `${TRACING_SAMPLING_RATIO}`: lares sets the share on the gateway's pod as on every service of the platform, and the gateway does not start without it.
 
 ### The web chat's connections
 
@@ -284,7 +278,7 @@ The chart renders every value as a template, so the placeholder is written `` {{
 
 ## The cron jobs
 
-The harness runs the schedules; its own cron ledger, incidents and overdue gauges are the signal that one did not run. The trigger owns the job set. lares mounts the rendered `cron-jobs.yaml` beside the use-case file, and at startup the trigger lists the harness's jobs through the Jobs API (`/api/jobs`, paused ones included) and brings the managed ones in line with it:
+The harness runs the schedules; its own cron ledger, incidents and overdue gauges are the signal that one did not run. The trigger owns the job set: one job per enabled schedule use case, named `lares:<use case>`, with its schedule, skill, prompt and `deliver: local`, and one per enabled script, `lares:<script>`, with its schedule, script, `no_agent: true` and delivery. At startup the trigger builds the set from the use-case file, lists the harness's jobs through the Jobs API (`/api/jobs`, paused ones included) and brings the managed ones in line with it:
 
 | In the harness                              | What the reconcile does                                                  |
 | ------------------------------------------- | ------------------------------------------------------------------------ |
@@ -294,7 +288,7 @@ The harness runs the schedules; its own cron ledger, incidents and overdue gauge
 | a `lares:` job nothing declares, or a second job of one managed name | deletes it                                      |
 | any other job, and whether a managed job is paused | nothing: pausing a job is a person's lever                        |
 
-The pod rolls when the rendering changes, so startup is the only moment the set changes. A reconcile the harness does not answer is tried again every `RECONCILE_RETRY_SECONDS`; one it refuses (a schedule it cannot parse, a script job on a harness whose Jobs API does not take `script` yet) is logged, counted as `refused` and not tried again, since the declaration changes only with a new commit. A job set rendered from another declaration than the mounted use-case file stops the pod at startup.
+The pod rolls when the use-case file changes, so startup is the only moment the set changes. A reconcile the harness does not answer is tried again every `RECONCILE_RETRY_SECONDS`; one it refuses (a schedule it cannot parse, a script job on a harness whose Jobs API does not take `script` yet) is logged, counted as `refused` and not tried again, since the declaration changes only with a new commit.
 
 The Jobs API takes no tool list and no model per job, so every managed job sees the cron surface (every read server in use and the memory servers the schedule use cases name) and runs on the harness's default model. The loader refuses an enabled schedule use case that would need more, one naming a writing server or pinning a model; and because a memory server on the cron surface reaches every job, it refuses an enabled schedule use case without `memory: true` beside one that names it.
 
@@ -608,7 +602,6 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | ------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |
 | `USE_CASES_FILE`                            | `/etc/lares-agent-trigger/use-cases.yaml`          | The declared use cases.                            |
 | `PERSONS_FILE`                              | `/etc/lares-agent-trigger/persons.yaml`            | The model sources and their prices, and the persons. |
-| `CRON_JOBS_FILE`                            | `/etc/lares-agent-trigger/cron-jobs.yaml`          | The job set rendered from them.                    |
 | `NATS_SERVERS`                              | `nats://localhost:4222`                            | Comma-separated server list.                       |
 | `NATS_NKEY_SEED_FILE`                       | —                                                  | The nkey seed; needs `$JS.ACK.>` to acknowledge.   |
 | `NATS_STREAM_NAME` / `CONSUMER_NAME`        | `EPISODE` / `agent-trigger`                        | The stream and the durable consumer bound to.      |
@@ -652,7 +645,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `METRICS_PORT`                              | `9090`                                             | `/metrics` and `/healthz`.                         |
 | `LOG_LEVEL` / `LOG_FORMAT`                  | `INFO` / `json`                                    | Logging.                                           |
 | `TRACING_ENDPOINT`                          | —                                                  | OTLP/HTTP collector base URL; unset keeps it off.  |
-| `TRACING_SAMPLING_RATIO`                    | `0.1`                                              | The share of new traces kept; lares renders it from the declaration. |
+| `TRACING_SAMPLING_RATIO`                    | `0.1`                                              | The share of new traces kept; lares sets it in the trigger's values. |
 
 ## Metrics
 
