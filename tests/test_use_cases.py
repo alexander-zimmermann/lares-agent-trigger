@@ -148,6 +148,13 @@ def _write(tmp_path: Path, text: str) -> Path:
     return path
 
 
+def test_the_chat_may_answer_in_discord_and_the_web_chat(tmp_path: Path) -> None:
+    """The harness answers both in their conversation; the trigger delivers neither."""
+    text = VALID.replace("    output: [discord]\n", "    output: [discord, web_chat]\n")
+
+    assert load_use_cases(_write(tmp_path, text))["messenger"].output == ("discord", "web_chat")
+
+
 def test_every_field_of_an_event_use_case(tmp_path: Path) -> None:
     explain = load_use_cases(_write(tmp_path, VALID))["explain-episode"]
 

@@ -93,7 +93,7 @@ use_cases:
     trigger:
       kind: message
     tools: [lares, lares-control, github]
-    output: [discord]
+    output: [discord, web_chat]
     budget: {tool_calls: 40, minutes: 10, runs_per_day: 200}
     language: de
     memory: true

@@ -1,8 +1,9 @@
-"""The generator: the declarations rendered into what the harness and the gateway read.
+"""The generator: the declarations rendered into what the harness and its neighbours read.
 
 Pure: the use-case file, the person declaration and the hand-written harness
 settings in, one text per rendered file out. Which files, and what each
-holds, is the README's "The generator", "The keys" and "The gateway's routes".
+holds, is the README's "The generator", "The keys", "The gateway's routes" and
+"The web chat's connections".
 This module keeps the rules the rendering follows:
 
 - a dormant use case, a tool server only dormant use cases name and a model
@@ -171,6 +172,17 @@ _HOUSEHOLD_GROUP = "household"
 _PERSON_GROUP = "person-{handle}"
 _INSTANTIATE_LABEL = "blueprints.goauthentik.io/instantiate"
 
+# Open WebUI's own copy of each person's API server key, sealed in its namespace under
+# the key the harness's copy has.
+OPEN_WEBUI_KEYS = SealedSecret("open-webui-hermes-keys", "open-webui")
+# The harness's API server in the cluster; a person's profile serves under its prefix.
+_HARNESS_URL = "http://hermes.agents.svc.cluster.local:8642"
+# The header that continues a session; without it the harness takes a web turn for a
+# background review. Open WebUI fills in the chat's id, and its chart renders every
+# value as a template, so the placeholder is quoted for the chart.
+_SESSION_HEADER = "X-Hermes-Session-Id"
+_CHAT_ID = "{{`{{CHAT_ID}}`}}"
+
 
 @dataclass(frozen=True)
 class Rendering:
@@ -192,6 +204,8 @@ class Rendering:
     routes_values: str
     # Authentik's blueprint of every person's account and groups.
     authentik_persons: str
+    # The chart values that connect Open WebUI to every person's profile.
+    open_webui_connections: str
 
 
 class _Key(NamedTuple):
@@ -351,6 +365,15 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         "# holds. No account loses a group of its own; the owner's is only created.\n"
         f"{_dump(_authentik_persons(persons))}"
     )
+    open_webui_connections = (
+        f"{GENERATED_LINE}\n"
+        "# An additional values file of Open WebUI's chart: one connection per enabled\n"
+        "# person, to their profile on the harness's API server under their own key,\n"
+        f"# sealed in {OPEN_WEBUI_KEYS.name}. Each serves the handle as its one model and\n"
+        "# names the chat as the profile's session; the chart renders every value as a\n"
+        "# template, so the chat id's placeholder is quoted for it.\n"
+        f"{_dump(_open_webui_connections(persons))}"
+    )
     return Rendering(
         hermes_config=hermes_config,
         profiles=profiles,
@@ -362,6 +385,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         routes=routes_file,
         routes_values=routes_values,
         authentik_persons=authentik_persons,
+        open_webui_connections=open_webui_connections,
     )
 
 
@@ -964,6 +988,46 @@ def _authentik_persons(persons: PersonsFile) -> dict[str, Any]:
     }
 
 
+def _open_webui_connections(persons: PersonsFile) -> dict[str, Any]:
+    """Each enabled person's connection, by index: their profile's URL, key and model.
+
+    A key is a variable from Open WebUI's SealedSecret, set before the list
+    that composes it, under the key the person's profile reads its own from.
+    Without a connection Open WebUI would call api.openai.com, so without an
+    enabled person its OpenAI API is off.
+    """
+    enabled = persons.enabled_persons
+    if not enabled:
+        return {"commonEnvVars": [{"name": "ENABLE_OPENAI_API", "value": "false"}]}
+    keys = {p.name: f"HERMES_KEY_{p.name.upper().replace('-', '_')}" for p in enabled}
+    configs = {
+        str(index): {"model_ids": [person.name], "headers": {_SESSION_HEADER: _CHAT_ID}}
+        for index, person in enumerate(enabled)
+    }
+    return {
+        "commonEnvVars": [
+            *(
+                {
+                    "name": keys[person.name],
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": OPEN_WEBUI_KEYS.name,
+                            "key": _own_key(person, _API_SERVER_KEY),
+                        }
+                    },
+                }
+                for person in enabled
+            ),
+            {
+                "name": "OPENAI_API_BASE_URLS",
+                "value": ";".join(f"{_HARNESS_URL}/p/{person.name}/v1" for person in enabled),
+            },
+            {"name": "OPENAI_API_KEYS", "value": ";".join(f"$({key})" for key in keys.values())},
+            {"name": "OPENAI_API_CONFIGS", "value": json.dumps(configs, separators=(",", ":"))},
+        ]
+    }
+
+
 def _sealed_key(variable: str) -> str:
     """The key a variable's value is sealed under: its name, lower case and dashed."""
     return variable.lower().replace("_", "-")
@@ -1080,8 +1144,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="lares-agent-trigger generate",
         description="Render the use-case file and the person declaration into the harness "
         "configuration, each person's profile, the cron job set, the sampling ratio, the "
-        "templates of every profile's .env, the gateway's routes and chart values, and "
-        "Authentik's blueprint of the persons.",
+        "templates of every profile's .env, the gateway's routes and chart values, "
+        "Authentik's blueprint of the persons, and Open WebUI's connections.",
     )
     parser.add_argument("--use-cases", type=Path, required=True)
     parser.add_argument("--persons", type=Path, required=True)
@@ -1095,6 +1159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Written whole: each person's config, the ConfigMap of them and the chart values.
     parser.add_argument("--profiles", type=Path, required=True)
     parser.add_argument("--authentik-persons", type=Path, required=True)
+    parser.add_argument("--open-webui-connections", type=Path, required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -1121,6 +1186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         (args.routes, rendered.routes),
         (args.routes_values, rendered.routes_values),
         (args.authentik_persons, rendered.authentik_persons),
+        (args.open_webui_connections, rendered.open_webui_connections),
         (profiles / "kustomization.yaml", rendered.profiles_kustomization),
         (profiles / "profiles.values.yaml", rendered.profiles_values),
         *((profiles / handle / _CONFIG_FILE, text) for handle, text in rendered.profiles.items()),

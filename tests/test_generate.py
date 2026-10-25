@@ -29,6 +29,7 @@ SETTINGS = RENDERING / "settings.yaml"
 EXPECTED = RENDERING / "expected"
 # Named after where it goes, so it is not taken for the declaration it renders.
 AUTHENTIK_PERSONS = "authentik/persons.yaml"
+OPEN_WEBUI_CONNECTIONS = "open-webui/connections.values.yaml"
 # The declaration without its persons: the default profile serves the chat.
 _PERSONS_TEXT = PERSONS.read_text(encoding="utf-8")
 NO_PERSONS = _PERSONS_TEXT[: _PERSONS_TEXT.index("\npersons:\n")]
@@ -90,6 +91,7 @@ def _files(rendered: Rendering) -> dict[str, str]:
         "profiles/profiles.values.yaml": rendered.profiles_values,
         **{f"profiles/{handle}/config.yaml": text for handle, text in rendered.profiles.items()},
         AUTHENTIK_PERSONS: rendered.authentik_persons,
+        OPEN_WEBUI_CONNECTIONS: rendered.open_webui_connections,
     }
 
 
@@ -366,6 +368,37 @@ def test_every_key_the_routes_name_is_a_variable_or_file_the_values_provide(
     assert read == files
 
 
+def _open_webui_env(tmp_path: Path, persons: str | None = None) -> list[dict[str, Any]]:
+    values = yaml.safe_load(_render(tmp_path, persons=persons).open_webui_connections)
+    env: list[dict[str, Any]] = values["commonEnvVars"]
+    return env
+
+
+def test_each_connection_uses_the_key_the_persons_profile_reads(tmp_path: Path) -> None:
+    """A key is set before the list that composes it, from the key the profile's own .env names."""
+    env = _open_webui_env(tmp_path)
+    composed = next(e for e in env if e["name"] == "OPENAI_API_KEYS")["value"]
+    keys = re.findall(r"\$\((\w+)\)", composed)
+    defined = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in env if "valueFrom" in e}
+    position = {e["name"]: index for index, e in enumerate(env)}
+
+    for handle, key in zip(["kim", "lou"], keys, strict=True):
+        assert position[key] < position["OPENAI_API_KEYS"]
+        lines = _env_lines(tmp_path, profile=handle)
+        (profile_key,) = [line for line in lines if line.startswith("API_SERVER_KEY=")]
+        assert defined[key] == {
+            "name": "open-webui-hermes-keys",
+            "key": re.findall(r'"([^"]+)"', profile_key)[0],
+        }
+
+
+def test_without_persons_open_webui_connects_nowhere(tmp_path: Path) -> None:
+    """Open WebUI falls back to api.openai.com without a connection; the API is off instead."""
+    off = [{"name": "ENABLE_OPENAI_API", "value": "false"}]
+
+    assert _open_webui_env(tmp_path, NO_PERSONS) == off
+
+
 def test_the_sampling_ratio_is_rendered_as_the_declaration_writes_it(tmp_path: Path) -> None:
     text = USE_CASES.read_text(encoding="utf-8")
     whole = text.replace("sampling_ratio: 0.5", "sampling_ratio: 1")
@@ -494,13 +527,20 @@ def _cli(tmp_path: Path, use_cases: Path = USE_CASES, persons: Path = PERSONS) -
             str(tmp_path / "out" / "profiles"),
             "--authentik-persons",
             str(tmp_path / "out" / AUTHENTIK_PERSONS),
+            "--open-webui-connections",
+            str(tmp_path / "out" / OPEN_WEBUI_CONNECTIONS),
         ]
     )
 
 
+def _outside_directories(tmp_path: Path) -> None:
+    """Authentik's blueprints and Open WebUI's config: directories the generator does not own."""
+    for name in (AUTHENTIK_PERSONS, OPEN_WEBUI_CONNECTIONS):
+        (tmp_path / "out" / name).parent.mkdir(parents=True)
+
+
 def test_the_command_writes_every_file_whole(tmp_path: Path) -> None:
-    # Authentik's blueprints have a directory of their own, which the generator does not own.
-    (tmp_path / "out" / AUTHENTIK_PERSONS).parent.mkdir(parents=True)
+    _outside_directories(tmp_path)
     (tmp_path / "out" / "config.yaml").write_text("stale\n", encoding="utf-8")
 
     assert _cli(tmp_path) == 0
@@ -513,7 +553,7 @@ def test_the_command_writes_every_file_whole(tmp_path: Path) -> None:
 
 def test_the_command_removes_the_profile_of_a_person_no_longer_rendered(tmp_path: Path) -> None:
     """max went dormant: their config leaves, and so does their directory."""
-    (tmp_path / "out" / AUTHENTIK_PERSONS).parent.mkdir(parents=True)
+    _outside_directories(tmp_path)
     (tmp_path / "out" / "profiles" / "max").mkdir(parents=True)
     (tmp_path / "out" / "profiles" / "max" / "config.yaml").write_text("old\n", encoding="utf-8")
 
