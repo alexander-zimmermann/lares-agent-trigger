@@ -162,8 +162,9 @@ _NO_TOOL_SERVER = "no_mcp"
 _SKILLS_TOOLSET = "skills"
 
 # The slash commands a person who is not `discord: admin` may run, beside the
-# harness's /help and /whoami; `reset` is /new.
-_PERSON_COMMANDS = ("reset", "stop", "retry", "undo")
+# harness's /help and /whoami. The harness checks a command's canonical name,
+# so /new allows its alias /reset, never the other way round.
+_PERSON_COMMANDS = ("new", "stop", "retry", "undo")
 
 # Every person's Authentik account sits at this path and in this group, beside a
 # group of their own; the label has Authentik apply the blueprint once discovered.
