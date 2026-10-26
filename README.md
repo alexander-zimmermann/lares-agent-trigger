@@ -210,7 +210,7 @@ Without a person on Discord, the default profile serves the chat. With one, the 
 
 - routes each Discord person's messages to their profile: one `gateway.profile_routes` entry per person, `user_id: ${env:DISCORD_USER_<HANDLE>}`;
 - lets only them write (`discord.allow_from`), from the same references, so a missing id leaves its person ignored, never misrouted to the default profile;
-- gives the `discord: admin` persons every slash command (`allow_admin_from`, `group_allow_admin_from`) and everyone else `reset`, `stop`, `retry` and `undo` beside Hermes's `/help` and `/whoami` (`user_allowed_commands`, `group_user_allowed_commands`);
+- gives the `discord: admin` persons every slash command (`allow_admin_from`, `group_allow_admin_from`) and everyone else `new` (its alias `reset` included), `stop`, `retry` and `undo` beside Hermes's `/help` and `/whoami` (`user_allowed_commands`, `group_user_allowed_commands`);
 - holds no tool server on `discord`: the chat is the persons'.
 
 A person reaches every server they hold on the server's one route, under a key of their own that names them to the gateway.
