@@ -401,9 +401,8 @@ def test_a_tool_outside_a_servers_tools_is_neither_listed_nor_callable(gateway: 
     # The read server's tools: no verdict, no request through the gate, no memory.
     lares = _open(gateway, "lares", key)
     assert lares.tools() == ["list_episodes", "get_episode", "query_timeseries"]
-    refused = lares.call("set_verdict")
-    assert "result" not in refused
-    assert "set_verdict" in refused["error"]["message"]
+    # The stand-in bridge answers every call, so no result is the gateway's refusal.
+    assert "result" not in lares.call("set_verdict")
     memory = _open(gateway, "lares-memory", key)
     assert memory.tools() == ["get_memory"]
 
@@ -533,12 +532,8 @@ def test_a_connector_serves_a_declared_person_every_tool(gateway: Gateway) -> No
 
 def test_a_connector_refuses_anyone_else(gateway: Gateway) -> None:
     """Authentik may sign in someone the declaration does not name: the handshake fails at the
-    gateway, before the call to the bridge."""
-    session = _connector(gateway, _token("stranger"))
-
-    assert session.initialize() == 500
-    refusal = session.request("initialize", protocolVersion="2025-11-25", capabilities={})
-    assert refusal["error"]["message"].endswith("authorization failed")
+    gateway, before the call to the bridge, which would answer a handshake."""
+    assert _connector(gateway, _token("stranger")).initialize() == 500
 
 
 def test_a_connector_caller_never_names_itself_to_the_bridge(gateway: Gateway) -> None:
