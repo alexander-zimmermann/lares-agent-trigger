@@ -5,9 +5,11 @@
     "github>alexander-zimmermann/lares//.renovate/sidecarPython.json5",
     "github>alexander-zimmermann/lares//.renovate/sidecarCoreDep.json5",
   ],
+  // config:recommended skips tests/, where the gateway test pins its image
+  "ignorePresets": [":ignoreModulesAndTests"],
   "customManagers": [
     {
-      // The gateway test runs the gateway and the GitHub server lares deploys
+      // The gateway test runs the gateway lares deploys
       "customType": "regex",
       "managerFilePatterns": ["/^tests/test_gateway\\.py$/"],
       "matchStrings": ["_IMAGE = \"(?<depName>[^\":]+):(?<currentValue>[^\"]+)\""],
