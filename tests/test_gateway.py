@@ -39,7 +39,7 @@ from lares_agent_trigger.use_cases import ToolServer, load_use_case_file
 from .test_generate import PERSONS, SETTINGS, USE_CASES
 
 # What lares deploys; Renovate bumps it.
-GATEWAY_IMAGE = "cr.agentgateway.dev/agentgateway:v1.6.0"
+GATEWAY_IMAGE = "cr.agentgateway.dev/agentgateway:v1.7.0"
 # The stand-in bridge's interpreter.
 BRIDGE_IMAGE = "python:3.15-slim"
 
