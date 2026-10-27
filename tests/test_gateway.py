@@ -332,8 +332,8 @@ class _Session:
     def tools(self) -> list[str]:
         return [tool["name"] for tool in self.request("tools/list")["result"]["tools"]]
 
-    def call(self, tool: str) -> dict[str, Any]:
-        return self.request("tools/call", name=tool, arguments={})
+    def call(self, tool: str, **arguments: Any) -> dict[str, Any]:
+        return self.request("tools/call", name=tool, arguments=arguments)
 
     def caller(self, tool: str) -> dict[str, str | None]:
         """What the bridge was told about the call: its key, the client and the person."""
@@ -461,6 +461,15 @@ def test_a_renewed_credential_reaches_an_open_session_without_a_restart(
     # The other tests read the key the volume held.
     gateway.write("credentials/agentgateway-keys", keys)
     assert _seen(session, BRIDGE_KEY) == BRIDGE_KEY
+
+
+def test_a_call_longer_than_the_gateways_own_ten_seconds_returns(gateway: Gateway) -> None:
+    """The route waits its server's `timeout_seconds` for a reply that comes only once done."""
+    session = _open(gateway, "lares", _value("gateway-key"))
+
+    answer = session.call("get_episode", seconds=12)
+
+    assert json.loads(answer["result"]["content"][0]["text"])["client"] == "lares"
 
 
 def _seen(session: _Session, key: str) -> str | None:

@@ -63,6 +63,7 @@ connectors:
     client_id: claude-ai
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
+    timeout_seconds: 60
     tools: ["*"]
 
 scripts:

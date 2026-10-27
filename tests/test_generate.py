@@ -302,8 +302,20 @@ def test_a_server_outside_the_cluster_is_told_nobody(tmp_path: Path) -> None:
     routes = _routes(tmp_path, use_cases=text)
 
     (target,) = routes["github"]["backends"][0]["mcp"]["targets"]
-    assert target == {"name": "github", "mcp": {"host": "https://mcp.example.com/mcp"}}
-    assert "policies" in routes["lares"]["backends"][0]["mcp"]["targets"][0]
+    assert target["mcp"] == {"host": "https://mcp.example.com/mcp"}
+    assert "transformations" not in target["policies"]
+    assert "transformations" in routes["lares"]["backends"][0]["mcp"]["targets"][0]["policies"]
+
+
+def test_the_gateway_waits_each_server_as_long_as_the_harness_does(tmp_path: Path) -> None:
+    """A tool server's `timeout_seconds` holds on its route too, a connector's on its own."""
+    declared = load_use_case_file(USE_CASES)
+    limits = {name: server.timeout_seconds for name, server in declared.tool_servers.items()}
+    limits |= {name: connector.timeout_seconds for name, connector in declared.connectors.items()}
+
+    for name, route in _routes(tmp_path).items():
+        (target,) = route["backends"][0]["mcp"]["targets"]
+        assert target["policies"]["http"] == {"requestTimeout": f"{limits[name]}s"}, name
 
 
 def test_a_credential_in_another_header_goes_as_it_is(tmp_path: Path) -> None:

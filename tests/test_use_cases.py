@@ -73,6 +73,7 @@ connectors:
     client_id: claude-ai
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
+    timeout_seconds: 60
     tools: ["*"]
 
 scripts:
@@ -619,6 +620,7 @@ def test_every_field_of_a_connector(tmp_path: Path) -> None:
     assert claude.client_id == "claude-ai"
     assert claude.url == "http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp"
     assert claude.credential.key == "lares-mcp-bridge"
+    assert claude.timeout_seconds == 60
     assert claude.tools == ("*",)
 
 
