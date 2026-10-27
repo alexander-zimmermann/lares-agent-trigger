@@ -4,13 +4,16 @@ Run inside a container on the gateway's network, standard library only:
 `python -I fake_bridge.py`, on `PORT` (8080 by default). It speaks MCP over
 streamable HTTP without sessions, the way the gateway calls a route's server,
 and answers every tool call with what names the call: the `Authorization`
-header it arrived with, and the client and the person the gateway set.
+header it arrived with, and the client and the person the gateway set. A call
+with `seconds` among its arguments is answered that many seconds later, in one
+JSON reply as Grafana's server answers: nothing reaches the gateway before.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, override
 
@@ -64,6 +67,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "enduser": self.headers.get("X-Enduser-Id"),
             }
             result = {"content": [{"type": "text", "text": json.dumps(caller)}]}
+            time.sleep(message["params"].get("arguments", {}).get("seconds", 0))
         else:
             error = {"code": -32601, "message": f"no {method}"}
             self._send(200, {"jsonrpc": "2.0", "id": message["id"], "error": error})

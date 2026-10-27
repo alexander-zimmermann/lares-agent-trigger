@@ -248,7 +248,8 @@ class ToolServer(_Strict):
     """An MCP endpoint behind its gateway route: the bridge's and a vendor's alike.
 
     The gateway attaches `credential`; the harness calls the route with its
-    profile's gateway key. `tools` (names or `*`/`?` globs) is the route's tool
+    profile's gateway key, and both wait `timeout_seconds` for a call to
+    return. `tools` (names or `*`/`?` globs) is the route's tool
     list and the harness's include list on top. The gateway names the caller to a server
     in the cluster: the route, and the person behind the key; a server
     outside it, such as a vendor's hosted one, gets the credential only.
@@ -269,8 +270,8 @@ class Connector(_Strict):
     `issuer` is the Authentik application's issuer, a variable the gateway
     expands at start where it differs per cluster; `client_id` is the
     application's pre-registered client, the tokens' audience. The gateway
-    calls `url` with `credential` and serves `tools` to the persons the
-    person declaration names.
+    calls `url` with `credential`, waits `timeout_seconds` for a call to
+    return, and serves `tools` to the persons the person declaration names.
     """
 
     name: str = Field(min_length=1)
@@ -279,6 +280,7 @@ class Connector(_Strict):
     client_id: str = Field(min_length=1)
     url: str = Field(min_length=1)
     credential: Credential
+    timeout_seconds: int = Field(gt=0)
     tools: tuple[str, ...] = Field(min_length=1)
 
 

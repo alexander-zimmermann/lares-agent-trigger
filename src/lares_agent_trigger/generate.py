@@ -789,7 +789,9 @@ def _route_config(route: _ServerRoute) -> dict[str, Any]:
             "mcpAuthorization": {"rules": [_tool_rule(pattern) for pattern in server.tools]},
             "backendAuth": _backend_auth(server.credential),
         },
-        "backends": [_backend(server.name, server.url, f"apiKey.{_KEY_ENDUSER}")],
+        "backends": [
+            _backend(server.name, server.url, server.timeout_seconds, f"apiKey.{_KEY_ENDUSER}")
+        ],
     }
 
 
@@ -822,24 +824,29 @@ def _connector_config(route: _ConnectorRoute) -> dict[str, Any]:
         },
         "backends": [
             {
-                **_backend(connector.name, connector.url, _TOKEN_ENDUSER),
+                **_backend(
+                    connector.name, connector.url, connector.timeout_seconds, _TOKEN_ENDUSER
+                ),
                 "policies": {"authorization": {"rules": [persons]}},
             }
         ],
     }
 
 
-def _backend(name: str, url: str, enduser: str) -> dict[str, Any]:
+def _backend(name: str, url: str, timeout_seconds: int, enduser: str) -> dict[str, Any]:
     """The server behind a route, told the route and the person when it runs in the cluster.
 
-    The headers are set on the call to the server, after the caller's own
-    are copied over: a value the caller sent is overwritten, and one the
-    expression does not yield is removed. No session is kept.
+    The gateway waits `timeout_seconds` for a call, where it would give up
+    after its own 10. The headers are set on the call to the server, after
+    the caller's own are copied over: a value the caller sent is
+    overwritten, and one the expression does not yield is removed. No
+    session is kept.
     """
-    target: dict[str, Any] = {"name": name, "mcp": {"host": url}}
+    policies: dict[str, Any] = {"http": {"requestTimeout": f"{timeout_seconds}s"}}
     if (urlsplit(url).hostname or "").endswith(_CLUSTER_DOMAIN):
         naming = {_CLIENT_HEADER: json.dumps(name), _ENDUSER_HEADER: enduser}
-        target["policies"] = {"transformations": {"request": {"set": naming}}}
+        policies["transformations"] = {"request": {"set": naming}}
+    target = {"name": name, "mcp": {"host": url}, "policies": policies}
     return {"mcp": {"statefulMode": "stateless", "targets": [target]}}
 
 

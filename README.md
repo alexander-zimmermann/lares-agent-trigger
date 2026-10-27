@@ -84,7 +84,7 @@ tool_servers:
     tools: [list_*, get_*, query_*, correlate_events, search_wiki]
 ```
 
-Every tool server is an HTTP endpoint behind a route of its own on one gateway, [agentgateway](https://agentgateway.dev): the bridge under each of its servers, and any other MCP server such as the official [GitHub MCP server](https://github.com/github/github-mcp-server). The harness calls the route with its profile's one gateway key, which opens the routes of the servers the profile holds and no other; the gateway serves the server's `tools` and nothing else, attaches the credential the server expects, and names the caller to a server in the cluster. The harness holds no server's credential. `tools` is the route's tool list and the harness's include list on top. `access` is where it may be granted, and the loader refuses an enabled use case that names a server it may not hold:
+Every tool server is an HTTP endpoint behind a route of its own on one gateway, [agentgateway](https://agentgateway.dev): the bridge under each of its servers, and any other MCP server such as the official [GitHub MCP server](https://github.com/github/github-mcp-server). The harness calls the route with its profile's one gateway key, which opens the routes of the servers the profile holds and no other; the gateway serves the server's `tools` and nothing else, attaches the credential the server expects, and names the caller to a server in the cluster. The harness holds no server's credential. Both the harness and the gateway wait `timeout_seconds` for a call to return; the gateway would otherwise give up after its own 10 seconds. `tools` is the route's tool list and the harness's include list on top. `access` is where it may be granted, and the loader refuses an enabled use case that names a server it may not hold:
 
 | `access`  | Granted to                                                                         |
 | --------- | ---------------------------------------------------------------------------------- |
@@ -105,6 +105,7 @@ connectors:
     client_id: claude-ai                                     # its pre-registered client, the tokens' audience
     url: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
     credential: {secret: lares-mcp-bridge-gateway-key, key: key, header: Authorization}
+    timeout_seconds: 60
     tools: ["*"]
 ```
 

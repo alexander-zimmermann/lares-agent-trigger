@@ -46,6 +46,8 @@ binds:
                       mcp:
                         host: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
                       policies:
+                        http:
+                          requestTimeout: 60s
                         transformations:
                           request:
                             set:
@@ -78,6 +80,8 @@ binds:
                       mcp:
                         host: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
                       policies:
+                        http:
+                          requestTimeout: 30s
                         transformations:
                           request:
                             set:
@@ -108,6 +112,8 @@ binds:
                       mcp:
                         host: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
                       policies:
+                        http:
+                          requestTimeout: 30s
                         transformations:
                           request:
                             set:
@@ -143,6 +149,8 @@ binds:
                       mcp:
                         host: http://github-mcp-server.agents.svc.cluster.local:8082/mcp
                       policies:
+                        http:
+                          requestTimeout: 60s
                         transformations:
                           request:
                             set:
@@ -189,6 +197,8 @@ binds:
                       mcp:
                         host: http://lares-mcp-bridge.lares-mcp-bridge.svc.cluster.local:8080/mcp
                       policies:
+                        http:
+                          requestTimeout: 60s
                         transformations:
                           request:
                             set:
