@@ -7,5 +7,5 @@ on:
 
 jobs:
   release:
-    uses: alexander-zimmermann/lares/.github/workflows/sidecar-python-auto-release.yaml@b26cf87fa74323b6163bf52915bb41e0dbe74529 # main
+    uses: alexander-zimmermann/lares/.github/workflows/sidecar-python-auto-release.yaml@6bab6d83f16a06424a57526b84d3f8356cce1f95 # main
     secrets: inherit
