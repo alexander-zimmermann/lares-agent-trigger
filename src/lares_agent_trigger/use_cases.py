@@ -4,20 +4,23 @@ The file lives in lares and is mounted here; the generator renders the harness
 configuration from the same models, which is why schema and loader sit in this
 package rather than in the generator alone. Beside the use cases it declares
 the tool servers they may name, the gateway every one of them sits behind, the
-connectors a person signs in to on the gateway's public address, where the
-harness reports every finished turn, the share of traces every service of
-the platform keeps, and the scripts the harness's cron runs without a model.
+connectors a person signs in to on the gateway's public address, speech to
+text through the gateway, where the harness reports every finished turn, the
+share of traces every service of the platform keeps, and the scripts the
+harness's cron runs without a model.
 A file that does not validate is refused at startup — a half-read catalogue
 would start runs nobody declared.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import (
@@ -63,6 +66,11 @@ CONSUMED_EVENT_SOURCES: frozenset[EventSource] = frozenset({"episode"})
 # use cases that name it, `request` (a request a person approves) only to the chat,
 # `memory` (a use case's own memory) only to the use cases that keep one.
 ToolAccess = Literal["read", "write", "request", "memory"]
+
+# The speech route's name and path: OpenAI's transcriptions, where Hermes and Open WebUI
+# call a base URL ending in /v1.
+SPEECH_ROUTE = "speech"
+SPEECH_PATH = "/v1/audio/transcriptions"
 
 
 class _Strict(BaseModel):
@@ -284,6 +292,61 @@ class Connector(_Strict):
     tools: tuple[str, ...] = Field(min_length=1)
 
 
+class SealedKey(_Strict):
+    """A key of a Secret beside the gateway."""
+
+    secret: str = Field(min_length=1)
+    key: str = Field(min_length=1)
+
+
+# A speech client's name is written like a handle, so its variable is no person's.
+_CLIENT_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+class SpeechClient(_Strict):
+    """A caller of the speech route besides the profiles, under a key of its own."""
+
+    name: str = Field(min_length=1)
+    key: SealedKey
+
+    @model_validator(mode="after")
+    def _name_is_written_like_a_handle(self) -> SpeechClient:
+        if not _CLIENT_NAME.fullmatch(self.name):
+            raise ValueError(
+                f"speech client {self.name}: a client's name is written like a handle, in "
+                "lower-case letters, digits and dashes"
+            )
+        return self
+
+
+class Speech(_Strict):
+    """Speech to text: one route of the gateway to OpenAI's transcriptions at `url`.
+
+    It takes every enabled profile's gateway key and each client's own, attaches
+    `credential` and waits `timeout_seconds` for the transcript. The gateway
+    names whoever calls in the trace: the person behind a key, or the client.
+    """
+
+    url: str = Field(min_length=1)
+    credential: Credential
+    timeout_seconds: int = Field(gt=0)
+    clients: list[SpeechClient] = []
+
+    @model_validator(mode="after")
+    def _url_is_an_address(self) -> Speech:
+        # The gateway takes the host and port only.
+        url = urlsplit(self.url)
+        if (
+            url.scheme not in ("http", "https")
+            or not url.hostname
+            or url.path not in ("", "/")
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError(f"speech: url is http(s)://host[:port], not {self.url}")
+        return self
+
+
 class Gateway(_Strict):
     """The one door between the harness and every tool server.
 
@@ -311,13 +374,15 @@ class _File(_Strict):
     gateway: Gateway
     tool_servers: list[ToolServer] = Field(min_length=1)
     connectors: list[Connector] = []
+    speech: Speech | None = None
     use_cases: list[UseCase] = Field(min_length=1)
     scripts: list[Script] = []
 
 
 @dataclass(frozen=True)
 class UseCaseFile:
-    """The whole declaration by name in file order: use cases, tool servers, connectors, scripts."""
+    """The whole declaration by name in file order: use cases, tool servers, connectors, scripts,
+    and speech to text if declared."""
 
     use_cases: dict[str, UseCase]
     tool_servers: dict[str, ToolServer]
@@ -325,6 +390,7 @@ class UseCaseFile:
     scripts: dict[str, Script]
     ledger_hook: LedgerHook
     gateway: Gateway
+    speech: Speech | None
 
 
 def chat_use_case(use_cases: Mapping[str, UseCase]) -> UseCase | None:
@@ -379,7 +445,8 @@ def load_use_case_file(path: Path) -> UseCaseFile:
             raise ValueError(f"{path}: tool server {server.name} is declared twice")
         servers[server.name] = server
     _check_one_server_per_tool(path, servers)
-    connectors = _connectors(path, parsed.connectors, servers)
+    connectors = _connectors(path, parsed.connectors, servers, parsed.speech)
+    _check_speech_names(path, parsed.speech, servers)
 
     by_name: dict[str, UseCase] = {}
     for use_case in parsed.use_cases:
@@ -411,17 +478,25 @@ def load_use_case_file(path: Path) -> UseCaseFile:
         scripts=scripts,
         ledger_hook=parsed.ledger_hook,
         gateway=parsed.gateway,
+        speech=parsed.speech,
     )
 
 
 def _connectors(
-    path: Path, declared: list[Connector], servers: Mapping[str, ToolServer]
+    path: Path,
+    declared: list[Connector],
+    servers: Mapping[str, ToolServer],
+    speech: Speech | None,
 ) -> dict[str, Connector]:
     """The connectors by name; each route keeps a name and a path of its own."""
     routes = {f"/mcp/{name}": f"the route of tool server {name}" for name in servers}
+    taken = {*servers}
+    if speech is not None:
+        routes[SPEECH_PATH] = "the speech route"
+        taken.add(SPEECH_ROUTE)
     connectors: dict[str, Connector] = {}
     for connector in declared:
-        if connector.name in servers or connector.name in connectors:
+        if connector.name in taken or connector.name in connectors:
             raise ValueError(
                 f"{path}: connector {connector.name}: the name is already that of another route"
             )
@@ -433,6 +508,26 @@ def _connectors(
         routes[connector.path] = f"the path of connector {connector.name}"
         connectors[connector.name] = connector
     return connectors
+
+
+def _check_speech_names(
+    path: Path, speech: Speech | None, servers: Mapping[str, ToolServer]
+) -> None:
+    """Refuse a tool server's route under the speech route's name, and two clients of one name.
+
+    The trace names a client by its name, so a name stands for one client.
+    """
+    if speech is None:
+        return
+    if SPEECH_ROUTE in servers:
+        raise ValueError(
+            f"{path}: tool server {SPEECH_ROUTE}: the name is already that of the speech route"
+        )
+    clients: set[str] = set()
+    for client in speech.clients:
+        if client.name in clients:
+            raise ValueError(f"{path}: speech client {client.name} is declared twice")
+        clients.add(client.name)
 
 
 def _check_one_server_per_tool(path: Path, servers: Mapping[str, ToolServer]) -> None:

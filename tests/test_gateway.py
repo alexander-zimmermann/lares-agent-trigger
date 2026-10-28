@@ -1,5 +1,5 @@
-"""The rendered routes run as the gateway runs them: agentgateway, GitHub's server, a bridge
-and Authentik.
+"""The rendered routes run as the gateway runs them: agentgateway, GitHub's server, a bridge,
+Authentik and OpenAI.
 
 The gateway starts as its chart starts it with the rendered values: every
 variable they name set from its sealed key, every sealed key a value of its
@@ -11,11 +11,14 @@ of their own. The bridge is a stand-in, under the bridge's name and under
 GitHub's, that lists a tool no route serves and answers with the key it was
 called with and the caller the gateway named: what a route attached shows
 there. Authentik is a stand-in serving one application's discovery and
-signing keys; the test signs the tokens.
+signing keys; the test signs the tokens. OpenAI is a stand-in over plain
+HTTP, where the declaration names OpenAI's own address, that echoes the key
+and the upload it got.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import time
@@ -45,10 +48,15 @@ BRIDGE_IMAGE = "python:3.15-slim"
 
 FAKE_BRIDGE = Path(__file__).parent / "fake_bridge.py"
 FAKE_AUTHENTIK = Path(__file__).parent / "fake_authentik.py"
+FAKE_OPENAI = Path(__file__).parent / "fake_openai.py"
+FAKE_COLLECTOR = Path(__file__).parent / "fake_collector.py"
+# Where the stand-in OpenAI answers, in place of the declared https://api.openai.com.
+OPENAI_URL = "http://openai:8090"
 # The cluster's Authentik, as the gateway's overlay sets it.
 AUTHENTIK_URL = "http://authentik:9000"
-# The share of traces the gateway keeps, which lares sets beside the rendered values.
-SAMPLING_RATIO = "0.5"
+# The share of traces the gateway keeps, which lares sets beside the rendered values: every
+# one here, so a span the test looks for is never sampled out.
+SAMPLING_RATIO = "1.0"
 SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 # Where the rendered chart values mount the routes and the credentials.
 MOUNT = "/etc/agentgateway"
@@ -92,6 +100,8 @@ class Gateway:
     url: str
     container: str
     volume: str
+    # Where the test reads what the stand-in OTLP receiver got.
+    collector: str
 
     def write(self, directory: str, files: dict[str, str]) -> None:
         """Lay files into the gateway's volume as kubelet does, swapping the whole directory."""
@@ -141,8 +151,12 @@ class Rendered:
 
 
 @pytest.fixture(scope="module")
-def rendered() -> Rendered:
-    declared = load_use_case_file(USE_CASES)
+def rendered(tmp_path_factory: pytest.TempPathFactory) -> Rendered:
+    """The declaration rendered with speech going to the stand-in OpenAI."""
+    use_cases = tmp_path_factory.mktemp("rendering") / "use-cases.yaml"
+    text = USE_CASES.read_text(encoding="utf-8")
+    use_cases.write_text(text.replace("https://api.openai.com", OPENAI_URL), encoding="utf-8")
+    declared = load_use_case_file(use_cases)
     rendering = render(
         declared, load_persons_file(PERSONS, declared), SETTINGS.read_text(encoding="utf-8")
     )
@@ -166,7 +180,7 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
     _docker("network", "create", network)
     _docker("volume", "create", volume)
     try:
-        gateway = Gateway(url="", container="", volume=volume)
+        gateway = Gateway(url="", container="", volume=volume, collector="")
         settings = {"config": {**rendered.values["config"]["config"], "adminAddr": "off"}}
         gateway.write("settings", {"config.yaml": yaml.safe_dump(settings)})
         gateway.write("routes", {"config.yaml": rendered.routes})
@@ -175,60 +189,21 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
         issuer = declared.connectors["claude-ai"].issuer.replace("${AUTHENTIK_URL}", AUTHENTIK_URL)
         jwk = {**jwt.algorithms.RSAAlgorithm.to_jwk(SIGNING_KEY.public_key(), as_dict=True)}
         jwks = json.dumps({"keys": [{**jwk, "kid": "authentik", "alg": "RS256", "use": "sig"}]})
+        containers.append(_stand_in(network, "authentik", FAKE_AUTHENTIK, ISSUER=issuer, JWKS=jwks))
+        containers.append(_stand_in(network, bridge_host, FAKE_BRIDGE))
         containers.append(
-            _docker(
-                "run",
-                "-d",
-                "--network",
-                network,
-                "--network-alias",
-                "authentik",
-                "-e",
-                f"ISSUER={issuer}",
-                "-e",
-                f"JWKS={jwks}",
-                "-v",
-                f"{FAKE_AUTHENTIK}:/fake_authentik.py:ro",
-                BRIDGE_IMAGE,
-                "python",
-                "-I",
-                "/fake_authentik.py",
-            )
+            _stand_in(network, github_host, FAKE_BRIDGE, PORT=str(urlsplit(github.url).port))
         )
+        openai = urlsplit(OPENAI_URL)
         containers.append(
-            _docker(
-                "run",
-                "-d",
-                "--network",
-                network,
-                "--network-alias",
-                bridge_host,
-                "-v",
-                f"{FAKE_BRIDGE}:/fake_bridge.py:ro",
-                BRIDGE_IMAGE,
-                "python",
-                "-I",
-                "/fake_bridge.py",
-            )
+            _stand_in(network, str(openai.hostname), FAKE_OPENAI, PORT=str(openai.port))
         )
-        containers.append(
-            _docker(
-                "run",
-                "-d",
-                "--network",
-                network,
-                "--network-alias",
-                github_host,
-                "-e",
-                f"PORT={urlsplit(github.url).port}",
-                "-v",
-                f"{FAKE_BRIDGE}:/fake_bridge.py:ro",
-                BRIDGE_IMAGE,
-                "python",
-                "-I",
-                "/fake_bridge.py",
-            )
+        otlp = urlsplit(declared.gateway.otlp_endpoint)
+        collector = _stand_in(
+            network, str(otlp.hostname), FAKE_COLLECTOR, publish=otlp.port, PORT=str(otlp.port)
         )
+        containers.append(collector)
+        gateway.collector = f"http://127.0.0.1:{_published(collector, otlp.port)}"
         port = urlsplit(declared.gateway.url).port
         container = _docker(
             "run",
@@ -253,8 +228,8 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
             f"{MOUNT}/settings/config.yaml",
         )
         containers.append(container)
-        published = _docker("port", container, str(port)).splitlines()[0].rsplit(":", 1)[1]
-        gateway.url, gateway.container = f"http://127.0.0.1:{published}", container
+        gateway.url = f"http://127.0.0.1:{_published(container, port)}"
+        gateway.container = container
         _wait_until_serving(gateway)
         yield gateway
     finally:
@@ -262,6 +237,34 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         subprocess.run(["docker", "volume", "rm", volume], capture_output=True)
         subprocess.run(["docker", "network", "rm", network], capture_output=True)
+
+
+def _stand_in(
+    network: str, alias: str, script: Path, publish: int | None = None, **env: str
+) -> str:
+    """A stand-in on the gateway's network under the name it answers to: one script of the
+    standard library, with its settings as variables; `publish` opens its port to the test."""
+    return _docker(
+        "run",
+        "-d",
+        "--network",
+        network,
+        "--network-alias",
+        alias,
+        *(["-p", f"127.0.0.1::{publish}"] if publish is not None else []),
+        *(option for name, value in env.items() for option in ("-e", f"{name}={value}")),
+        "-v",
+        f"{script}:/{script.name}:ro",
+        BRIDGE_IMAGE,
+        "python",
+        "-I",
+        f"/{script.name}",
+    )
+
+
+def _published(container: str, port: int | None) -> str:
+    """The host port Docker opened for the container's port."""
+    return _docker("port", container, str(port)).splitlines()[0].rsplit(":", 1)[1]
 
 
 def _wait_until_serving(gateway: Gateway) -> None:
@@ -566,3 +569,75 @@ def test_a_connector_refuses_a_token_of_another_application(
     gateway: Gateway, claims: dict[str, str]
 ) -> None:
     assert _connector(gateway, _token("kim", **claims)).initialize() == 401
+
+
+# The first bytes of an Ogg file, as a voice message from Discord or Open WebUI starts.
+AUDIO = b"OggS\x00\x02" + bytes(range(256)) * 8
+
+
+def _transcribe(gateway: Gateway, key: str | None) -> tuple[bytes, httpx.Response]:
+    """A transcription as Hermes and Open WebUI send it, a form with the model and the file:
+    the body sent, and the answer."""
+    request = httpx.Request(
+        "POST",
+        f"{gateway.url}/v1/audio/transcriptions",
+        data={"model": "whisper-1", "language": "de"},
+        files={"file": ("voice.ogg", AUDIO, "audio/ogg")},
+        headers={"Authorization": f"Bearer {key}"} if key is not None else {},
+    )
+    with httpx.Client(timeout=30) as client:
+        return request.read(), client.send(request)
+
+
+def test_speech_passes_the_upload_on_under_openais_key(gateway: Gateway) -> None:
+    """The form reaches OpenAI byte for byte, with the mounted key in place of the caller's."""
+    sent, response = _transcribe(gateway, _value("kim-gateway-key"))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "text": "Hallo aus der Küche",
+        "path": "/v1/audio/transcriptions",
+        "authorization": f"Bearer {_value('openai-api-key')}",
+        "content_type": response.request.headers["content-type"],
+        "body_sha256": hashlib.sha256(sent).hexdigest(),
+    }
+
+
+def test_speech_takes_every_profiles_key_and_each_clients_and_no_other(gateway: Gateway) -> None:
+    for key in ("gateway-key", "kim-gateway-key", "lou-gateway-key", "open-webui-gateway-key"):
+        assert _transcribe(gateway, _value(key))[1].status_code == 200, key
+
+    assert _transcribe(gateway, None)[1].status_code == 401
+    assert _transcribe(gateway, _value("openai-api-key"))[1].status_code == 401
+
+
+def _enduser(value: str) -> bytes:
+    """The span attribute `enduser.id` holding this value, as OTLP's protobuf encodes it."""
+    key, text = b"enduser.id", value.encode()
+    any_value = b"\x0a" + bytes([len(text)]) + text
+    return b"\x0a" + bytes([len(key)]) + key + b"\x12" + bytes([len(any_value)]) + any_value
+
+
+def _exported(gateway: Gateway, attribute: bytes) -> bool:
+    """True once an export carrying the attribute reached the receiver, within 30 seconds."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        exports = httpx.get(f"{gateway.collector}/exports", timeout=30).json()
+        if any(attribute in bytes.fromhex(export) for export in exports):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def test_every_span_names_whoever_called(gateway: Gateway) -> None:
+    """The person or client behind a key, else the person the connector signed in.
+
+    The stranger is refused only after the sign-in, so their span names them.
+    """
+    _transcribe(gateway, _value("lou-gateway-key"))
+    _transcribe(gateway, _value("open-webui-gateway-key"))
+    _connector(gateway, _token("stranger")).initialize()
+
+    assert _exported(gateway, _enduser("lou"))
+    assert _exported(gateway, _enduser("open-webui"))
+    assert _exported(gateway, _enduser("stranger"))

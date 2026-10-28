@@ -46,9 +46,12 @@ from .hooks import CALL_FAILED, MODEL_CALL, TOOL_CALL, TURN_ENDED
 from .persons import ModelSource, Person, PersonsFile, load_persons_file
 from .receiver import HOOK_PATH
 from .use_cases import (
+    SPEECH_PATH,
+    SPEECH_ROUTE,
     Connector,
     Credential,
     Gateway,
+    Speech,
     ToolAccess,
     ToolServer,
     UseCase,
@@ -106,9 +109,11 @@ _GATEWAY_CREDENTIALS_DIR = "/etc/agentgateway/credentials"
 _CLIENT_HEADER = "X-Client-Id"
 _ENDUSER_HEADER = "X-Enduser-Id"
 _CLUSTER_DOMAIN = ".svc.cluster.local"
-# Where a person's handle sits on their key, and on a connector's Authentik token.
+# Where a person's handle sits on their key, and on a connector's Authentik token; the
+# span attribute that names them.
 _KEY_ENDUSER = "enduser_id"
 _TOKEN_ENDUSER = "jwt.preferred_username"
+_SPAN_ENDUSER = "enduser.id"
 # The metadata paths an MCP client looks up beside a connector's path, the last
 # one answered with the connector's pre-registered client.
 _OAUTH_PATHS = (
@@ -204,10 +209,23 @@ class Rendering:
 
 
 class _Key(NamedTuple):
-    """A profile's gateway key: the key it is sealed under, and the person it belongs to."""
+    """A caller's gateway key: the variable the routes name it by, the Secret and key it is
+    sealed under, and whom it names.
 
+    A profile's is sealed in the harness's SealedSecret, its variable named after that key,
+    and names its person. A speech client's is sealed where the declaration says, its
+    variable named after the client, so a key there named like a profile's stays the client's.
+    """
+
+    variable: str
+    secret: str
     sealed: str
     enduser: str | None
+
+
+def _profile_key(sealed: str, enduser: str | None) -> _Key:
+    """A profile's key, sealed in the harness's SealedSecret under `sealed`."""
+    return _Key(_variable(sealed), HARNESS_KEYS.name, sealed, enduser)
 
 
 @dataclass(frozen=True)
@@ -224,6 +242,14 @@ class _ConnectorRoute:
 
     connector: Connector
     handles: list[str]
+
+
+@dataclass(frozen=True)
+class _SpeechRoute:
+    """The gateway's speech route: every enabled profile's key and each client's."""
+
+    speech: Speech
+    keys: list[_Key]
 
 
 class _Dumper(yaml.SafeDumper):
@@ -322,19 +348,20 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
     )
     routes = _routes(declared, in_use, persons, holdings)
     connectors = _connector_routes(declared, persons)
+    speech_route = _speech_route(declared, persons)
     routes_file = (
         f"{GENERATED_LINE}\n"
         "# The gateway's routes. A key is a variable the gateway expands at start, set from\n"
-        f"# {HARNESS_KEYS.name}, as is a connector's issuer; a credential is a file it reads\n"
-        "# and watches.\n"
-        f"{_dump(_gateway_config(declared, routes, connectors))}"
+        f"# {HARNESS_KEYS.name} or a speech client's Secret, as is a connector's issuer; a\n"
+        "# credential is a file it reads and watches.\n"
+        f"{_dump(_gateway_config(declared, routes, connectors, speech_route))}"
     )
     routes_values = (
         f"{GENERATED_LINE}\n"
         "# An additional values file of the gateway's chart: the routes' keys as variables, and\n"
         "# the routes and every credential they attach, mounted whole so a renewed one\n"
         "# reaches the gateway; a resealed key rolls it.\n"
-        f"{_dump(_routes_values(routes, connectors))}"
+        f"{_dump(_routes_values(routes, connectors, speech_route))}"
     )
     authentik_persons = (
         f"{GENERATED_LINE}\n"
@@ -711,9 +738,9 @@ def _routes(
     routes: list[_ServerRoute] = []
     key_env = declared.gateway.key_env
     for server in declared.tool_servers.values():
-        keys = [_Key(_sealed_key(key_env), None)] if server in in_use else []
+        keys = [_profile_key(_sealed_key(key_env), None)] if server in in_use else []
         keys.extend(
-            _Key(_own_key(person, key_env), person.name)
+            _profile_key(_own_key(person, key_env), person.name)
             for person in persons.enabled_persons
             if server in holdings[person.name]
         )
@@ -732,13 +759,43 @@ def _connector_routes(declared: UseCaseFile, persons: PersonsFile) -> list[_Conn
     return routes
 
 
+def _speech_route(declared: UseCaseFile, persons: PersonsFile) -> _SpeechRoute | None:
+    """Every enabled profile's key, the default's first, then each client's under its name."""
+    speech = declared.speech
+    if speech is None:
+        return None
+    key_env = declared.gateway.key_env
+    keys = [
+        _profile_key(_sealed_key(key_env), None),
+        *(
+            _profile_key(_own_key(person, key_env), person.name)
+            for person in persons.enabled_persons
+        ),
+        *(
+            _Key(
+                _variable(f"{client.name}-{_sealed_key(key_env)}"),
+                client.key.secret,
+                client.key.key,
+                client.name,
+            )
+            for client in speech.clients
+        ),
+    ]
+    return _SpeechRoute(speech, keys)
+
+
 def _gateway_config(
-    declared: UseCaseFile, routes: Sequence[_ServerRoute], connectors: Sequence[_ConnectorRoute]
+    declared: UseCaseFile,
+    routes: Sequence[_ServerRoute],
+    connectors: Sequence[_ConnectorRoute],
+    speech_route: _SpeechRoute | None,
 ) -> dict[str, Any]:
     """The routes file: one route per entry, each a span of the trace it starts.
 
-    A route's backend keeps no session: an upstream session would keep the
-    credential it started with past a renewal.
+    A span names whoever called: the person or client behind the key, else
+    the person a connector signed in; an expression without a value leaves
+    the attribute out. A route's backend keeps no session: an upstream
+    session would keep the credential it started with past a renewal.
     """
     gateway = declared.gateway
     collector = urlsplit(gateway.otlp_endpoint)
@@ -748,6 +805,7 @@ def _gateway_config(
                 "host": collector.netloc,
                 "protocol": "http",
                 "randomSampling": _SAMPLING_RATIO,
+                "attributes": {_SPAN_ENDUSER: f"default(apiKey.{_KEY_ENDUSER}, {_TOKEN_ENDUSER})"},
             }
         },
         "binds": [
@@ -758,6 +816,7 @@ def _gateway_config(
                         "routes": [
                             *(_route_config(route) for route in routes),
                             *(_connector_config(route) for route in connectors),
+                            *([_speech_config(speech_route)] if speech_route is not None else []),
                         ]
                     }
                 ],
@@ -773,7 +832,7 @@ def _variable(sealed: str) -> str:
 
 def _api_key(key: _Key) -> dict[str, Any]:
     """A profile's key, by its variable; a person's carries the handle."""
-    entry: dict[str, Any] = {"key": f"${{{_variable(key.sealed)}}}"}
+    entry: dict[str, Any] = {"key": f"${{{key.variable}}}"}
     if key.enduser is not None:
         entry["metadata"] = {_KEY_ENDUSER: key.enduser}
     return entry
@@ -833,6 +892,39 @@ def _connector_config(route: _ConnectorRoute) -> dict[str, Any]:
     }
 
 
+def _speech_config(route: _SpeechRoute) -> dict[str, Any]:
+    """The speech route: the upload passed on as it came, read only for its model.
+
+    On a route of its own the gateway takes a request to OpenAI for a chat
+    unless told the path; `detect` forwards any body and still reads the
+    model. The provider's host is the declared one, over TLS for `https://`.
+    """
+    speech = route.speech
+    url = urlsplit(speech.url)
+    tls = url.scheme == "https"
+    policies: dict[str, Any] = {"backendTLS": {}} if tls else {}
+    policies["http"] = {"requestTimeout": f"{speech.timeout_seconds}s"}
+    return {
+        "name": SPEECH_ROUTE,
+        "matches": [{"path": {"exact": SPEECH_PATH}}],
+        "policies": {
+            "apiKey": {"mode": "strict", "keys": [_api_key(key) for key in route.keys]},
+            "backendAuth": _backend_auth(speech.credential),
+            "ai": {"routes": {SPEECH_PATH: "detect"}},
+        },
+        "backends": [
+            {
+                "ai": {
+                    "name": "openai",
+                    "provider": {"openAI": {}},
+                    "hostOverride": f"{url.hostname}:{url.port or (443 if tls else 80)}",
+                    "policies": policies,
+                }
+            }
+        ],
+    }
+
+
 def _backend(name: str, url: str, timeout_seconds: int, enduser: str) -> dict[str, Any]:
     """The server behind a route, told the route and the person when it runs in the cluster.
 
@@ -876,26 +968,34 @@ def _tool_rule(pattern: str) -> str:
 
 
 def _routes_values(
-    routes: Sequence[_ServerRoute], connectors: Sequence[_ConnectorRoute]
+    routes: Sequence[_ServerRoute],
+    connectors: Sequence[_ConnectorRoute],
+    speech_route: _SpeechRoute | None,
 ) -> dict[str, Any]:
-    """Each profile's key as a variable, once, and the routes and every credential as whole mounts.
+    """Each caller's key as a variable, once, and the routes and every credential as whole mounts.
 
-    The keys come from the harness's SealedSecret, where each profile's key is
-    sealed once. A variable is read at start, so a resealed key rolls the
-    gateway through the reloader; a renewed credential is a file the gateway
-    watches.
+    A profile's key comes from the harness's SealedSecret, where it is sealed
+    once, a speech client's from its own. A variable is read at start, so a
+    resealed key rolls the gateway through the reloader; a renewed credential
+    is a file the gateway watches.
     """
-    sealed = dict.fromkeys(key.sealed for route in routes for key in route.keys)
+    keys = [
+        *(key for route in routes for key in route.keys),
+        *(speech_route.keys if speech_route is not None else []),
+    ]
+    sources = {key.variable: key for key in keys}
+    reloaded = dict.fromkeys([HARNESS_KEYS.name, *(key.secret for key in sources.values())])
     variables = [
         {
-            "name": _variable(name),
-            "valueFrom": {"secretKeyRef": {"name": HARNESS_KEYS.name, "key": name}},
+            "name": variable,
+            "valueFrom": {"secretKeyRef": {"name": key.secret, "key": key.sealed}},
         }
-        for name in sealed
+        for variable, key in sources.items()
     ]
     credentials = [
         *(route.server.credential for route in routes),
         *(route.connector.credential for route in connectors),
+        *([speech_route.speech.credential] if speech_route is not None else []),
     ]
     attached: dict[str, list[str]] = {}
     for credential in credentials:
@@ -920,7 +1020,7 @@ def _routes_values(
     ]
     return {
         "config": {"config": {"localXdsPath": f"{_GATEWAY_ROUTES_DIR}/{_CONFIG_FILE}"}},
-        "podAnnotations": {"secret.reloader.stakater.com/reload": HARNESS_KEYS.name},
+        "podAnnotations": {"secret.reloader.stakater.com/reload": ",".join(reloaded)},
         "extraEnv": variables,
         "extraVolumes": volumes,
         "extraVolumeMounts": mounts,
@@ -1023,7 +1123,8 @@ def _default_env(
     The bot serves the chat for every profile, so its token stays here as
     long as the chat is on, beside the Discord id of each person it routes.
     A Discord id is the person's own value, sealed under their handle like
-    every other: `<handle>-discord-user`.
+    every other: `<handle>-discord-user`. The gateway key opens the servers
+    the profile holds and, with speech declared, the speech route.
     """
     discord_ids = {_discord_user(person): f"{person.name}-discord-user" for person in on_discord}
     variables = [
@@ -1031,7 +1132,7 @@ def _default_env(
         *([_DISCORD_BOT_TOKEN] if any(use_case.is_chat for use_case in enabled) else []),
         *discord_ids,
         declared.ledger_hook.secret_env,
-        *([declared.gateway.key_env] if in_use else []),
+        *([declared.gateway.key_env] if in_use or declared.speech is not None else []),
         *persons.default_source.key_envs,
     ]
 
@@ -1047,14 +1148,14 @@ def _person_env(
     """Every key a person's config reads: their own, sealed under the handle, and the hook secret.
 
     Their own are the API server's key, their gateway key when they hold a
-    tool server, and the keys of their source's providers; the hook secret is
-    the one every profile shares.
+    tool server or speech is declared, and the keys of their source's
+    providers; the hook secret is the one every profile shares.
     """
     source = persons.source_of(person)
     variables = [
         _API_SERVER_KEY,
         declared.ledger_hook.secret_env,
-        *([declared.gateway.key_env] if held else []),
+        *([declared.gateway.key_env] if held or declared.speech is not None else []),
         *source.key_envs,
     ]
 

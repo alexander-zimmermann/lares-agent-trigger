@@ -76,6 +76,14 @@ connectors:
     timeout_seconds: 60
     tools: ["*"]
 
+speech:
+  url: https://api.openai.com
+  credential: {secret: agentgateway-keys, key: openai-api-key, header: Authorization}
+  timeout_seconds: 60
+  clients:
+    - name: open-webui
+      key: {secret: agentgateway-keys, key: open-webui-gateway-key}
+
 scripts:
   - name: skill-digest
     sentence: Posts the week's skill names per profile to the home channel.
@@ -643,4 +651,74 @@ def test_a_connector_named_like_a_tool_server_is_refused(tmp_path: Path) -> None
     broken = VALID.replace("  - name: claude-ai\n", "  - name: lares\n", 1)
 
     with pytest.raises(ValueError, match="connector lares: the name is already"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_every_field_of_speech(tmp_path: Path) -> None:
+    """Speech to text: OpenAI behind one route, for the profiles and each declared client."""
+    speech = load_use_case_file(_write(tmp_path, VALID)).speech
+
+    assert speech is not None
+    assert speech.url == "https://api.openai.com"
+    assert speech.credential.secret == "agentgateway-keys"
+    assert speech.credential.key == "openai-api-key"
+    assert speech.timeout_seconds == 60
+    (client,) = speech.clients
+    assert client.name == "open-webui"
+    assert (client.key.secret, client.key.key) == ("agentgateway-keys", "open-webui-gateway-key")
+
+
+def test_a_file_without_speech_declares_none(tmp_path: Path) -> None:
+    text = VALID[: VALID.index("speech:\n")] + VALID[VALID.index("scripts:\n") :]
+
+    assert load_use_case_file(_write(tmp_path, text)).speech is None
+
+
+def test_two_speech_clients_of_one_name_are_refused(tmp_path: Path) -> None:
+    """The gateway names a client in the trace by its name, so each names one client."""
+    client = VALID[VALID.index("    - name: open-webui\n") : VALID.index("\nscripts:\n")]
+    broken = VALID.replace(client, client * 2, 1)
+
+    with pytest.raises(ValueError, match="speech client open-webui is declared twice"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_route_named_like_speech_is_refused(tmp_path: Path) -> None:
+    broken = VALID.replace("  - name: claude-ai\n", "  - name: speech\n", 1)
+
+    with pytest.raises(ValueError, match="connector speech: the name is already"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_connector_taking_the_speech_path_is_refused(tmp_path: Path) -> None:
+    broken = VALID.replace("    path: /mcp\n", "    path: /v1/audio/transcriptions\n", 1)
+
+    with pytest.raises(ValueError, match="path /v1/audio/transcriptions is the speech route"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+def test_a_tool_server_named_like_speech_is_refused(tmp_path: Path) -> None:
+    broken = VALID.replace("  - name: lares-wiki\n", "  - name: speech\n", 1)
+
+    with pytest.raises(ValueError, match="tool server speech: the name is already"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+@pytest.mark.parametrize(
+    "url", ["api.openai.com", "ftp://api.openai.com", "https://api.openai.com/v1", "https://"]
+)
+def test_a_speech_url_that_is_no_address_is_refused(tmp_path: Path, url: str) -> None:
+    """The gateway takes the host and port only; a path or another scheme would go unnoticed."""
+    broken = VALID.replace("  url: https://api.openai.com\n", f"  url: {url}\n", 1)
+
+    with pytest.raises(ValueError, match="speech: url is http\\(s\\)://host\\[:port\\]"):
+        load_use_cases(_write(tmp_path, broken))
+
+
+@pytest.mark.parametrize("name", ["Kim", "open_webui", "-webui"])
+def test_a_speech_client_name_that_is_no_handle_is_refused(tmp_path: Path, name: str) -> None:
+    """A client's name is written like a handle, so its variable is no person's."""
+    broken = VALID.replace("    - name: open-webui\n", f"    - name: {name}\n", 1)
+
+    with pytest.raises(ValueError, match="a client's name is written like a handle"):
         load_use_cases(_write(tmp_path, broken))

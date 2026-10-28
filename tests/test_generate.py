@@ -308,13 +308,17 @@ def test_a_server_outside_the_cluster_is_told_nobody(tmp_path: Path) -> None:
 
 
 def test_the_gateway_waits_each_server_as_long_as_the_harness_does(tmp_path: Path) -> None:
-    """A tool server's `timeout_seconds` holds on its route too, a connector's on its own."""
+    """A tool server's `timeout_seconds` holds on its route too, a connector's and speech's on
+    their own."""
     declared = load_use_case_file(USE_CASES)
+    assert declared.speech is not None
     limits = {name: server.timeout_seconds for name, server in declared.tool_servers.items()}
     limits |= {name: connector.timeout_seconds for name, connector in declared.connectors.items()}
+    limits["speech"] = declared.speech.timeout_seconds
 
     for name, route in _routes(tmp_path).items():
-        (target,) = route["backends"][0]["mcp"]["targets"]
+        backend = route["backends"][0]
+        (target,) = backend["mcp"]["targets"] if "mcp" in backend else [backend["ai"]]
         assert target["policies"]["http"] == {"requestTimeout": f"{limits[name]}s"}, name
 
 
@@ -343,6 +347,55 @@ def test_a_connector_nobody_signs_in_to_has_no_route(tmp_path: Path) -> None:
     persons = _PERSONS_TEXT.replace("    connectors: [claude-ai]\n", "")
 
     assert "claude-ai" not in _routes(tmp_path, persons)
+
+
+def test_speech_takes_every_profiles_key_and_each_clients_own(tmp_path: Path) -> None:
+    """The machines', each person's by handle, and a client's by its name."""
+    speech = _routes(tmp_path)["speech"]
+
+    assert speech["matches"] == [{"path": {"exact": "/v1/audio/transcriptions"}}]
+    assert speech["policies"]["apiKey"] == {
+        "mode": "strict",
+        "keys": [
+            {"key": "${GATEWAY_KEY}"},
+            {"key": "${KIM_GATEWAY_KEY}", "metadata": {"enduser_id": "kim"}},
+            {"key": "${LOU_GATEWAY_KEY}", "metadata": {"enduser_id": "lou"}},
+            {"key": "${OPEN_WEBUI_GATEWAY_KEY}", "metadata": {"enduser_id": "open-webui"}},
+        ],
+    }
+
+
+def test_a_clients_key_is_its_own_whatever_its_secret_calls_it(tmp_path: Path) -> None:
+    """A client's variable is named by the client, so a key named like kim's opens nothing of
+    kim's: kim's routes keep kim's key, and the client gets one of its own."""
+    text = USE_CASES.read_text(encoding="utf-8").replace(
+        "{secret: agentgateway-keys, key: open-webui-gateway-key}",
+        "{secret: open-webui-keys, key: kim-gateway-key}",
+    )
+    values = yaml.safe_load(_render(tmp_path, use_cases=text).routes_values)
+    sources = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in values["extraEnv"]}
+
+    assert sources["KIM_GATEWAY_KEY"] == {"name": "hermes-credentials", "key": "kim-gateway-key"}
+    assert sources["OPEN_WEBUI_GATEWAY_KEY"] == {
+        "name": "open-webui-keys",
+        "key": "kim-gateway-key",
+    }
+    keys = _routes(tmp_path, use_cases=text)["lares"]["policies"]["apiKey"]["keys"]
+    assert "${OPEN_WEBUI_GATEWAY_KEY}" not in [entry["key"] for entry in keys]
+
+
+def test_a_profile_holding_no_server_reads_its_gateway_key_for_speech(tmp_path: Path) -> None:
+    """Every chat goes to a person's profile, so the machines hold no server, yet transcribe."""
+    text = USE_CASES.read_text(encoding="utf-8")
+    only_chat = text[: text.index("  - name: explain-episode")]
+    without_speech = (
+        only_chat[: only_chat.index("speech:\n")] + only_chat[only_chat.index("scripts:\n") :]
+    )
+    key = """GATEWAY_KEY='{{ index . "gateway-key" }}'"""
+
+    assert key in _env_lines(tmp_path, only_chat)
+    assert key not in _env_lines(tmp_path, without_speech)
+    assert "speech" not in _routes(tmp_path, use_cases=without_speech)
 
 
 def _secret_items(volumes: list[dict[str, Any]], secret: str) -> list[str]:
