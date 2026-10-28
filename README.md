@@ -109,7 +109,21 @@ connectors:
     tools: ["*"]
 ```
 
-A person holds it by name (`connectors:` in [the persons](#the-persons)). A connector's name and path are a route's own: the loader refuses one named like a tool server or another connector, or on a path another route takes (`/mcp/<server>`).
+A person holds it by name (`connectors:` in [the persons](#the-persons)). A connector's name and path are a route's own: the loader refuses one named like a tool server or another connector, or on a path another route takes (`/mcp/<server>`, the speech route's).
+
+Speech to text, if declared, is one more route of the gateway: OpenAI's transcriptions, for every enabled profile and each client named here:
+
+```yaml
+speech:
+  url: https://api.openai.com   # OpenAI's address; https checks its certificate
+  credential: {secret: agentgateway-keys, key: openai-api-key, header: Authorization}
+  timeout_seconds: 60
+  clients:                      # callers besides the profiles, each with a key of its own
+    - name: open-webui
+      key: {secret: agentgateway-keys, key: open-webui-gateway-key}
+```
+
+The route is `speech`, at `/v1/audio/transcriptions`, where a client with a base URL ending in `/v1` sends its upload; the loader refuses a tool server or connector of that name or on that path, two clients of one name, and a client's name not written like a handle.
 
 A dormant use case may name tool servers and event sources (`alert`, `pull_request`, `ets_export`, `new_device`) that are not built yet; enabling it is refused until they are.
 
@@ -197,7 +211,7 @@ lares-agent-trigger generate \
 | `profiles/profiles.values.yaml` | an additional values file of Hermes's chart: per person a read-only subPath mount of their config, their `.env`, the persons' `SOUL.md`, `AGENTS.md` and `.no-bundled-skills` into `/opt/data/profiles/<handle>/`, and a container `agent-log-<handle>` that streams the profile's `logs/agent.log` for Loki, beside the default profile's `agent-log`; its image is the name `agent-log`, which lares's kustomization pins to the image every log container runs. Every plugin in the settings' `plugins.enabled` is the ConfigMap of its name, mounted read-only as `plugins/<name>/` in the default profile and in each person's: a person's message runs in their profile, and Hermes finds a plugin only under the active profile's home |
 | `env-template.yaml` | a patch of the harness's SealedSecret `hermes-credentials`: `default.env` and each person's `<handle>.env`, as templates of its sealed keys |
 | `routes.yaml` | the gateway's routes file, a key of the ConfigMap `agentgateway-routes`; it names every key as a variable and every credential as a file, and holds none (see [The gateway's routes](#the-gateways-routes)) |
-| `routes.values.yaml` | an additional values file of the gateway's chart: `config.localXdsPath`, each key the routes name as a variable from the SealedSecret `hermes-credentials`, the reloader's annotation for that Secret, and the routes and every Secret a route attaches from, mounted whole and read-only under `/etc/agentgateway/` |
+| `routes.values.yaml` | an additional values file of the gateway's chart: `config.localXdsPath`, each key the routes name as a variable from the SealedSecret `hermes-credentials` or a speech client's own, the reloader's annotation for those Secrets, and the routes and every Secret a route attaches from, mounted whole and read-only under `/etc/agentgateway/` |
 | `blueprints/persons.yaml` | an Authentik blueprint, `persons`: every declared person, enabled or dormant, as an `internal` account at `users/household` named by the handle and a member of the group `household` |
 | `connections.values.yaml` | an additional values file of Open WebUI's chart: its connections, one per enabled person, as `commonEnvVars` (see [The web chat's connections](#the-web-chats-connections)) |
 
@@ -236,10 +250,10 @@ The default profile's `.env` names, once each and in this order:
 - `DISCORD_BOT_TOKEN`, when a chat use case is enabled;
 - `DISCORD_USER_<HANDLE>` of each enabled person on Discord, sealed as `<handle>-discord-user`;
 - the hook's `secret_env`;
-- `gateway.key_env`, its one key for the gateway, when it holds a tool server;
+- `gateway.key_env`, its one key for the gateway, when it holds a tool server or speech is declared;
 - the key variable of each provider its source and their fallbacks run on.
 
-A person's `<handle>.env` names their own `API_SERVER_KEY`, the shared hook secret, their own gateway key, and their own key of each provider their source runs on. No `.env` holds a server's credential. Nothing is sealed twice but a person's API server key, which Open WebUI seals again in its own namespace (see [The web chat's connections](#the-web-chats-connections)): a profile's gateway key lives in the harness's SealedSecret and the gateway reads it there; a server's credential is sealed where the server lives, and Kyverno clones its Secret into the gateway's namespace where the two differ (the bridge's key); a vendor's token, which only the gateway holds, is sealed in the gateway's own SealedSecret.
+A person's `<handle>.env` names their own `API_SERVER_KEY`, the shared hook secret, their own gateway key, and their own key of each provider their source runs on. A speech client's key is no profile's: it is sealed where the declaration says, and the gateway reads it there. No `.env` holds a server's credential. Nothing is sealed twice but a person's API server key, which Open WebUI seals again in its own namespace (see [The web chat's connections](#the-web-chats-connections)), and a speech client's key, which the client seals again where it runs: a profile's gateway key lives in the harness's SealedSecret and the gateway reads it there; a server's credential is sealed where the server lives, and Kyverno clones its Secret into the gateway's namespace where the two differ (the bridge's key); a vendor's token, which only the gateway holds, is sealed in the gateway's own SealedSecret.
 
 Sealed Secrets renders a key the SealedSecret lacks as empty, without an error. lares therefore checks in pre-commit that every key a template names is sealed (`task k8s:validate-sealed-templates`).
 
@@ -257,7 +271,7 @@ Every `mcp_servers` entry has the same shape: the profile's route on the gateway
 
 ### The gateway's routes
 
-The routes file holds one route per tool server a profile holds, at `/mcp/<server>`, and one per connector an enabled person holds, at its `path`. Each route:
+The routes file holds one route per tool server a profile holds, at `/mcp/<server>`, one per connector an enabled person holds, at its `path`, and the speech route if declared. Each MCP route:
 
 - signs the caller in: a tool server's route takes the key of each profile that reaches the server there (`apiKey`, strict) and no other, a person's key carrying their handle as `enduser_id`; a connector's runs Authentik's sign-in (`mcpAuthentication` with the `authentik` provider) and answers the metadata paths beside its path, a registration with the pre-registered `client_id`;
 - lets through only its `tools`, one `mcpAuthorization` rule per entry: a name by itself, a trailing glob by its prefix, any other `*` and `?` as an anchored pattern; an entry with `[` is refused. A connector's route lets through only the persons holding it, by the token's `preferred_username`: anyone else Authentik signs in is refused at the gateway, before the call to the server;
@@ -265,7 +279,9 @@ The routes file holds one route per tool server a profile holds, at `/mcp/<serve
 - names the caller to a server in the cluster (a host under `.svc.cluster.local`) on every call: `X-Client-Id`, the route's name, and `X-Enduser-Id`, the key's `enduser_id` or the token's `preferred_username`. The gateway sets both after copying the caller's headers, so a value the caller sent is overwritten, and one with no person behind it is removed. A server outside the cluster, such as a vendor's hosted one, is told nobody;
 - keeps no session upstream (`statefulMode: stateless`): a session would keep the credential it started with past a renewal.
 
-A route's keys are variables the gateway expands when it loads the file (`${KIM_GATEWAY_KEY}`, the sealed key's name upper case and underscored), set from `hermes-credentials` at start; a resealed key rolls the gateway through the reloader. A connector's `issuer` is expanded the same way: lares sets the cluster's `AUTHENTIK_URL` beside the rendered values. Every credential is a file the gateway watches, and kubelet swaps a changed Secret in whole, so a renewed token or bridge key reaches the next call without a restart. Every call is a span to `gateway.otlp_endpoint`, kept at `${TRACING_SAMPLING_RATIO}`: lares sets the share on the gateway's pod as on every service of the platform, and the gateway does not start without it.
+The speech route takes every enabled profile's key, a person's carrying their handle as `enduser_id`, and each client's, carrying the client's name: the variable `<CLIENT>_GATEWAY_KEY`, named after the client whatever its Secret calls the key, so no client takes a profile's variable. It attaches OpenAI's `credential` the same way and passes the upload on as it came (`ai.routes: detect`): on a route of its own the gateway would take the request for a chat and refuse the form. It still reads the form's `model` for the span. The provider's host is the declared `url`'s, over TLS for `https://`, and the gateway waits `timeout_seconds` for the transcript.
+
+A route's keys are variables the gateway expands when it loads the file (`${KIM_GATEWAY_KEY}`, the sealed key's name upper case and underscored), set from `hermes-credentials`, or a speech client's own Secret, at start; a resealed key rolls the gateway through the reloader. A connector's `issuer` is expanded the same way: lares sets the cluster's `AUTHENTIK_URL` beside the rendered values. Every credential is a file the gateway watches, and kubelet swaps a changed Secret in whole, so a renewed token or bridge key reaches the next call without a restart; a Secret that also holds a speech client's key rolls the gateway on every change, its credentials included. Every call is a span to `gateway.otlp_endpoint`, kept at `${TRACING_SAMPLING_RATIO}`: lares sets the share on the gateway's pod as on every service of the platform, and the gateway does not start without it. A span names whoever called as `enduser.id`: the key's `enduser_id`, else the token's `preferred_username`; the machines' key names nobody.
 
 ### The web chat's connections
 
@@ -677,7 +693,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 
 ## Tests
 
-The generator is pure and tested apart: the declarations in `tests/rendering/` go in, and every rendered file must equal its expected file in `tests/rendering/expected/`; after a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review. The rendered routes also run as the harness runs them: agentgateway in a container with the rendered values, a stand-in bridge under the bridge's and GitHub's names, a stand-in Authentik, and tokens the test signs itself.
+The generator is pure and tested apart: the declarations in `tests/rendering/` go in, and every rendered file must equal its expected file in `tests/rendering/expected/`; after a deliberate change, `UPDATE_RENDERING=1 uv run pytest tests/test_generate.py` rewrites them for review. The rendered routes also run as the harness runs them: agentgateway in a container with the rendered values, a stand-in bridge under the bridge's and GitHub's names, a stand-in Authentik, a stand-in OpenAI over plain HTTP, a stand-in OTLP receiver whose exports the test searches for `enduser.id`, and tokens the test signs itself.
 
 Everything else is tested at the service's edges: an episode event goes in on a real NATS container, a hook delivery or an API request over HTTP to the app in process, the rows land in a real TimescaleDB container and the spans in an in-memory exporter. The harness, Alertmanager, Discord, Wiki.js and GitHub are fakes over `respx` that keep each service's own rules, and the mail lands at an SMTP server in the test process.
 

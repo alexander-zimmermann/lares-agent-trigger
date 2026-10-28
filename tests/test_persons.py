@@ -301,6 +301,14 @@ def test_the_handle_default_is_refused(tmp_path: Path) -> None:
         _load(tmp_path, text)
 
 
+def test_a_handle_of_a_speech_client_is_refused(tmp_path: Path) -> None:
+    """A span names a person or a speech client by one name, so a name stands for one caller."""
+    text = (VALID + PERSONS).replace("  - name: lou", "  - name: open-webui")
+
+    with pytest.raises(ValueError, match="person open-webui: the name is the speech client's"):
+        _load(tmp_path, text)
+
+
 def test_a_connector_nobody_declared_is_refused(tmp_path: Path) -> None:
     text = (VALID + PERSONS).replace("    connectors: [claude-ai]\n", "    connectors: [openai]\n")
 

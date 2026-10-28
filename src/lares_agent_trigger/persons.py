@@ -267,10 +267,14 @@ def load_persons_file(path: Path, declared: UseCaseFile) -> PersonsFile:
         raise ValueError(f"{path}: default_profile: no model source named {default}")
     _check_reachable(path, sources[default])
 
+    # A span names a person or a speech client by one name.
+    clients = {client.name for client in declared.speech.clients} if declared.speech else set()
     persons: dict[str, Person] = {}
     for person in parsed.persons:
         if person.name in persons:
             raise ValueError(f"{path}: person {person.name} is declared twice")
+        if person.name in clients:
+            raise ValueError(f"{path}: person {person.name}: the name is the speech client's")
         persons[person.name] = person
     enabled = [person for person in persons.values() if person.is_enabled]
     for person in enabled:

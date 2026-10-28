@@ -1,7 +1,7 @@
 # Every surface once: a chat with a request server and GitHub's reads, an
 # event, a schedule that reads and keeps its memory through the cron surface,
-# a dormant schedule naming a writing server nothing else uses, and a
-# connector a person signs in to.
+# a dormant schedule naming a writing server nothing else uses, a connector a
+# person signs in to, and speech to text with a client besides the profiles.
 
 ledger_hook:
   trigger_url: http://lares-agent-trigger.agents.svc.cluster.local:8080
@@ -65,6 +65,14 @@ connectors:
     credential: {secret: agentgateway-keys, key: lares-mcp-bridge, header: Authorization}
     timeout_seconds: 60
     tools: ["*"]
+
+speech:
+  url: https://api.openai.com
+  credential: {secret: agentgateway-keys, key: openai-api-key, header: Authorization}
+  timeout_seconds: 60
+  clients:
+    - name: open-webui
+      key: {secret: agentgateway-keys, key: open-webui-gateway-key}
 
 scripts:
   - name: skill-digest
