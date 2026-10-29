@@ -270,7 +270,7 @@ Every `mcp_servers` entry has the same shape: the profile's route on the gateway
 
 ### The gateway's routes
 
-The routes are the chart's `config`, which the chart joins to lares's own values into the gateway's one config file: the gateway's own settings and any listener beside the routes, such as its UI's, are lares's. They hold one route per tool server a profile holds, at `/mcp/<server>`, one per connector an enabled person holds, at its `path`, and the speech route if declared. Each MCP route:
+The routes are the chart's `config`, which the chart joins to lares's own values into the gateway's one config file: the gateway `default` on the port of `gateway.url` and the routes attached to it. The gateway's own settings and any other gateway, such as its UI's, are lares's. There is one route per tool server a profile holds, at `/mcp/<server>`, one per connector an enabled person holds, at its `path`, and the speech route if declared. Each MCP route:
 
 - signs the caller in: a tool server's route takes the key of each profile that reaches the server there (`apiKey`, strict) and no other, a person's key carrying their handle as `enduser_id`; a connector's runs Authentik's sign-in (`mcpAuthentication` with the `authentik` provider) and answers the metadata paths beside its path, a registration with the pre-registered `client_id`;
 - lets through only its `tools`, one `mcpAuthorization` rule per entry: a name by itself, a trailing glob by its prefix, any other `*` and `?` as an anchored pattern; an entry with `[` is refused. A connector's route lets through only the persons holding it, by the token's `preferred_username`: anyone else Authentik signs in is refused at the gateway, before the call to the server;

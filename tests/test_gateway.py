@@ -483,10 +483,7 @@ def test_a_changed_route_reaches_the_gateway_without_a_restart(
     returns, without a restart."""
     started = gateway.started_at()
     config = rendered.config()
-    bind = config["binds"][0]
-    listener = bind["listeners"][0]
-    routes = [route for route in listener["routes"] if route["name"] != "github"]
-    without = {**config, "binds": [{**bind, "listeners": [{**listener, "routes": routes}]}]}
+    without = {**config, "routes": [r for r in config["routes"] if r["name"] != "github"]}
     kim = _value("kim-gateway-key")
 
     gateway.write("config", {"config.yaml": yaml.safe_dump(without)})

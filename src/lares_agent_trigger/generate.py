@@ -780,8 +780,9 @@ def _gateway_config(
     connectors: Sequence[_ConnectorRoute],
     speech_route: _SpeechRoute | None,
 ) -> dict[str, Any]:
-    """The gateway's routes, as its chart's `config`: one route per entry, each a span of the
-    trace it starts.
+    """The gateway's routes, as its chart's `config`: the gateway `default` on the port of
+    the gateway's URL, which a route without `gateways` attaches to, and one route per
+    entry, each a span of the trace it starts.
 
     A span names whoever called: the person or client behind the key, else
     the person a connector signed in; an expression without a value leaves
@@ -799,19 +800,11 @@ def _gateway_config(
                 "attributes": {_SPAN_ENDUSER: f"default(apiKey.{_KEY_ENDUSER}, {_TOKEN_ENDUSER})"},
             }
         },
-        "binds": [
-            {
-                "port": urlsplit(gateway.url).port or 80,
-                "listeners": [
-                    {
-                        "routes": [
-                            *(_route_config(route) for route in routes),
-                            *(_connector_config(route) for route in connectors),
-                            *([_speech_config(speech_route)] if speech_route is not None else []),
-                        ]
-                    }
-                ],
-            }
+        "gateways": {"default": {"port": urlsplit(gateway.url).port or 80}},
+        "routes": [
+            *(_route_config(route) for route in routes),
+            *(_connector_config(route) for route in connectors),
+            *([_speech_config(speech_route)] if speech_route is not None else []),
         ],
     }
 
