@@ -97,11 +97,7 @@ class SealedSecret(NamedTuple):
 # sealed in. The gateway reads each profile's key from the same Secret, which shares its
 # namespace: a profile's key is sealed once.
 HARNESS_KEYS = SealedSecret("hermes-credentials", "agents")
-# The routes file, a key of this ConfigMap.
-_GATEWAY_ROUTES = "agentgateway-routes"
-
-# Where the gateway reads its routes, and each credential it attaches as a file.
-_GATEWAY_ROUTES_DIR = "/etc/agentgateway/routes"
+# Where the gateway reads each credential it attaches, as a file.
 _GATEWAY_CREDENTIALS_DIR = "/etc/agentgateway/credentials"
 
 # The headers the gateway names the caller in to a server in the cluster,
@@ -198,9 +194,8 @@ class Rendering:
     profiles_kustomization: str
     profiles_values: str
     env_template: str
-    # The gateway's routes, and the chart values that give it their keys and
-    # mount them and each credential the routes attach.
-    routes: str
+    # The gateway's chart values: its routes, their keys and each credential
+    # they attach.
     routes_values: str
     # Authentik's blueprint of every person's account and the household group.
     authentik_persons: str
@@ -349,19 +344,15 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
     routes = _routes(declared, in_use, persons, holdings)
     connectors = _connector_routes(declared, persons)
     speech_route = _speech_route(declared, persons)
-    routes_file = (
-        f"{GENERATED_LINE}\n"
-        "# The gateway's routes. A key is a variable the gateway expands at start, set from\n"
-        f"# {HARNESS_KEYS.name} or a speech client's Secret, as is a connector's issuer; a\n"
-        "# credential is a file it reads and watches.\n"
-        f"{_dump(_gateway_config(declared, routes, connectors, speech_route))}"
-    )
     routes_values = (
         f"{GENERATED_LINE}\n"
-        "# An additional values file of the gateway's chart: the routes' keys as variables, and\n"
-        "# the routes and every credential they attach, mounted whole so a renewed one\n"
-        "# reaches the gateway; a resealed key rolls it.\n"
-        f"{_dump(_routes_values(routes, connectors, speech_route))}"
+        "# An additional values file of the gateway's chart: its routes, which the chart joins\n"
+        "# to lares's own settings in one config file, the routes' keys as variables, and every\n"
+        "# credential they attach, mounted whole so a renewed one reaches the gateway. A key is\n"
+        f"# a variable the gateway expands at start, set from {HARNESS_KEYS.name} or a speech\n"
+        "# client's Secret, as is a connector's issuer; a resealed key rolls the gateway, a\n"
+        "# changed route reloads without a restart.\n"
+        f"{_dump(_routes_values(declared, routes, connectors, speech_route))}"
     )
     authentik_persons = (
         f"{GENERATED_LINE}\n"
@@ -387,7 +378,6 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         profiles_kustomization=profiles_kustomization,
         profiles_values=profiles_values,
         env_template=env_template,
-        routes=routes_file,
         routes_values=routes_values,
         authentik_persons=authentik_persons,
         open_webui_connections=open_webui_connections,
@@ -790,7 +780,8 @@ def _gateway_config(
     connectors: Sequence[_ConnectorRoute],
     speech_route: _SpeechRoute | None,
 ) -> dict[str, Any]:
-    """The routes file: one route per entry, each a span of the trace it starts.
+    """The gateway's routes, as its chart's `config`: one route per entry, each a span of the
+    trace it starts.
 
     A span names whoever called: the person or client behind the key, else
     the person a connector signed in; an expression without a value leaves
@@ -968,16 +959,20 @@ def _tool_rule(pattern: str) -> str:
 
 
 def _routes_values(
+    declared: UseCaseFile,
     routes: Sequence[_ServerRoute],
     connectors: Sequence[_ConnectorRoute],
     speech_route: _SpeechRoute | None,
 ) -> dict[str, Any]:
-    """Each caller's key as a variable, once, and the routes and every credential as whole mounts.
+    """The routes as the chart's `config`, each caller's key as a variable, once, and every
+    credential as a whole mount.
 
     A profile's key comes from the harness's SealedSecret, where it is sealed
     once, a speech client's from its own. A variable is read at start, so a
-    resealed key rolls the gateway through the reloader; a renewed credential
-    is a file the gateway watches.
+    resealed key rolls the gateway through the reloader; the chart's config
+    file and a renewed credential are files the gateway watches. The gateway's
+    own settings and any listener beside the routes are lares's, in the values
+    the chart joins these to.
     """
     keys = [
         *(key for route in routes for key in route.keys),
@@ -1002,24 +997,18 @@ def _routes_values(
         if credential.key not in attached.setdefault(credential.secret, []):
             attached[credential.secret].append(credential.key)
     volumes = [
-        {"name": "routes", "configMap": {"name": _GATEWAY_ROUTES}},
-        *(
-            {
-                "name": secret,
-                "secret": {"secretName": secret, "items": [{"key": k, "path": k} for k in keys]},
-            }
-            for secret, keys in attached.items()
-        ),
+        {
+            "name": secret,
+            "secret": {"secretName": secret, "items": [{"key": k, "path": k} for k in keys]},
+        }
+        for secret, keys in attached.items()
     ]
     mounts = [
-        {"name": "routes", "mountPath": _GATEWAY_ROUTES_DIR, "readOnly": True},
-        *(
-            {"name": secret, "mountPath": f"{_GATEWAY_CREDENTIALS_DIR}/{secret}", "readOnly": True}
-            for secret in attached
-        ),
+        {"name": secret, "mountPath": f"{_GATEWAY_CREDENTIALS_DIR}/{secret}", "readOnly": True}
+        for secret in attached
     ]
     return {
-        "config": {"config": {"localXdsPath": f"{_GATEWAY_ROUTES_DIR}/{_CONFIG_FILE}"}},
+        "config": _gateway_config(declared, routes, connectors, speech_route),
         "podAnnotations": {"secret.reloader.stakater.com/reload": ",".join(reloaded)},
         "extraEnv": variables,
         "extraVolumes": volumes,
@@ -1193,7 +1182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="lares-agent-trigger generate",
         description="Render the use-case file and the person declaration into the harness "
         "configuration, each person's profile, the templates of every profile's .env, the "
-        "gateway's routes and chart values, Authentik's blueprint of the persons, and Open "
+        "gateway's chart values with its routes, Authentik's blueprint of the persons, and Open "
         "WebUI's connections.",
     )
     parser.add_argument("--use-cases", type=Path, required=True)
@@ -1201,7 +1190,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--settings", type=Path, required=True)
     parser.add_argument("--hermes-config", type=Path, required=True)
     parser.add_argument("--env-template", type=Path, required=True)
-    parser.add_argument("--routes", type=Path, required=True)
     parser.add_argument("--routes-values", type=Path, required=True)
     # Written whole: each person's config, the ConfigMap of them and the chart values.
     parser.add_argument("--profiles", type=Path, required=True)
@@ -1228,7 +1216,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     files = [
         (args.hermes_config, rendered.hermes_config),
         (args.env_template, rendered.env_template),
-        (args.routes, rendered.routes),
         (args.routes_values, rendered.routes_values),
         (args.authentik_persons, rendered.authentik_persons),
         (args.open_webui_connections, rendered.open_webui_connections),

@@ -78,7 +78,6 @@ def _files(rendered: Rendering) -> dict[str, str]:
     return {
         "config.yaml": rendered.hermes_config,
         "env-template.yaml": rendered.env_template,
-        "routes.yaml": rendered.routes,
         "routes.values.yaml": rendered.routes_values,
         "profiles/kustomization.yaml": rendered.profiles_kustomization,
         "profiles/profiles.values.yaml": rendered.profiles_values,
@@ -275,8 +274,9 @@ def test_a_surface_without_a_use_case_sees_no_tool_server(tmp_path: Path) -> Non
 
 
 def _gateway(tmp_path: Path, persons: str | None = None, use_cases: str | None = None) -> Any:
-    """The gateway's routes file, as the gateway reads it before expanding its variables."""
-    return yaml.safe_load(_render(tmp_path, use_cases, persons=persons).routes)
+    """The gateway's routes, the chart's `config`, as the gateway reads them before expanding
+    its variables."""
+    return yaml.safe_load(_render(tmp_path, use_cases, persons=persons).routes_values)["config"]
 
 
 def _routes(
@@ -406,19 +406,18 @@ def _secret_items(volumes: list[dict[str, Any]], secret: str) -> list[str]:
 def test_every_key_the_routes_name_is_a_variable_or_file_the_values_provide(
     tmp_path: Path,
 ) -> None:
-    """The routes file holds no key: each one is a variable from a sealed key, or a mounted file."""
-    rendered = _render(tmp_path)
-    values = yaml.safe_load(rendered.routes_values)
+    """The routes hold no key: each one is a variable from a sealed key, or a mounted file."""
+    values = yaml.safe_load(_render(tmp_path).routes_values)
     variables = {entry["name"] for entry in values["extraEnv"]}
-    credentials = [mount for mount in values["extraVolumeMounts"] if mount["name"] != "routes"]
     files = {
         f"{mount['mountPath']}/{key}"
-        for mount in credentials
+        for mount in values["extraVolumeMounts"]
         for key in _secret_items(values["extraVolumes"], mount["name"])
     }
 
-    named = set(re.findall(r"\$\{(\w+)\}", rendered.routes))
-    read = set(re.findall(r"file: (\S+)", rendered.routes))
+    routes = yaml.safe_dump(values["config"])
+    named = set(re.findall(r"\$\{(\w+)\}", routes))
+    read = set(re.findall(r"file: (\S+)", routes))
     # And what lares sets beside them: the cluster's Authentik in a connector's issuer, and the
     # sampling ratio every service of the platform sets for itself.
     assert named == variables | {"AUTHENTIK_URL", "TRACING_SAMPLING_RATIO"}
@@ -565,8 +564,6 @@ def _cli(tmp_path: Path, use_cases: Path = USE_CASES, persons: Path = PERSONS) -
             str(tmp_path / "out" / "config.yaml"),
             "--env-template",
             str(tmp_path / "out" / "env-template.yaml"),
-            "--routes",
-            str(tmp_path / "out" / "routes.yaml"),
             "--routes-values",
             str(tmp_path / "out" / "routes.values.yaml"),
             "--profiles",

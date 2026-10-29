@@ -3,9 +3,9 @@ Authentik and OpenAI.
 
 The gateway starts as its chart starts it with the rendered values: every
 variable they name set from its sealed key, every sealed key a value of its
-own, and the routes and every credential laid into a volume the way kubelet
-lays a Secret into a pod: a timestamped directory behind `..data`, swapped
-whole on a change. The cluster's Authentik comes in as the overlay sets it.
+own, and the chart's config file and every credential laid into a volume the
+way kubelet lays a ConfigMap or Secret into a pod: a timestamped directory
+behind `..data`, swapped whole on a change. The cluster's Authentik comes in as the overlay sets it.
 Each upstream answers under the name the declaration gives it, on a network
 of their own. The bridge is a stand-in, under the bridge's name and under
 GitHub's, that lists a tool no route serves and answers with the key it was
@@ -23,7 +23,7 @@ import json
 import subprocess
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,7 +58,8 @@ AUTHENTIK_URL = "http://authentik:9000"
 # one here, so a span the test looks for is never sampled out.
 SAMPLING_RATIO = "1.0"
 SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-# Where the rendered chart values mount the routes and the credentials.
+# Where the test lays the chart's config file, and the rendered chart values mount the
+# credentials.
 MOUNT = "/etc/agentgateway"
 TOKEN = "ghs_not-a-token"
 
@@ -125,10 +126,14 @@ class Gateway:
 
 @dataclass(frozen=True)
 class Rendered:
-    # The routes file and the gateway's chart values.
-    routes: str
+    # The gateway's chart values.
     values: dict[str, Any]
     github: ToolServer
+
+    def config(self) -> dict[str, Any]:
+        """The chart's config file: the routes, and of the gateway's own settings the admin
+        port off."""
+        return {**self.values["config"], "config": {"adminAddr": "off"}}
 
     def variables(self) -> dict[str, str]:
         """Each variable the values set, holding its sealed key."""
@@ -161,14 +166,12 @@ def rendered(tmp_path_factory: pytest.TempPathFactory) -> Rendered:
         declared, load_persons_file(PERSONS, declared), SETTINGS.read_text(encoding="utf-8")
     )
     github = declared.tool_servers["github"]
-    return Rendered(
-        routes=rendering.routes, values=yaml.safe_load(rendering.routes_values), github=github
-    )
+    return Rendered(values=yaml.safe_load(rendering.routes_values), github=github)
 
 
 @pytest.fixture(scope="module")
 def gateway(rendered: Rendered) -> Iterator[Gateway]:
-    """The gateway as the chart starts it: its own settings naming the routes file."""
+    """The gateway as the chart starts it: one config file, the routes in it."""
     github = rendered.github
     declared = load_use_case_file(USE_CASES)
     bridge_host = urlsplit(declared.tool_servers["lares"].url).hostname
@@ -181,9 +184,7 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
     _docker("volume", "create", volume)
     try:
         gateway = Gateway(url="", container="", volume=volume, collector="")
-        settings = {"config": {**rendered.values["config"]["config"], "adminAddr": "off"}}
-        gateway.write("settings", {"config.yaml": yaml.safe_dump(settings)})
-        gateway.write("routes", {"config.yaml": rendered.routes})
+        gateway.write("config", {"config.yaml": yaml.safe_dump(rendered.config())})
         for secret, files in rendered.credentials().items():
             gateway.write(f"credentials/{secret}", files)
         issuer = declared.connectors["claude-ai"].issuer.replace("${AUTHENTIK_URL}", AUTHENTIK_URL)
@@ -225,7 +226,7 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
             f"type=volume,src={volume},dst={MOUNT},readonly",
             GATEWAY_IMAGE,
             "-f",
-            f"{MOUNT}/settings/config.yaml",
+            f"{MOUNT}/config/config.yaml",
         )
         containers.append(container)
         gateway.url = f"http://127.0.0.1:{_published(container, port)}"
@@ -473,6 +474,37 @@ def test_a_call_longer_than_the_gateways_own_ten_seconds_returns(gateway: Gatewa
     answer = session.call("get_episode", seconds=12)
 
     assert json.loads(answer["result"]["content"][0]["text"])["client"] == "lares"
+
+
+def test_a_changed_route_reaches_the_gateway_without_a_restart(
+    gateway: Gateway, rendered: Rendered
+) -> None:
+    """kubelet swaps the chart's ConfigMap in; a route taken out is gone, and back once it
+    returns, without a restart."""
+    started = gateway.started_at()
+    config = rendered.config()
+    bind = config["binds"][0]
+    listener = bind["listeners"][0]
+    routes = [route for route in listener["routes"] if route["name"] != "github"]
+    without = {**config, "binds": [{**bind, "listeners": [{**listener, "routes": routes}]}]}
+    kim = _value("kim-gateway-key")
+
+    gateway.write("config", {"config.yaml": yaml.safe_dump(without)})
+    assert _answered(lambda: _initialize(gateway, "github", kim), 404) == 404
+    assert gateway.started_at() == started
+    # The other tests call GitHub's route.
+    gateway.write("config", {"config.yaml": yaml.safe_dump(config)})
+    assert _answered(lambda: _initialize(gateway, "github", kim), 200) == 200
+
+
+def _answered(ask: Callable[[], int], status: int) -> int:
+    """The status `ask` answers with, once it is `status` or 30 seconds have passed."""
+    deadline = time.monotonic() + 30
+    answered = ask()
+    while time.monotonic() < deadline and answered != status:
+        time.sleep(0.5)
+        answered = ask()
+    return answered
 
 
 def _seen(session: _Session, key: str) -> str | None:
