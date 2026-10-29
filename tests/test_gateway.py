@@ -24,7 +24,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -98,6 +98,8 @@ def _value(key: str) -> str:
 @dataclass
 class Gateway:
     url: str
+    # Where the test reaches the UI's own listener.
+    ui: str
     container: str
     volume: str
     # Where the test reads what the stand-in OTLP receiver got.
@@ -131,9 +133,11 @@ class Rendered:
     github: ToolServer
 
     def variables(self) -> dict[str, str]:
-        """Each variable the values set, holding its sealed key."""
+        """Each variable the values set: its value, or the sealed key it is set from."""
         return {
-            entry["name"]: _value(entry["valueFrom"]["secretKeyRef"]["key"])
+            entry["name"]: entry["value"]
+            if "value" in entry
+            else _value(entry["valueFrom"]["secretKeyRef"]["key"])
             for entry in self.values["extraEnv"]
         }
 
@@ -180,7 +184,7 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
     _docker("network", "create", network)
     _docker("volume", "create", volume)
     try:
-        gateway = Gateway(url="", container="", volume=volume, collector="")
+        gateway = Gateway(url="", ui="", container="", volume=volume, collector="")
         settings = {"config": {**rendered.values["config"]["config"], "adminAddr": "off"}}
         gateway.write("settings", {"config.yaml": yaml.safe_dump(settings)})
         gateway.write("routes", {"config.yaml": rendered.routes})
@@ -205,6 +209,7 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
         containers.append(collector)
         gateway.collector = f"http://127.0.0.1:{_published(collector, otlp.port)}"
         port = urlsplit(declared.gateway.url).port
+        ui_port = declared.gateway.ui_port
         container = _docker(
             "run",
             "-d",
@@ -212,6 +217,8 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
             network,
             "-p",
             f"127.0.0.1::{port}",
+            "-p",
+            f"127.0.0.1::{ui_port}",
             *(
                 option
                 for name, value in rendered.variables().items()
@@ -229,6 +236,7 @@ def gateway(rendered: Rendered) -> Iterator[Gateway]:
         )
         containers.append(container)
         gateway.url = f"http://127.0.0.1:{_published(container, port)}"
+        gateway.ui = f"http://127.0.0.1:{_published(container, ui_port)}"
         gateway.container = container
         _wait_until_serving(gateway)
         yield gateway
@@ -641,3 +649,36 @@ def test_every_span_names_whoever_called(gateway: Gateway) -> None:
     assert _exported(gateway, _enduser("lou"))
     assert _exported(gateway, _enduser("open-webui"))
     assert _exported(gateway, _enduser("stranger"))
+
+
+def test_the_ui_serves_on_its_own_listener_and_writes_nothing(gateway: Gateway) -> None:
+    """The UI's listener serves the UI and its API; a write is refused, as the routes file is a
+    ConfigMap."""
+    assert httpx.get(f"{gateway.ui}/ui/", timeout=30).status_code == 200
+    runtime = httpx.get(f"{gateway.ui}/api/runtime", timeout=30).json()
+    assert runtime["ui"]["configStoreMode"] == "readOnly"
+
+    write = httpx.post(
+        f"{gateway.ui}/api/config/raw",
+        content="binds: []\n",
+        headers={"Content-Type": "application/yaml"},
+        timeout=30,
+    )
+    assert write.status_code == 403
+
+
+def test_the_ui_listener_serves_no_route_and_no_admin_endpoint(gateway: Gateway) -> None:
+    """Only the UI's paths: no tool server, and none of the admin interface's own endpoints."""
+    assert _initialize(replace(gateway, url=gateway.ui), "lares", _value("gateway-key")) == 404
+    assert httpx.post(f"{gateway.ui}/quitquitquit", timeout=30).status_code == 404
+    assert httpx.get(f"{gateway.ui}/config_dump", timeout=30).status_code == 404
+    assert httpx.get(f"{gateway.url}/ui/", timeout=30).status_code == 404
+
+
+def test_the_ui_shows_each_key_as_its_variable(gateway: Gateway) -> None:
+    """The routes file as written: every key a variable, the value of none."""
+    for path in ("/api/config", "/api/config/raw", "/api/config/effective"):
+        shown = httpx.get(f"{gateway.ui}{path}", timeout=30).text
+        assert "${GATEWAY_KEY}" in shown, path
+        # Every sealed key's value in this test opens the same way.
+        assert _value("") not in shown, path

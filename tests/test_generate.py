@@ -373,7 +373,9 @@ def test_a_clients_key_is_its_own_whatever_its_secret_calls_it(tmp_path: Path) -
         "{secret: open-webui-keys, key: kim-gateway-key}",
     )
     values = yaml.safe_load(_render(tmp_path, use_cases=text).routes_values)
-    sources = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in values["extraEnv"]}
+    sources = {
+        e["name"]: e["valueFrom"]["secretKeyRef"] for e in values["extraEnv"] if "valueFrom" in e
+    }
 
     assert sources["KIM_GATEWAY_KEY"] == {"name": "hermes-credentials", "key": "kim-gateway-key"}
     assert sources["OPEN_WEBUI_GATEWAY_KEY"] == {
@@ -409,7 +411,7 @@ def test_every_key_the_routes_name_is_a_variable_or_file_the_values_provide(
     """The routes file holds no key: each one is a variable from a sealed key, or a mounted file."""
     rendered = _render(tmp_path)
     values = yaml.safe_load(rendered.routes_values)
-    variables = {entry["name"] for entry in values["extraEnv"]}
+    variables = {entry["name"] for entry in values["extraEnv"] if "valueFrom" in entry}
     credentials = [mount for mount in values["extraVolumeMounts"] if mount["name"] != "routes"]
     files = {
         f"{mount['mountPath']}/{key}"
@@ -423,6 +425,18 @@ def test_every_key_the_routes_name_is_a_variable_or_file_the_values_provide(
     # sampling ratio every service of the platform sets for itself.
     assert named == variables | {"AUTHENTIK_URL", "TRACING_SAMPLING_RATIO"}
     assert read == files
+
+
+def test_without_a_ui_port_the_ui_stays_off_the_routes_file(tmp_path: Path) -> None:
+    """The UI then serves on the pod's localhost alone, read-only all the same."""
+    text = USE_CASES.read_text(encoding="utf-8").replace("  ui_port: 4000\n", "")
+    rendered = _render(tmp_path, use_cases=text)
+    routes = yaml.safe_load(rendered.routes)
+    values = yaml.safe_load(rendered.routes_values)
+
+    assert "gateways" not in routes
+    assert "ui" not in routes
+    assert {"name": "UI_READ_ONLY", "value": "true"} in values["extraEnv"]
 
 
 def _open_webui_env(tmp_path: Path, persons: str | None = None) -> list[dict[str, Any]]:

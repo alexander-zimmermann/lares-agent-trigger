@@ -11,6 +11,7 @@ gateway:
   url: http://agentgateway.agents.svc.cluster.local:8080
   otlp_endpoint: http://alloy-alloy-receiver.alloy.svc.cluster.local:4318
   key_env: GATEWAY_KEY
+  ui_port: 4000
 
 tool_servers:
   - name: lares

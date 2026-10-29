@@ -245,3 +245,8 @@ binds:
                     backendTLS: {}
                     http:
                       requestTimeout: 60s
+gateways:
+  ui:
+    port: 4000
+ui:
+  gateways: ui

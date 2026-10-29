@@ -353,12 +353,15 @@ class Gateway(_Strict):
     `url` is where the harness reaches it, `otlp_endpoint` the OTLP/HTTP
     receiver it sends a span of every call to, and `key_env` the variable
     every profile holds its gateway key in: one key per profile, which opens
-    the routes of the servers the profile holds and no other.
+    the routes of the servers the profile holds and no other. `ui_port`, if
+    declared, is the port its read-only UI listens on beside the routes,
+    for an ingress in front; without it the UI stays on the pod's localhost.
     """
 
     url: str = Field(min_length=1)
     otlp_endpoint: str = Field(min_length=1)
     key_env: str = Field(min_length=1)
+    ui_port: int | None = Field(default=None, gt=0, lt=65536)
 
 
 class LedgerHook(_Strict):

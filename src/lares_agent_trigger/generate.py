@@ -103,6 +103,10 @@ _GATEWAY_ROUTES = "agentgateway-routes"
 # Where the gateway reads its routes, and each credential it attaches as a file.
 _GATEWAY_ROUTES_DIR = "/etc/agentgateway/routes"
 _GATEWAY_CREDENTIALS_DIR = "/etc/agentgateway/credentials"
+# The gateway's UI listener, named in the routes file; the UI is read-only, as the
+# routes file is a mounted ConfigMap and the chart sets the file store anyway.
+_GATEWAY_UI = "ui"
+_UI_READ_ONLY = "UI_READ_ONLY"
 
 # The headers the gateway names the caller in to a server in the cluster,
 # whose Services all end in this domain.
@@ -360,7 +364,7 @@ def render(declared: UseCaseFile, persons: PersonsFile, settings: str) -> Render
         f"{GENERATED_LINE}\n"
         "# An additional values file of the gateway's chart: the routes' keys as variables, and\n"
         "# the routes and every credential they attach, mounted whole so a renewed one\n"
-        "# reaches the gateway; a resealed key rolls it.\n"
+        "# reaches the gateway; a resealed key rolls it. The UI is read-only.\n"
         f"{_dump(_routes_values(routes, connectors, speech_route))}"
     )
     authentik_persons = (
@@ -795,10 +799,19 @@ def _gateway_config(
     A span names whoever called: the person or client behind the key, else
     the person a connector signed in; an expression without a value leaves
     the attribute out. A route's backend keeps no session: an upstream
-    session would keep the credential it started with past a renewal.
+    session would keep the credential it started with past a renewal. A
+    declared UI port is a listener of its own that serves the UI alone.
     """
     gateway = declared.gateway
     collector = urlsplit(gateway.otlp_endpoint)
+    ui: dict[str, Any] = (
+        {
+            "gateways": {_GATEWAY_UI: {"port": gateway.ui_port}},
+            "ui": {"gateways": _GATEWAY_UI},
+        }
+        if gateway.ui_port is not None
+        else {}
+    )
     return {
         "frontendPolicies": {
             "tracing": {
@@ -822,6 +835,7 @@ def _gateway_config(
                 ],
             }
         ],
+        **ui,
     }
 
 
@@ -977,7 +991,8 @@ def _routes_values(
     A profile's key comes from the harness's SealedSecret, where it is sealed
     once, a speech client's from its own. A variable is read at start, so a
     resealed key rolls the gateway through the reloader; a renewed credential
-    is a file the gateway watches.
+    is a file the gateway watches. The UI writes nothing: the routes file is
+    a ConfigMap.
     """
     keys = [
         *(key for route in routes for key in route.keys),
@@ -986,11 +1001,14 @@ def _routes_values(
     sources = {key.variable: key for key in keys}
     reloaded = dict.fromkeys([HARNESS_KEYS.name, *(key.secret for key in sources.values())])
     variables = [
-        {
-            "name": variable,
-            "valueFrom": {"secretKeyRef": {"name": key.secret, "key": key.sealed}},
-        }
-        for variable, key in sources.items()
+        *(
+            {
+                "name": variable,
+                "valueFrom": {"secretKeyRef": {"name": key.secret, "key": key.sealed}},
+            }
+            for variable, key in sources.items()
+        ),
+        {"name": _UI_READ_ONLY, "value": "true"},
     ]
     credentials = [
         *(route.server.credential for route in routes),
