@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 import pytest
 import respx
+from nats.js.errors import ServiceUnavailableError
 
 from lares_agent_trigger.consumer import EpisodeConsumer
 from lares_agent_trigger.metrics import Metrics
@@ -208,3 +210,24 @@ async def test_a_message_that_is_not_an_episode_event_is_dropped(
     assert await episode_consumer.run_once() == 1
     assert rows() == []
     assert sample(metrics, "agent_trigger_events_total", kind="unknown", outcome="invalid") == 1.0
+
+
+async def test_a_stream_that_is_not_answering_is_asked_again(
+    consumer: Consumer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    episode_consumer, _ = consumer
+
+    async def unavailable(**_: Any) -> list[Any]:
+        raise ServiceUnavailableError(
+            code=503, description="JetStream system temporarily unavailable"
+        )
+
+    monkeypatch.setattr(episode_consumer._subscription, "fetch", unavailable)
+    monkeypatch.setattr(episode_consumer._settings, "fetch_timeout_seconds", 0.01)
+    caplog.set_level(logging.WARNING, logger="lares_agent_trigger.consumer")
+
+    assert await episode_consumer.run_once() == 0
+
+    (record,) = caplog.records
+    assert record.exc_info is None
+    assert "JetStream system temporarily unavailable" in record.getMessage()
