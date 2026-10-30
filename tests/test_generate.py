@@ -283,7 +283,7 @@ def _routes(
     tmp_path: Path, persons: str | None = None, use_cases: str | None = None
 ) -> dict[str, dict[str, Any]]:
     config = _gateway(tmp_path, persons, use_cases)
-    return {route["name"]: route for route in config["binds"][0]["listeners"][0]["routes"]}
+    return {route["name"]: route for route in config["routes"]}
 
 
 def test_without_persons_the_default_profile_holds_the_chats_servers(tmp_path: Path) -> None:
