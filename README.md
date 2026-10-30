@@ -337,6 +337,8 @@ A job run now is written with `trigger = message` on its next cron turn to end; 
 
 Every refusal is `{"error": "<reason>"}`, so the chat can say why; `503` when the ledger or the harness did not answer.
 
+The harness has a door of its own beside this one: a person whose Discord rights are `admin` holds every slash command, `/cron run <job id>` and `/cron add` included. A job run that way spends none of its use case's daily runs and is written as a `schedule` run; a job created that way is nobody's declaration, and the reconcile leaves it alone unless it is named `lares:<something>`, which the next restart deletes. It is the owner's lever, like pausing a job.
+
 ## The event path
 
 ```
