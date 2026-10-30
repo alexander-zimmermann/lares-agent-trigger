@@ -2,7 +2,9 @@
 
 The consumer itself is a CRD in lares, not created here: the service binds to
 `agent-trigger` and fails loudly when it is absent, so a missing right or a
-misspelt name is a startup error rather than a silently empty queue.
+misspelt name is a startup error rather than a silently empty queue. The
+connection then lives as long as the pod: a server restart is reconnected
+through, not died of.
 
 One message at a time, acknowledged after the row is closed. Each message
 is handled inside a span that continues the trace its headers carry: the
@@ -14,13 +16,14 @@ delay; the CRD in lares carries that number.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
-import nats
 from nats.aio.client import Client as NatsClient
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
-from nats_bridge_core import tracing
+from nats.js.errors import ServiceUnavailableError
+from nats_bridge_core import connect, tracing
 
 from .config import Settings
 from .event_runs import EventRuns
@@ -46,8 +49,8 @@ class EpisodeConsumer:
         return self._nc is not None and self._nc.is_connected
 
     async def connect(self) -> None:
-        self._nc = await nats.connect(
-            servers=self._settings.nats_servers_list,
+        self._nc = await connect(
+            self._settings.nats_servers_list,
             name="lares-agent-trigger",
             **self._settings.nats_auth_kwargs(),
         )
@@ -70,9 +73,11 @@ class EpisodeConsumer:
     async def run_once(self) -> int:
         """Fetch at most one message, handle it, acknowledge it. Returns what it handled.
 
-        A fetch that times out is the normal quiet case and returns 0. A message
-        whose payload is not the engine's contract is acknowledged and counted:
-        redelivering it forever would only block the ones behind it.
+        A fetch that times out is the normal quiet case and returns 0, and so
+        is a stream that is not answering while its server restarts, asked
+        again at the same pace. A message whose payload is not the engine's
+        contract is acknowledged and counted: redelivering it forever would
+        only block the ones behind it.
         """
         if self._subscription is None:
             raise RuntimeError("consumer not bound — call connect() first")
@@ -81,6 +86,14 @@ class EpisodeConsumer:
                 batch=1, timeout=self._settings.fetch_timeout_seconds
             )
         except NatsTimeoutError:
+            return 0
+        except ServiceUnavailableError as exc:
+            logger.warning(
+                "the stream is not answering, asking again in %.0f s: %s",
+                self._settings.fetch_timeout_seconds,
+                exc,
+            )
+            await asyncio.sleep(self._settings.fetch_timeout_seconds)
             return 0
 
         for message in messages:
