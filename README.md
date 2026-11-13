@@ -23,7 +23,7 @@ One entry of `use-cases.yaml`, mounted from [lares](https://github.com/alexander
 ```yaml
 use_cases:
   - name: explain-episode
-    sentence: Erklärt eine neu aufgetretene oder eskalierte Episode von selbst.
+    sentence: Explains a new or escalated episode on its own.
     trigger:
       kind: event
       source: episode
