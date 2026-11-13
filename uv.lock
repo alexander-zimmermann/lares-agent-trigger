@@ -489,7 +489,7 @@ requires-dist = [
     { name = "aiosmtpd", marker = "extra == 'dev'", specifier = ">=1.4.6" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.4.1" },
-    { name = "nats-bridge-core", git = "https://github.com/alexander-zimmermann/nats-bridge-core?rev=v0.10.0" },
+    { name = "nats-bridge-core", git = "https://github.com/alexander-zimmermann/nats-bridge-core?rev=v0.11.0" },
     { name = "nats-py", extras = ["nkeys"], specifier = ">=2.16.0" },
     { name = "opentelemetry-instrumentation-httpx", specifier = ">=0.66b2" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.7.0" },
@@ -590,8 +590,8 @@ wheels = [
 
 [[package]]
 name = "nats-bridge-core"
-version = "0.10.0"
-source = { git = "https://github.com/alexander-zimmermann/nats-bridge-core?rev=v0.10.0#3544b27eb7429d17a8c65a0dfd52bfa6d66839ff" }
+version = "0.11.0"
+source = { git = "https://github.com/alexander-zimmermann/nats-bridge-core?rev=v0.11.0#f3abaac21eaf5ebd5950ac3f8528ebae9bd1a395" }
 dependencies = [
     { name = "jsonschema" },
     { name = "nats-py", extra = ["nkeys"] },
