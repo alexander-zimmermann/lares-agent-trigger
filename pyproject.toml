@@ -23,7 +23,7 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "psycopg[binary,pool]>=3.3.9",
     "pydantic>=2.14.3",
-    "pydantic-settings>=2.16.2",
+    "pydantic-settings>=2.16.3",
     "pyjwt[crypto]>=2.15.1",
     "pyyaml>=6.0.3",
     "starlette>=1.10.0",
@@ -41,7 +41,7 @@ dev = [
     "ruff>=0.17.5",
     "mypy>=2.4.1",
     "pre-commit>=4.7.0",
-    "types-PyYAML>=6.0.12.20261111",
+    "types-PyYAML>=6.0.12.20261113",
 ]
 
 [project.scripts]
