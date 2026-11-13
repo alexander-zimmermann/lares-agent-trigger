@@ -47,7 +47,11 @@ async def test_the_reconcile_brings_the_harness_in_line_with_the_rendering(
     assert propose["schedule"]["expr"] == "0 3 * * 0"
     assert probe["schedule"]["expr"] == "0 8 * * 1"
     assert probe["skills"] == ["lares-restore-probe"]
-    assert probe["prompt"] == "Answer in English. Stay within 30 tool calls and 10 minutes."
+    assert probe["prompt"] == (
+        "Answer in English. Stay within 30 tool calls and 10 minutes. "
+        "Never answer [SILENT]: the trigger reads every answer, and a run with "
+        "nothing to report answers as its skill says."
+    )
     assert probe["deliver"] == "local"
     # The script job: no prompt and no skill, the harness runs the script and delivers.
     assert digest["schedule"]["expr"] == "0 18 * * 0"
@@ -165,7 +169,11 @@ _PROPOSE = {
     "name": "lares:propose-faults",
     "schedule": "0 3 * * 0",
     "skills": ["lares-propose"],
-    "prompt": "Answer in English. Stay within 80 tool calls and 20 minutes.",
+    "prompt": (
+        "Answer in English. Stay within 80 tool calls and 20 minutes. "
+        "Never answer [SILENT]: the trigger reads every answer, and a run with "
+        "nothing to report answers as its skill says."
+    ),
     "deliver": "local",
 }
 
@@ -183,14 +191,22 @@ def test_the_job_set_is_one_job_per_enabled_schedule_use_case_and_script(tmp_pat
             name="lares:propose-faults",
             schedule="0 3 * * 0",
             skills=("lares-propose",),
-            prompt="Answer in English. Stay within 80 tool calls and 20 minutes.",
+            prompt=(
+                "Answer in English. Stay within 80 tool calls and 20 minutes. "
+                "Never answer [SILENT]: the trigger reads every answer, and a run with "
+                "nothing to report answers as its skill says."
+            ),
             deliver="local",
         ),
         CronJob(
             name="lares:restore-probe",
             schedule="0 8 * * 1",
             skills=("lares-restore-probe",),
-            prompt="Answer in English. Stay within 30 tool calls and 10 minutes.",
+            prompt=(
+                "Answer in English. Stay within 30 tool calls and 10 minutes. "
+                "Never answer [SILENT]: the trigger reads every answer, and a run with "
+                "nothing to report answers as its skill says."
+            ),
             deliver="local",
         ),
         CronJob(

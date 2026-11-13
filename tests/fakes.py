@@ -602,7 +602,11 @@ class FakeJobs:
         name: str,
         *,
         schedule: str = "0 3 * * 0",
-        prompt: str = "Answer in English. Stay within 80 tool calls and 20 minutes.",
+        prompt: str = (
+            "Answer in English. Stay within 80 tool calls and 20 minutes. "
+            "Never answer [SILENT]: the trigger reads every answer, and a run with "
+            "nothing to report answers as its skill says."
+        ),
         skills: tuple[str, ...] = ("lares-propose",),
         deliver: str = "local",
         enabled: bool = True,

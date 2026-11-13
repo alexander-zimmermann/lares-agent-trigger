@@ -85,9 +85,12 @@ def _agent_job(use_case: UseCase) -> CronJob:
         name=job_name(use_case.name),
         schedule=trigger.cron,
         skills=(use_case.skill,),
+        # Hermes tells every cron run to answer [SILENT] when idle; the skill's empty answer wins.
         prompt=(
             f"Answer in {language_name(use_case.language)}. "
-            f"Stay within {budget.tool_calls} tool calls and {budget.minutes} minutes."
+            f"Stay within {budget.tool_calls} tool calls and {budget.minutes} minutes. "
+            "Never answer [SILENT]: the trigger reads every answer, and a run with "
+            "nothing to report answers as its skill says."
         ),
         # The trigger delivers; the harness keeps the output to itself.
         deliver="local",
