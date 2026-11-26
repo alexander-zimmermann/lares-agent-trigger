@@ -16,7 +16,7 @@ classifiers = [
     "Topic :: Home Automation",
 ]
 dependencies = [
-    "httpx>=0.28.1",
+    "httpx>=0.29.0",
     "nats-bridge-core @ git+https://github.com/alexander-zimmermann/nats-bridge-core@v0.11.0",
     "nats-py[nkeys]>=2.17.0",
     "opentelemetry-instrumentation-httpx>=0.66b2",
