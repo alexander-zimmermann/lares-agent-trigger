@@ -2,7 +2,8 @@
 
 The use case here declares what lares declares — `stored`, `discord`, `mail`
 — so one episode event ends in a row, a message on the home channel and a
-mail through the relay. A target that refuses fails the run, keeps the text
+mail through the relay. A target that says to try later gets the stored text
+once more; one that refuses for good, or twice, fails the run, keeps the text
 and raises AgentRunFailed; the model is never asked again for it.
 """
 
@@ -394,11 +395,10 @@ async def test_a_split_post_that_breaks_halfway_keeps_the_message_it_posted(
     text = _long("Der Sensor im Büro ist seit Montag tot.", 4, 400, "Offen: " + "o" * 400)
     fake_hermes(respx_mock, states=[{**COMPLETED, "output": text}])
     fake_alertmanager(respx_mock)
+    posted = httpx.Response(200, json={"id": "1548300000000000001", "channel_id": DISCORD_CHANNEL})
+    # A second try would find Discord back: the answers after the 502 would take both parts.
     discord.mock(
-        side_effect=[
-            httpx.Response(200, json={"id": "1548300000000000001", "channel_id": DISCORD_CHANNEL}),
-            httpx.Response(502, text="upstream connect error"),
-        ]
+        side_effect=[posted, httpx.Response(502, text="upstream connect error"), posted, posted]
     )
     episode_consumer, _ = consumer
 
@@ -408,9 +408,72 @@ async def test_a_split_post_that_breaks_halfway_keeps_the_message_it_posted(
     (row,) = rows()
     assert row["status"] == "failed"
     assert "502" in row["error"]
+    # A 502 asks to try later, but a second try would post the first message twice.
+    assert discord.call_count == 2
     # The first message is on the channel, so the row names it.
     assert row["output_ref"][0] == f"discord:{DISCORD_CHANNEL}/1548300000000000001"
     assert row["output_ref"][1].startswith("mail:")
+
+
+async def test_discord_out_for_a_moment_takes_the_message_on_the_second_try(
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    relay: Relay,
+    discord: Any,
+    respx_mock: respx.MockRouter,
+) -> None:
+    fake_hermes(respx_mock)
+    alerted = fake_alertmanager(respx_mock)
+    discord.mock(
+        side_effect=[
+            httpx.Response(503, text="upstream connect error"),
+            httpx.Response(200, json={"id": "1548300000000000002", "channel_id": DISCORD_CHANNEL}),
+        ]
+    )
+    episode_consumer, _ = consumer
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    (row,) = rows()
+    assert row["status"] == "completed", row["error"]
+    assert discord.call_count == 2
+    # The mail went out the first time and is not sent again.
+    assert len(relay.messages) == 1
+    assert row["output_ref"][0].startswith("mail:")
+    assert row["output_ref"][1] == f"discord:{DISCORD_CHANNEL}/1548300000000000002"
+    assert not alerted.called
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [httpx.Response(429, json={"retry_after": 1.5}), httpx.ConnectError("connection refused")],
+)
+async def test_discord_asking_to_wait_or_not_answering_is_tried_once_more(
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    discord: Any,
+    respx_mock: respx.MockRouter,
+    answer: httpx.Response | httpx.ConnectError,
+) -> None:
+    fake_hermes(respx_mock)
+    fake_alertmanager(respx_mock)
+    discord.mock(
+        side_effect=[
+            answer,
+            httpx.Response(200, json={"id": "1548300000000000003", "channel_id": DISCORD_CHANNEL}),
+        ]
+    )
+    episode_consumer, _ = consumer
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    (row,) = rows()
+    assert row["status"] == "completed", row["error"]
+    assert discord.call_count == 2
 
 
 async def test_an_answer_without_a_message_id_is_a_refusal(
@@ -476,10 +539,121 @@ async def test_a_relay_that_refuses_fails_the_run(
     assert row["status"] == "failed"
     assert "mail" in row["error"]
     assert "Message rejected by upstream" in row["error"]
+    # A 5xx is final: the mail is not offered a second time.
+    assert relay.refused == ["554 5.7.1 Message rejected by upstream"]
     assert [ref.split(":")[0] for ref in row["output_ref"]] == ["discord"]
     (alert,) = json.loads(alerted.calls.last.request.content)
     assert alert["annotations"]["summary"] == (
         "explain-episode could not deliver episode 15510:appeared to mail"
+    )
+
+
+async def test_a_relay_that_asks_to_try_later_takes_the_mail_on_the_second_try(
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    relay: Relay,
+    discord: Any,
+    respx_mock: respx.MockRouter,
+) -> None:
+    started = fake_hermes(respx_mock)
+    alerted = fake_alertmanager(respx_mock)
+    # The relay passes its upstream's "try later" on.
+    relay.refuse_next = ["452 4.3.1 Insufficient system storage"]
+    episode_consumer, metrics = consumer
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    (row,) = rows()
+    assert row["status"] == "completed", row["error"]
+    assert relay.refused == ["452 4.3.1 Insufficient system storage"]
+    mail = _mail(relay)
+    # Discord took the text the first time and is not called again.
+    assert discord.call_count == 1
+    assert [ref.split(":")[0] for ref in row["output_ref"]] == ["discord", "mail"]
+    assert row["output_ref"][1] == f"mail:{mail['Message-ID'].strip('<>')}"
+    # The stored text went again; the model was not asked again.
+    assert started.call_count == 1
+    assert not alerted.called
+    for outcome in ("failed", "sent"):
+        assert (
+            sample(
+                metrics,
+                "agent_trigger_deliveries_total",
+                use_case="explain-episode",
+                target="mail",
+                outcome=outcome,
+            )
+            == 1.0
+        )
+
+
+async def test_a_relay_that_took_the_mail_and_then_fumbles_quit_has_delivered_it(
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    relay: Relay,
+    respx_mock: respx.MockRouter,
+) -> None:
+    fake_hermes(respx_mock)
+    alerted = fake_alertmanager(respx_mock)
+    relay.quit_reply = "421 4.3.0 Shutting down"
+    episode_consumer, _ = consumer
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    (row,) = rows()
+    # DATA was answered 250: the mail is taken, whatever QUIT says after it.
+    assert row["status"] == "completed", row["error"]
+    mail = _mail(relay)
+    assert row["output_ref"][1] == f"mail:{mail['Message-ID'].strip('<>')}"
+    assert not alerted.called
+
+
+async def test_a_relay_still_refusing_on_the_second_try_fails_the_run_once(
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    relay: Relay,
+    discord: Any,
+    respx_mock: respx.MockRouter,
+) -> None:
+    fake_hermes(respx_mock)
+    alerted = fake_alertmanager(respx_mock)
+    relay.refuse_next = ["452 4.3.1 Insufficient system storage", "421 4.7.0 Try again later"]
+    episode_consumer, metrics = consumer
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    (row,) = rows()
+    assert row["status"] == "failed"
+    assert relay.messages == []
+    assert len(relay.refused) == 2
+    # Both answers, the last one first.
+    assert row["error"].startswith("mail: ")
+    assert row["error"].index("Try again later") < row["error"].index("Insufficient system")
+    assert discord.call_count == 1
+    assert [ref.split(":")[0] for ref in row["output_ref"]] == ["discord"]
+    # One alert for the run, after the second refusal, not one per try.
+    assert alerted.call_count == 1
+    (alert,) = json.loads(alerted.calls.last.request.content)
+    assert alert["annotations"]["summary"] == (
+        "explain-episode could not deliver episode 15510:appeared to mail"
+    )
+    assert "Try again later" in alert["annotations"]["description"]
+    assert "Insufficient system storage" in alert["annotations"]["description"]
+    assert (
+        sample(
+            metrics,
+            "agent_trigger_deliveries_total",
+            use_case="explain-episode",
+            target="mail",
+            outcome="failed",
+        )
+        == 2.0
     )
 
 

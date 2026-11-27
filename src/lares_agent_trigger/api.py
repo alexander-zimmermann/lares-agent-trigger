@@ -251,6 +251,8 @@ class TriggerApi:
                 run_id=run_id, use_case=use_case.name, occasion=None, text=output, usage=Usage()
             ),
             what=f"run {run_id}",
+            # The caller holds the request open; it hears a refusal now and can feed it again.
+            retry=False,
         )
         self._metrics.runs.labels(use_case=use_case.name, status=status).inc()
         answer: dict[str, Any] = {

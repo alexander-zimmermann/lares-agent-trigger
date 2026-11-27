@@ -371,7 +371,7 @@ episode.ended ────┘             │
        UPDATE agent_runs: status, output_ref = one entry per delivery
 ```
 
-The message is acknowledged once the row is closed, which is why the consumer's `ackWait` has to outlast two of the longest declared budgets plus the retry delay.
+The message is acknowledged once the row is closed, which is why the consumer's `ackWait` has to outlast two of the longest declared budgets plus two retry delays: one before the run's second attempt, one before a delivery's second try.
 
 ## Delivery
 
@@ -467,7 +467,9 @@ diff: |
 
 A run has at most three blocks for one target. The blocks are cut out of the text the other targets carry: a wiki page, a message or a mail never shows them. One with nothing for a target this time says so in a single block, `none: <why>`; a text without any block for a declared target fails the run, so a model that forgot the format is never silence. A pull request's branch is `agent/<use case>/run-<run id>-<n>`, its commit message the title, and its body, like an issue's or a comment's, ends with the use case, the run and the model, so it leads back to its row. A write that breaks halfway keeps what it opened in the row: a pull request whose labels failed is still named there.
 
-A target that refuses does not stop the next one from trying. The run then closes `failed` with each refusal's raw text as the error, keeps its text and the refs of everything that was created — the first message of a split post included — and raises `AgentRunFailed` like any failed run. The model is not asked again: running it twice would not change what Discord or the relay make of the answer. A run the harness reports completed but without any output fails before delivery, as `unknown`.
+A target that refuses does not stop the next one from trying. A refusal that says to try later (a 4xx from the relay, a 429 or 5xx, no answer at all) and created nothing is logged as a warning, and the target gets the same text once more after `RETRY_DELAY_SECONDS`. The targets that took it are not called again. A split post that broke after its first message, or a pull request whose branch already stands, is not tried twice, because a second try would post or branch again. Neither is a hand-fed run: whoever fed it holds the request open and hears the refusal at once.
+
+A target that still refuses, or refused for good, closes the run `failed`. The row's error holds each refusal's raw text, a second refusal with the first one beside it; the row keeps its text and the refs of everything that was created, the first message of a split post included; and `AgentRunFailed` goes out like for any failed run. The model is not asked again: running it twice would not change what Discord or the relay make of the answer. A run the harness reports completed but without any output fails before delivery, as `unknown`.
 
 The targets the enabled event and schedule use cases declare are built, and one of them without its settings, or one this trigger does not deliver (`alert`), stops the pod at startup. Every other target is built when its settings are there, for a hand-fed run of a dormant use case.
 
@@ -492,7 +494,7 @@ Nothing fails silently. A failed run is retried once when the failure fixes itse
 | `invalid_config`     | no    | A model, provider or request the harness does not accept.                |
 | `unknown`            | no    | Nothing above matched; the raw error in the alert says what it was.      |
 | `trigger_restarted`  | no    | A redelivered event found its row still open: this pod died mid-run.     |
-| `delivery_failed`    | no    | The run completed, but a declared target refused its output.             |
+| `delivery_failed`    | no    | The run completed, but a target refused its output for good or twice.    |
 
 The class is read off the harness's error text (`failures.py`). The retry starts after `RETRY_DELAY_SECONDS` on the same row, with `attempt = 2`.
 
@@ -630,7 +632,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `HERMES_API_KEY_FILE`                       | —                                                  | Its API key.                                       |
 | `HERMES_POLL_SECONDS`                       | `5.0`                                              | How often a running run is asked about.            |
 | `HERMES_REQUEST_TIMEOUT_SECONDS`            | `30.0`                                             | Per-request timeout against the API server.        |
-| `RETRY_DELAY_SECONDS`                       | `300.0`                                            | How long a transient failure waits for its retry.  |
+| `RETRY_DELAY_SECONDS`                       | `300.0`                                            | How long a transient failure waits for its retry, a run's or a delivery's. |
 | `RECONCILE_RETRY_SECONDS`                   | `60.0`                                             | How long an unanswered reconcile waits for the next try. |
 | `ALERTMANAGER_URL`                          | `http://prometheus-alertmanager.prometheus.svc.cluster.local:9093` | Where `AgentRunFailed` is posted. |
 | `ALERTMANAGER_REQUEST_TIMEOUT_SECONDS`      | `10.0`                                             | Per-request timeout against Alertmanager.          |
@@ -672,7 +674,7 @@ Environment variables; every secret can arrive as a mounted file instead of a li
 | `agent_trigger_events_total`            | `kind`, `outcome`  | Events read, and whether the filter wanted them.             |
 | `agent_trigger_runs_total`              | `use_case`, `status` | Runs started, by the status their row closed with.         |
 | `agent_trigger_failures_total`          | `use_case`, `class`  | Failed attempts, by failure class — a retry that went through still shows here. |
-| `agent_trigger_deliveries_total`        | `use_case`, `target`, `outcome` | Outputs carried to a target, `sent` or `failed`. |
+| `agent_trigger_deliveries_total`        | `use_case`, `target`, `outcome` | Outputs carried to a target, `sent` or `failed` — a target's second try counts on its own. |
 | `agent_trigger_alerts_total`            | `outcome`          | `AgentRunFailed` posts, `sent` or `failed`.                  |
 | `agent_trigger_capped_total`            | `use_case`         | Events refused because the day's budget was spent.           |
 | `agent_trigger_duplicate_events_total`  | `use_case`         | Events whose subject the ledger already held.                |

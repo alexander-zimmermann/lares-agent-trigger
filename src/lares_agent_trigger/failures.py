@@ -125,6 +125,11 @@ def classify_exception(exc: Exception) -> FailureClass:
     return "unknown"
 
 
+def transient_status(status_code: int) -> bool:
+    """True for an HTTP answer that may change on its own: 429, or the server's own 5xx."""
+    return status_code == 429 or status_code >= 500
+
+
 def describe(exc: Exception) -> str:
     """The exception's own text; some transport errors carry none."""
     return str(exc) or type(exc).__name__

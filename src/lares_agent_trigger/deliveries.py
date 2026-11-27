@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .config import Settings
 from .events import Occasion
-from .failures import describe
+from .failures import describe, transient_status
 from .faults import first_clause, load_fault_sentences
 from .github import GitHubApp, GitHubError
 from .ledger import OutputState, Usage
@@ -66,12 +66,17 @@ class DeliveryError(RuntimeError):
     """A target refused the output; the message carries its raw answer.
 
     `refs` names what the target had created before it refused — the first
-    message of a split post — so the row records it all the same.
+    message of a split post — so the row records it all the same. `transient`
+    is the target's word that the same text may go through later: a relay's
+    4xx, a server's 5xx or 429, no answer at all.
     """
 
-    def __init__(self, message: str, *, refs: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, message: str, *, refs: tuple[str, ...] = (), transient: bool = False
+    ) -> None:
         super().__init__(message)
         self.refs = refs
+        self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -106,10 +111,15 @@ class Delivery(Protocol):
 
 @dataclass(frozen=True)
 class Refusal:
-    """One target that did not take the output, and its raw answer."""
+    """One target that did not take the output, and its raw answer.
+
+    `transient` when the target said to try later and created nothing, so the
+    same text can go to it once more without anything showing up twice.
+    """
 
     target: OutputTarget
     reason: str
+    transient: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,6 +143,21 @@ class Delivered:
     def error(self) -> str:
         """Each refusal's raw answer under its target, for the row's error."""
         return "\n".join(f"{refusal.target}: {refusal.reason}" for refusal in self.refusals)
+
+    @property
+    def transient_targets(self) -> tuple[OutputTarget, ...]:
+        """The targets that refused for now and may take the same text once more."""
+        return tuple(refusal.target for refusal in self.refusals if refusal.transient)
+
+    def retried(self, second: Delivered) -> Delivered:
+        """This pass with its transient targets' second try added; a second refusal names both."""
+        first = {refusal.target: refusal.reason for refusal in self.refusals if refusal.transient}
+        kept = tuple(refusal for refusal in self.refusals if not refusal.transient)
+        refused_again = tuple(
+            Refusal(refusal.target, f"{refusal.reason} (the first try: {first[refusal.target]})")
+            for refusal in second.refusals
+        )
+        return Delivered(self.refs + second.refs, self.states + second.states, kept + refused_again)
 
 
 class StoredDelivery:
@@ -188,7 +213,7 @@ class DiscordDelivery:
             try:
                 message_id = await self._post(message)
             except DeliveryError as exc:
-                raise DeliveryError(str(exc), refs=tuple(refs)) from exc
+                raise DeliveryError(str(exc), refs=tuple(refs), transient=exc.transient) from exc
             refs.append(f"discord:{self._channel}/{message_id}")
         return tuple(refs)
 
@@ -200,9 +225,15 @@ class DiscordDelivery:
                 json={"content": content, "allowed_mentions": {"parse": []}},
             )
         except httpx.HTTPError as exc:
-            raise DeliveryError(f"Discord could not be reached: {describe(exc)}") from exc
+            raise DeliveryError(
+                f"Discord could not be reached: {describe(exc)}",
+                transient=isinstance(exc, httpx.TransportError),
+            ) from exc
         if response.status_code >= 400:
-            raise DeliveryError(f"Discord returned {response.status_code}: {response.text}")
+            raise DeliveryError(
+                f"Discord returned {response.status_code}: {response.text}",
+                transient=transient_status(response.status_code),
+            )
         try:
             return str(response.json()["id"])
         except (ValueError, KeyError, TypeError) as exc:
@@ -280,7 +311,8 @@ class MailDelivery:
         except (smtplib.SMTPException, OSError) as exc:
             raise DeliveryError(
                 f"the relay at {self._settings.smtp_host}:{self._settings.smtp_port}"
-                f" did not take the mail: {describe(exc)}"
+                f" did not take the mail: {describe(exc)}",
+                transient=_transient_smtp(exc),
             ) from exc
         return (f"mail:{str(message['Message-ID']).strip('<>')}",)
 
@@ -310,12 +342,31 @@ class MailDelivery:
 
     def _send(self, message: EmailMessage) -> None:
         # The relay speaks plaintext inside the cluster; no STARTTLS, no login.
-        with smtplib.SMTP(
+        smtp = smtplib.SMTP(
             self._settings.smtp_host,
             self._settings.smtp_port,
             timeout=self._settings.smtp_timeout_seconds,
-        ) as smtp:
+        )
+        try:
             smtp.send_message(message)
+        finally:
+            # Once DATA is answered the mail is taken or refused; QUIT's reply changes neither.
+            try:
+                smtp.quit()
+            except smtplib.SMTPException, OSError:
+                smtp.close()
+
+
+def _transient_smtp(exc: OSError) -> bool:
+    """True for a 4xx reply or a relay that could not be talked to; a 5xx is final."""
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return 400 <= exc.smtp_code < 500
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        return all(400 <= code < 500 for code, _ in exc.recipients.values())
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return True
+    # Every SMTPException is an OSError; what is left of them is final, a socket's error is not.
+    return not isinstance(exc, smtplib.SMTPException)
 
 
 def _as_mail(text: str) -> str:
@@ -503,9 +554,15 @@ class WikiPageDelivery:
                 "/graphql", json={"query": query, "variables": variables}
             )
         except httpx.HTTPError as exc:
-            raise DeliveryError(f"Wiki.js could not be reached: {describe(exc)}") from exc
+            raise DeliveryError(
+                f"Wiki.js could not be reached: {describe(exc)}",
+                transient=isinstance(exc, httpx.TransportError),
+            ) from exc
         if response.status_code >= 400:
-            raise DeliveryError(f"Wiki.js returned {response.status_code}: {response.text}")
+            raise DeliveryError(
+                f"Wiki.js returned {response.status_code}: {response.text}",
+                transient=transient_status(response.status_code),
+            )
         try:
             body = response.json()
         except ValueError as exc:
@@ -732,14 +789,14 @@ class GitHubPullRequestDelivery(_GitHubTarget[_PullRequestBlock]):
                 await self._prepare(number, block) for number, block in enumerate(blocks, start=1)
             ]
         except GitHubError as exc:
-            raise DeliveryError(str(exc)) from exc
+            raise DeliveryError(str(exc), transient=exc.transient) from exc
         refs: list[str] = []
         for number, pull in enumerate(ready, start=1):
             branch = f"agent/{output.use_case}/run-{output.run_id}-{number}"
             try:
                 await self._open(pull, branch, output, refs)
             except GitHubError as exc:
-                raise DeliveryError(str(exc), refs=tuple(refs)) from exc
+                raise DeliveryError(str(exc), refs=tuple(refs), transient=exc.transient) from exc
         return tuple(refs)
 
     async def _prepare(self, number: int, block: _PullRequestBlock) -> _ReadyPullRequest:
@@ -753,7 +810,7 @@ class GitHubPullRequestDelivery(_GitHubTarget[_PullRequestBlock]):
         try:
             current = await self._github.file(block.repository, block.path, head_sha)
         except GitHubError as exc:
-            raise DeliveryError(f"block {number}: {exc}") from exc
+            raise DeliveryError(f"block {number}: {exc}", transient=exc.transient) from exc
         original = current.content if current is not None else None
         blob_sha = current.sha if current is not None else None
         try:
@@ -785,29 +842,33 @@ class GitHubPullRequestDelivery(_GitHubTarget[_PullRequestBlock]):
         }
         if pull.blob_sha is not None:
             commit["sha"] = pull.blob_sha
-        await self._github.call(
-            "PUT", f"{repo}/contents/{quote(block.path)}", json=commit, expect={200, 201}
-        )
-        opened = await self._github.call(
-            "POST",
-            f"{repo}/pulls",
-            json={
-                "title": block.title,
-                "head": branch,
-                "base": pull.base,
-                "body": _signed(block.body, output),
-            },
-            expect={201},
-        )
-        created = opened.json()
-        # Opened is opened: a label that fails after this still leaves the row naming it.
-        refs.append(str(created["html_url"]))
-        await self._github.call(
-            "POST",
-            f"{repo}/issues/{created['number']}/labels",
-            json={"labels": list(pull.labels)},
-            expect={200},
-        )
+        try:
+            await self._github.call(
+                "PUT", f"{repo}/contents/{quote(block.path)}", json=commit, expect={200, 201}
+            )
+            opened = await self._github.call(
+                "POST",
+                f"{repo}/pulls",
+                json={
+                    "title": block.title,
+                    "head": branch,
+                    "base": pull.base,
+                    "body": _signed(block.body, output),
+                },
+                expect={201},
+            )
+            created = opened.json()
+            # Opened is opened: a label that fails after this still leaves the row naming it.
+            refs.append(str(created["html_url"]))
+            await self._github.call(
+                "POST",
+                f"{repo}/issues/{created['number']}/labels",
+                json={"labels": list(pull.labels)},
+                expect={200},
+            )
+        except GitHubError as exc:
+            # The branch stands now: a second try would find its name taken.
+            raise GitHubError(str(exc)) from exc
 
 
 class GitHubIssueDelivery(_GitHubTarget[_IssueBlock]):
@@ -835,7 +896,7 @@ class GitHubIssueDelivery(_GitHubTarget[_IssueBlock]):
                 )
                 refs.append(str(opened.json()["html_url"]))
         except GitHubError as exc:
-            raise DeliveryError(str(exc), refs=tuple(refs)) from exc
+            raise DeliveryError(str(exc), refs=tuple(refs), transient=exc.transient) from exc
         return tuple(refs)
 
 
@@ -868,7 +929,7 @@ class GitHubCommentDelivery(_GitHubTarget[_CommentBlock]):
                 )
                 refs.append(str(posted.json()["html_url"]))
         except GitHubError as exc:
-            raise DeliveryError(str(exc), refs=tuple(refs)) from exc
+            raise DeliveryError(str(exc), refs=tuple(refs), transient=exc.transient) from exc
         return tuple(refs)
 
 
@@ -908,7 +969,9 @@ class Deliveries:
                 created = await delivery.deliver(output)
                 refused = False
             except DeliveryError as exc:
-                logger.error(
+                transient = exc.transient and not exc.refs
+                logger.log(
+                    logging.WARNING if transient else logging.ERROR,
                     "%s run %d: %s refused the output: %s",
                     output.use_case,
                     output.run_id,
@@ -916,7 +979,7 @@ class Deliveries:
                     exc,
                 )
                 created = exc.refs
-                refusals.append(Refusal(target, str(exc)))
+                refusals.append(Refusal(target, str(exc), transient))
             except Exception as exc:
                 # A fault in a delivery is still a failed run with its alert, never
                 # a crash the redelivery would report as a restarted pod.

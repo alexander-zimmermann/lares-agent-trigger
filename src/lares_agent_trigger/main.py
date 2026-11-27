@@ -78,7 +78,13 @@ async def _amain() -> int:
     ledger = Ledger(settings)
     hermes = HermesClient(settings)
     alertmanager = Alertmanager(settings, metrics)
-    closer = Closer(ledger, deliveries, alertmanager, metrics)
+    closer = Closer(
+        ledger,
+        deliveries,
+        alertmanager,
+        metrics,
+        retry_delay_seconds=settings.retry_delay_seconds,
+    )
     pricing = Pricing(persons, metrics)
     turns = TurnRuns(
         use_cases,
