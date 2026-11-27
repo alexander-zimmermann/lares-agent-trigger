@@ -534,3 +534,26 @@ async def test_a_hand_fed_run_spends_none_of_the_days_runs(
     assert fed.json()["status"] == "completed"
     assert started.status_code == 202, started.text
     assert jobs.changes == [("RUN", job_id)]
+
+
+async def test_a_hand_fed_run_the_relay_turns_away_for_now_answers_at_once(
+    api: Api, rows: Rows, relay: Relay, discord: Any, respx_mock: respx.MockRouter
+) -> None:
+    """Whoever fed it waits for the answer, so a refusal comes back now, not after the delay."""
+    alerted = fake_alertmanager(respx_mock)
+    relay.refuse_next = ["452 4.3.1 Insufficient system storage"]
+    client, _ = api
+
+    response = await client.post(
+        RUNS, json={"use_case": "explain-episode", "output": EXPLANATION}, headers=KEY
+    )
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    assert answer["status"] == "failed"
+    assert "Insufficient system storage" in answer["error"]
+    assert relay.refused == ["452 4.3.1 Insufficient system storage"]
+    assert relay.messages == []
+    (row,) = rows()
+    assert row["status"] == "failed"
+    assert alerted.called

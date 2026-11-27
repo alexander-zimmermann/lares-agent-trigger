@@ -459,6 +459,37 @@ async def test_github_breaking_halfway_keeps_the_pull_request_it_opened(
     assert "GitHub answered 502 to POST /repos/alexander-zimmermann/lares/git/refs" in row["error"]
 
 
+async def test_github_out_after_the_branch_stands_is_not_tried_again(
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    github: FakeGitHub,
+    lares: FakeRepo,
+    respx_mock: respx.MockRouter,
+) -> None:
+    failed: list[httpx.Request] = []
+
+    def first_commit_fails(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "PUT" and "/contents/" in request.url.path and not failed:
+            failed.append(request)
+            return httpx.Response(502, json={"message": "Server Error"})
+        return None
+
+    github.interject = first_commit_fails
+
+    row, _ = await _fails(consumer, publish, rows, respx_mock, run_text(pull_request_block()))
+
+    # A second try would find the branch's name taken, so the 502 stands.
+    assert "GitHub answered 502 to PUT" in row["error"]
+    branches = [
+        call.request
+        for call in github.route.calls
+        if call.request.method == "POST" and call.request.url.path.endswith("/git/refs")
+    ]
+    assert len(branches) == 1
+    assert lares.pulls == {}
+
+
 ISSUE = """\
 The restore probe could not read the newest snapshot.
 
@@ -503,6 +534,44 @@ async def test_an_issue_block_becomes_an_issue_with_its_labels(
     # An issue has no state to follow.
     assert row["output_ref"] == [issue["html_url"]]
     assert row["output_state"] == [None]
+
+
+@pytest.mark.parametrize("targets", ["[stored, github_issue]"])
+@pytest.mark.parametrize("outage", ["token", "write"])
+async def test_github_out_for_a_moment_opens_the_issue_on_the_second_try(
+    consumer: Consumer,
+    publish: Publish,
+    rows: Rows,
+    github: FakeGitHub,
+    lares: FakeRepo,
+    respx_mock: respx.MockRouter,
+    outage: str,
+) -> None:
+    fake_hermes(respx_mock, states=[{**COMPLETED, "output": ISSUE}])
+    alerted = fake_alertmanager(respx_mock)
+    if outage == "token":
+        # The first request of the delivery is the App's token.
+        github.unavailable = 1
+    else:
+        failed: list[httpx.Request] = []
+
+        def first_issue_fails(request: httpx.Request) -> httpx.Response | None:
+            if request.method == "POST" and request.url.path.endswith("/issues") and not failed:
+                failed.append(request)
+                return httpx.Response(502, json={"message": "Server Error"})
+            return None
+
+        github.interject = first_issue_fails
+    episode_consumer, _ = consumer
+
+    await publish("appeared", 2)
+    await episode_consumer.run_once()
+
+    (row,) = rows()
+    assert row["status"] == "completed", row["error"]
+    (issue,) = lares.issues.values()
+    assert row["output_ref"] == [issue["html_url"]]
+    assert not alerted.called
 
 
 @pytest.mark.parametrize("targets", ["[stored, github_issue]"])

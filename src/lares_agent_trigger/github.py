@@ -22,7 +22,7 @@ import jwt
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from .config import Settings
-from .failures import describe
+from .failures import describe, transient_status
 
 # GitHub refuses a JWT that lives longer than ten minutes; a minute is taken
 # off the issue time for a clock running ahead of GitHub's.
@@ -35,7 +35,14 @@ _ANSWER_LIMIT = 500
 
 
 class GitHubError(RuntimeError):
-    """GitHub did not answer, or answered what the call did not expect."""
+    """GitHub did not answer, or answered what the call did not expect.
+
+    `transient` when the same call may go through later: no answer, a 429, a 5xx.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -108,11 +115,15 @@ class GitHubApp:
                 headers={"Authorization": f"Bearer {token}"},
             )
         except httpx.HTTPError as exc:
-            raise GitHubError(f"GitHub could not be reached: {describe(exc)}") from exc
+            raise GitHubError(
+                f"GitHub could not be reached: {describe(exc)}",
+                transient=isinstance(exc, httpx.TransportError),
+            ) from exc
         if response.status_code not in expect:
             raise GitHubError(
                 f"GitHub answered {response.status_code} to {method} {path}:"
-                f" {response.text[:_ANSWER_LIMIT]}"
+                f" {response.text[:_ANSWER_LIMIT]}",
+                transient=transient_status(response.status_code),
             )
         return response
 
@@ -156,11 +167,15 @@ class GitHubApp:
         try:
             response = await self._client.post(path, headers={"Authorization": f"Bearer {signed}"})
         except httpx.HTTPError as exc:
-            raise GitHubError(f"GitHub could not be reached for a token: {describe(exc)}") from exc
+            raise GitHubError(
+                f"GitHub could not be reached for a token: {describe(exc)}",
+                transient=isinstance(exc, httpx.TransportError),
+            ) from exc
         if response.status_code != httpx.codes.CREATED:
             raise GitHubError(
                 f"GitHub refused the App a token with {response.status_code}:"
-                f" {response.text[:_ANSWER_LIMIT]}"
+                f" {response.text[:_ANSWER_LIMIT]}",
+                transient=transient_status(response.status_code),
             )
         try:
             body = response.json()

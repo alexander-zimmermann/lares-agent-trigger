@@ -9,9 +9,10 @@ through, not died of.
 One message at a time, acknowledged after the row is closed. Each message
 is handled inside a span that continues the trace its headers carry: the
 engine's run that published the event. A run may take
-its whole budget twice, with the retry delay in between, so the consumer's
-ackWait must be longer than two of the longest budget declared plus that
-delay; the CRD in lares carries that number.
+its whole budget twice, with the retry delay in between, and its delivery
+may wait that delay once more, so the consumer's ackWait must be longer than
+two of the longest budget declared plus two delays; the CRD in lares carries
+that number.
 """
 
 from __future__ import annotations

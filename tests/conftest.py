@@ -28,7 +28,7 @@ import pytest
 import pytest_asyncio
 import respx
 from aiosmtpd.controller import Controller
-from aiosmtpd.smtp import SMTP, Envelope, Session
+from aiosmtpd.smtp import MISSING, SMTP, Envelope, Session
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from nats.js.api import AckPolicy, ConsumerConfig, StorageType
@@ -438,13 +438,18 @@ def execute(postgres: PostgresContainer) -> Iterator[Callable[..., None]]:
 class Relay:
     """The cluster's mail relay as the trigger meets it: plaintext SMTP, one accepted sender.
 
-    It keeps every message it took; `refuse` makes it answer the next DATA
-    with that reply instead, as a relay whose upstream turned a mail away.
+    It keeps every message it took; `refuse` makes it answer every DATA with
+    that reply instead, as a relay whose upstream turned a mail away, and
+    `refuse_next` answers the next DATAs one each before that. `refused` keeps
+    every reply it turned a mail away with; `quit_reply` replaces its 221 Bye.
     """
 
     def __init__(self) -> None:
         self.messages: list[Envelope] = []
+        self.refuse_next: list[str] = []
         self.refuse: str | None = None
+        self.refused: list[str] = []
+        self.quit_reply: str | None = None
 
     async def handle_MAIL(  # noqa: N802 — aiosmtpd's hook name
         self, _server: SMTP, _session: Session, envelope: Envelope, address: str, options: list[str]
@@ -458,10 +463,17 @@ class Relay:
     async def handle_DATA(  # noqa: N802 — aiosmtpd's hook name
         self, _server: SMTP, _session: Session, envelope: Envelope
     ) -> str:
-        if self.refuse is not None:
-            return self.refuse
+        reply = self.refuse_next.pop(0) if self.refuse_next else self.refuse
+        if reply is not None:
+            self.refused.append(reply)
+            return reply
         self.messages.append(envelope)
         return "250 OK"
+
+    async def handle_QUIT(  # noqa: N802 — aiosmtpd's hook name
+        self, _server: SMTP, _session: Session, _envelope: Envelope
+    ) -> Any:
+        return MISSING if self.quit_reply is None else self.quit_reply
 
 
 def _free_port() -> int:
@@ -487,7 +499,10 @@ def relay(relay_server: tuple[Relay, int]) -> Relay:
     """The relay, emptied for this test."""
     server, _ = relay_server
     server.messages.clear()
+    server.refuse_next.clear()
     server.refuse = None
+    server.refused.clear()
+    server.quit_reply = None
     return server
 
 
@@ -655,7 +670,13 @@ async def service(
     use_cases = load_use_cases(settings.use_cases_file)
     github = github_app(settings)
     deliveries = build_deliveries(settings, use_cases, metrics, github)
-    closer = Closer(ledger, deliveries, alertmanager, metrics)
+    closer = Closer(
+        ledger,
+        deliveries,
+        alertmanager,
+        metrics,
+        retry_delay_seconds=settings.retry_delay_seconds,
+    )
     declared = load_use_case_file(settings.use_cases_file)
     persons = load_persons_file(settings.persons_file, declared)
     pricing = Pricing(persons, metrics)

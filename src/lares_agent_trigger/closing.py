@@ -2,13 +2,18 @@
 
 An event run, a cron run the hook reported, a hand-fed run: once the text is in
 the row, it goes to every target the use case declares, and the row is closed
-with what they created. A target that refuses fails the run — the stored text
-stays, the refs of what was created stay, and AgentRunFailed goes out with
-each refusal's raw answer. Nobody asks the model again for it.
+with what they created. A target that says to try later and created nothing
+gets the same text once more after the retry delay; the targets that took it
+are not called again. A target that still refuses, or refused for good, fails
+the run — the stored text stays, the refs of what was created stay, and
+AgentRunFailed goes out with each refusal's raw answer. Nobody asks the model
+again for it.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 
 from .alerts import Alertmanager
@@ -16,6 +21,8 @@ from .deliveries import Delivered, Deliveries, RunOutput
 from .ledger import ClosedStatus, Ledger
 from .metrics import Metrics
 from .use_cases import OutputTarget, UseCase
+
+logger = logging.getLogger(__name__)
 
 # What a run that failed before its targets were tried delivered.
 _NOTHING = Delivered(refs=(), states=(), refusals=())
@@ -29,15 +36,28 @@ class Closer:
     deliveries: Deliveries
     alertmanager: Alertmanager
     metrics: Metrics
+    retry_delay_seconds: float
 
     async def deliver(
-        self, use_case: UseCase, output: RunOutput, *, what: str
+        self, use_case: UseCase, output: RunOutput, *, what: str, retry: bool = True
     ) -> tuple[ClosedStatus, Delivered]:
         """Carry the stored text to every declared target and close the row with what they made.
 
         `what` names the run in the alert's summary: `episode 15510:appeared`, `run 42`.
+        `retry` is off where someone waits for the answer: a hand-fed run.
         """
         delivered = await self.deliveries.deliver(use_case.output, output)
+        if retry and (targets := delivered.transient_targets):
+            # The refusal itself is logged where it happened; this says what comes of it.
+            logger.info(
+                "%s %s: trying %s once more in %.0f s",
+                use_case.name,
+                what,
+                ", ".join(targets),
+                self.retry_delay_seconds,
+            )
+            await asyncio.sleep(self.retry_delay_seconds)
+            delivered = delivered.retried(await self.deliveries.deliver(targets, output))
         if not delivered.refusals:
             await self.ledger.finish(
                 output.run_id,
